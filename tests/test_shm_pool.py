@@ -170,6 +170,17 @@ class TestClose:
         with pytest.raises(RuntimeError):
             pool.alloc(100)
 
+    def test_stats_after_close(self) -> None:
+        pool = ShmPool(size_classes_kb=[4, 16], slots_per_class=2, name_prefix="te")
+        pool.alloc(100)
+        pool.close()
+
+        stats = pool.stats
+        assert stats[4 * 1024]["total"] == 2
+        assert stats[4 * 1024]["in_use"] == 0
+        assert stats[16 * 1024]["total"] == 2
+        assert stats[16 * 1024]["in_use"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Stats

@@ -12,6 +12,7 @@ import msgpack
 import zmq
 import zmq.asyncio
 
+from nerva.backends.base import Backend, InferContext, ModelConfig
 from nerva.worker.ipc import (
     AckStatus,
     Descriptor,
@@ -78,6 +79,66 @@ class TestWorkerLoadModel:
                     proc.join(timeout=2)
                 socket.close(linger=0)
                 ctx.term()
+
+
+class _CaptureOptionsBackend(Backend):
+    """Backend used to verify LOAD_MODEL options are passed into ModelConfig."""
+
+    last_config: ModelConfig | None = None
+
+    async def load_model(self, config: ModelConfig) -> None:
+        type(self).last_config = config
+
+    async def unload_model(self) -> None:
+        pass
+
+    async def infer(
+        self,
+        inputs: dict[str, Any],
+        context: InferContext,
+        batch_meta: Any = None,
+    ) -> dict[str, Any]:
+        return {}
+
+    async def infer_stream(self, inputs: dict[str, Any], context: InferContext):  # type: ignore[override]
+        yield {}
+
+
+class TestWorkerLoadModelOptions:
+    async def test_options_are_forwarded_to_model_config(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from nerva.worker.process import _WorkerLoop
+
+        _CaptureOptionsBackend.last_config = None
+        sent: list[dict[str, Any]] = []
+
+        loop = _WorkerLoop(socket_path="/tmp/unused.sock")
+
+        async def _fake_send(msg: dict[str, Any]) -> None:
+            sent.append(msg)
+
+        monkeypatch.setattr("nerva.worker.process.import_path_to_class", lambda _p: object)
+        monkeypatch.setattr(
+            "nerva.worker.process.get_backend",
+            lambda _name: _CaptureOptionsBackend,
+        )
+        monkeypatch.setattr(loop, "_send", _fake_send)
+
+        await loop._handle_load_model({
+            "type": MessageType.LOAD_MODEL.value,
+            "model_name": "echo",
+            "model_class": "tests.helpers:EchoModel",
+            "backend": "capture",
+            "device": "cpu",
+            "options": {"max_batch": 32, "timeout_ms": 2000},
+        })
+
+        assert _CaptureOptionsBackend.last_config is not None
+        assert _CaptureOptionsBackend.last_config.backend_options == {
+            "max_batch": 32,
+            "timeout_ms": 2000,
+        }
+        assert sent[0]["type"] == MessageType.LOAD_MODEL_ACK.value
+        assert sent[0]["status"] == AckStatus.OK.value
 
 
 class TestWorkerInfer:

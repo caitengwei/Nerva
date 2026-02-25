@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import signal
 
+import pytest
+
 from nerva import model
 from nerva.backends.base import InferContext
 from nerva.worker.manager import WorkerManager, WorkerState
@@ -25,6 +27,35 @@ class TestWorkerManagerStartAndInfer:
 
             entry = mgr._workers["echo"]
             assert entry.state == WorkerState.READY
+        finally:
+            await mgr.shutdown_all()
+
+    async def test_start_worker_duplicate_name_raises(self) -> None:
+        mgr = WorkerManager()
+        try:
+            handle = model("echo", EchoModel)
+            await mgr.start_worker(handle)
+
+            with pytest.raises(ValueError, match="already exists"):
+                await mgr.start_worker(handle)
+
+            # Original worker remains healthy.
+            entry = mgr._workers["echo"]
+            assert entry.state == WorkerState.READY
+            ctx = InferContext(request_id="mgr-dup-001", deadline_ms=30000)
+            result = await entry.proxy.infer({"value": 7}, ctx)
+            assert result == {"echo": 7}
+        finally:
+            await mgr.shutdown_all()
+
+    async def test_start_worker_failure_rolls_back_registry(self) -> None:
+        mgr = WorkerManager()
+        try:
+            # Unknown backend should fail during load_model.
+            handle = model("bad", EchoModel, backend="does_not_exist")
+            with pytest.raises(RuntimeError, match="load_model failed"):
+                await mgr.start_worker(handle)
+            assert "bad" not in mgr._workers
         finally:
             await mgr.shutdown_all()
 

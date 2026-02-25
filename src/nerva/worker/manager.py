@@ -6,6 +6,7 @@ Spawns processes, connects proxies, loads models, handles restart and shutdown.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import multiprocessing
 import os
@@ -74,6 +75,12 @@ class WorkerManager:
             A connected and model-loaded WorkerProxy.
         """
         worker_id = handle.name
+        if worker_id in self._workers:
+            raise ValueError(
+                f"Worker '{worker_id}' already exists. "
+                "Use restart_worker() to recreate it."
+            )
+
         socket_path = os.path.join(self._tmpdir, f"nerva-{self._pid}-{worker_id}.sock")
 
         # Clean stale socket file if it exists.
@@ -92,24 +99,36 @@ class WorkerManager:
             socket_path=socket_path,
             state=WorkerState.STARTING,
         )
-        self._workers[worker_id] = entry
 
-        proc.start()
-        await proxy.start()
+        process_started = False
+        try:
+            proc.start()
+            process_started = True
+            await proxy.start()
 
-        entry.state = WorkerState.LOADING
-        model_class_path = class_to_import_path(handle.model_class)
-        await proxy.load_model(
-            model_name=handle.name,
-            model_class_path=model_class_path,
-            backend=handle.backend,
-            device=handle.device,
-            options=handle.options,
-        )
+            entry.state = WorkerState.LOADING
+            model_class_path = class_to_import_path(handle.model_class)
+            await proxy.load_model(
+                model_name=handle.name,
+                model_class_path=model_class_path,
+                backend=handle.backend,
+                device=handle.device,
+                options=handle.options,
+            )
 
-        entry.state = WorkerState.READY
-        logger.info("Worker '%s' is READY", worker_id)
-        return proxy
+            entry.state = WorkerState.READY
+            self._workers[worker_id] = entry
+            logger.info("Worker '%s' is READY", worker_id)
+            return proxy
+        except Exception:
+            logger.exception("Failed to start worker '%s'", worker_id)
+            if process_started:
+                with contextlib.suppress(Exception):
+                    await self._close_worker(entry)
+            else:
+                with contextlib.suppress(Exception):
+                    await proxy.close()
+            raise
 
     async def restart_worker(self, worker_id: str) -> WorkerProxy:
         """Restart a worker: close old process, start fresh, increment restart count.
@@ -135,6 +154,7 @@ class WorkerManager:
 
         # Close old worker.
         await self._close_worker(entry)
+        self._workers.pop(worker_id, None)
 
         # Start fresh.
         old_restart_count = entry.restart_count

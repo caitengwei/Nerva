@@ -103,6 +103,9 @@ class _WorkerLoop:
             model_class_path: str = msg["model_class"]
             backend_name: str = msg.get("backend", "pytorch")
             device: str = msg.get("device", "cpu")
+            options = msg.get("options", {})
+            if not isinstance(options, dict):
+                raise TypeError(f"LOAD_MODEL options must be a dict, got {type(options)}")
 
             model_class = import_path_to_class(model_class_path)
             backend_cls = get_backend(backend_name)
@@ -112,6 +115,7 @@ class _WorkerLoop:
                 model_name=model_name,
                 model_class=model_class,
                 device=device,
+                backend_options=options,
             )
             await backend.load_model(config)
             self._backend = backend

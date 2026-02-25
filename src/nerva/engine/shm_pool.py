@@ -209,9 +209,10 @@ class ShmPool:
         """Per-size-class statistics: ``{size_bytes: {total, in_use}}``."""
         result: dict[int, dict[str, int]] = {}
         for idx, class_bytes in enumerate(self._size_classes_bytes):
+            in_use = self._bitmaps[idx].in_use if idx < len(self._bitmaps) else 0
             result[class_bytes] = {
                 "total": self._slots_per_class,
-                "in_use": self._bitmaps[idx].in_use,
+                "in_use": in_use,
             }
         return result
 
