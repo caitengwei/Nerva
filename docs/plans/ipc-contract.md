@@ -43,7 +43,7 @@ Client            Master                     Worker
 - `model_name`, `backend`, `device`, `options`
 
 `INFER_SUBMIT`
-- `request_id`, `node_id`, `deadline_ms`, `descriptor`, `batch_meta`
+- `request_id`, `node_id`, `deadline_ms`, `descriptor`, `batch_meta` (optional, None before Phase 3)
 
 `INFER_ACK`
 - `request_id`, `node_id`, `status`, `out_descriptor?`, `error?`
@@ -71,18 +71,25 @@ Client            Master                     Worker
 ```text
 descriptor = {
   schema_version: u16,        # fixed: 1
-  request_id: u64,
+  request_id: str,            # unique request identifier (e.g. UUID)
   node_id: u32,
-  shm_id: str,                # POSIX shm name
+  # SHM path (None when inline)
+  shm_id: str | None,         # POSIX shm name; None for inline payload
   offset: u32,
   length: u32,
+  # Inline payload (None when using SHM)
+  inline_data: bytes | None,  # payload bytes when <= IPC_CONTROL_INLINE_MAX_BYTES
   dtype: str,                 # e.g. "float16", "int64", "bytes"
   shape: list[u32],           # bytes payload may use [length]
-  device: str,                # "cpu" / "cuda:0" ...
-  lifetime_token: u64,        # reclaim token
-  checksum: u32,              # optional, 0 = disabled
+  device: str,                # "cpu" / "cuda:0" ... (reserved, Phase 1 不使用)
+  lifetime_token: u64,        # reclaim token (reserved, Phase 1 不启用 TTL GC)
+  checksum: u32,              # optional, 0 = disabled (reserved, Phase 1 不启用)
 }
 ```
+
+Inline 优化规则：
+- 当 payload <= `IPC_CONTROL_INLINE_MAX_BYTES` (8KB) 时，`shm_id = None`，数据放入 `inline_data`
+- 当 payload > 8KB 时，`inline_data = None`，数据通过 SHM 传输
 
 兼容策略：
 - `schema_version` 不匹配时，返回 `INFER_ACK(status=INVALID_ARGUMENT)` 并拒绝执行
@@ -165,8 +172,7 @@ Master 重启（MVP）：
 
 `INFER_SUBMIT` 必填：
 - `deadline_ms`
-- `batch_meta.batch_size`
-- `batch_meta.pad_to_multiple`（可选）
+- `batch_meta`：Phase 3 之前为 `None`；Phase 3+ 必填 `batch_meta.batch_size`，`batch_meta.pad_to_multiple` 可选
 
 调度器必须在提交前执行：
 - deadline 准入检查
@@ -205,3 +211,12 @@ Master 重启（MVP）：
 - 控制通道 p99 延迟
 - shm 分配 p99 延迟
 - 回收吞吐（descriptors/s）
+
+---
+
+## Changelog
+
+| 日期 | 变更 |
+|---|---|
+| 2026-02-25 | 初始版本 |
+| 2026-02-25 | 修订：Descriptor schema 增加 inline_data 支持和 shm_id nullable；request_id 统一为 str；batch_meta 标注为 Phase 3 前 optional；补充 reserved 字段说明 |

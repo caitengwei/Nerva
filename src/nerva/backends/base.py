@@ -27,9 +27,12 @@ class ModelConfig:
     backend_options: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass
 class InferContext:
-    """Per-request context propagated through the inference chain."""
+    """Per-request context propagated through the inference chain.
+
+    Not frozen: ``cancelled`` is mutated at runtime by cancel propagation.
+    """
 
     request_id: str
     deadline_ms: int

@@ -102,14 +102,17 @@ Design Review #5 提出考虑 ZeroMQ 替代原始 UDS。对比：
 
 ```
 Master                          Worker 0
-  zmq.PAIR ◄──ipc:///tmp/nerva-worker-0.sock──► zmq.PAIR
+  zmq.PAIR ◄──ipc://{tmpdir}/nerva-{pid}-worker-0.sock──► zmq.PAIR
 
 Master                          Worker 1
-  zmq.PAIR ◄──ipc:///tmp/nerva-worker-1.sock──► zmq.PAIR
+  zmq.PAIR ◄──ipc://{tmpdir}/nerva-{pid}-worker-1.sock──► zmq.PAIR
 ```
 
 - Master 侧 bind，Worker 侧 connect
-- socket 路径：`/tmp/nerva-{worker_id}.sock`（可配置前缀）
+- socket 路径：`{tmpdir}/nerva-{master_pid}-{worker_id}.sock`
+  - `tmpdir`：使用 `tempfile.mkdtemp(prefix="nerva-")` 创建专属临时目录
+  - `master_pid`：Master 进程 PID，确保同机多实例互不冲突
+- **Stale 清理**：Master 启动时 bind 前调用 `os.unlink()` 清理同路径 stale socket；Master 退出时（正常或崩溃恢复）删除整个 tmpdir
 - 使用 `asyncio` + `zmq.asyncio.Context` 实现非阻塞收发
 
 ---
@@ -166,16 +169,16 @@ class ShmPool:
 
 ### 4.4 Descriptor
 
-沿用 ipc-contract.md Section 4 的 schema，增加 inline 字段：
+沿用 ipc-contract.md Section 4 的 schema（已同步更新 inline 支持）：
 
 ```python
 @dataclass
 class Descriptor:
     schema_version: int = 1
-    request_id: int
+    request_id: str                     # 与 InferContext.request_id 统一为 str
     node_id: int
     # SHM 路径（inline 时为 None）
-    shm_name: str | None = None
+    shm_id: str | None = None           # POSIX shm name（对齐 ipc-contract 命名）
     offset: int = 0
     length: int = 0
     # Inline 数据（SHM 时为 None）
@@ -183,7 +186,10 @@ class Descriptor:
     # 元信息
     dtype: str = "bytes"
     shape: list[int] = field(default_factory=list)
-    lifetime_token: int = 0
+    # Reserved（Phase 1 不启用）
+    device: str = "cpu"                 # reserved, Phase 1 不使用
+    lifetime_token: int = 0             # reserved, Phase 1 不启用 TTL GC
+    checksum: int = 0                   # reserved, Phase 1 不启用
 ```
 
 ---
@@ -222,9 +228,20 @@ WorkerMain
 
 ### 5.3 关键设计点
 
-**阻塞推理处理**：`Backend.infer()` 是 async 的，但底层 PyTorch 推理是 CPU/GPU bound。Phase 1 暂时允许阻塞 Worker 的 event loop（Worker 只服务一个 Model，不需要高并发）。后续可用 `run_in_executor` 优化。
+**推理执行模型**：`Backend.infer()` 是 async 的，但底层 PyTorch 推理是 CPU/GPU bound。Phase 1 使用 `loop.run_in_executor(None, ...)` 将推理放到线程池执行，**避免阻塞 Worker 的 asyncio event loop**。这样 Worker 在推理期间仍可响应 HEALTH_CHECK、CANCEL、SHUTDOWN 消息。
 
-**取消传播**：Worker 收到 CANCEL 后设置 `InferContext.cancelled = True`。当前 Backend 实现会在下次检查时抛出异常。对于长时间推理，需要 Backend 内部配合 checkpoint cancel（Phase 1 不强制，best-effort）。
+```python
+# Worker main loop 伪代码
+async def handle_infer(msg):
+    context = InferContext(...)
+    # 推理在线程池中执行，不阻塞 event loop
+    result = await loop.run_in_executor(
+        None, lambda: asyncio.run(backend.infer(inputs, context))
+    )
+    send_ack(result)
+```
+
+**取消传播**：Worker 收到 CANCEL 后设置 `InferContext.cancelled = True`（InferContext 为非 frozen dataclass，见 P1-5 修复）。Backend 实现应在推理过程中定期检查 `context.cancelled`。对于长时间推理，需要 Backend 内部配合 checkpoint cancel（Phase 1 不强制，best-effort）。
 
 ---
 
@@ -335,19 +352,21 @@ WorkerProxy.infer(inputs, context)
 ```python
 {
     "type": "INFER_SUBMIT",
-    "request_id": <uint64>,
+    "request_id": <str>,              # 统一为 str（与 InferContext.request_id 一致）
     "node_id": <uint32>,
     "deadline_ms": <uint64>,
     "descriptor": {
-        "shm_name": <str | None>,
+        "shm_id": <str | None>,       # 对齐 ipc-contract 命名
         "offset": <uint32>,
         "length": <uint32>,
         "inline_data": <bytes | None>,
         "dtype": <str>,
         "shape": [<uint32>, ...],
-        "lifetime_token": <uint64>,
+        "device": <str>,              # reserved
+        "lifetime_token": <uint64>,   # reserved
+        "checksum": <uint32>,         # reserved
     },
-    "batch_meta": None,  # Phase 1 不启用 batching
+    "batch_meta": None,  # Phase 1 不启用 batching（Phase 3 前为 None）
 }
 ```
 
@@ -356,10 +375,10 @@ WorkerProxy.infer(inputs, context)
 ```python
 {
     "type": "INFER_ACK",
-    "request_id": <uint64>,
+    "request_id": <str>,
     "node_id": <uint32>,
     "status": "OK" | "INTERNAL" | "DEADLINE_EXCEEDED" | ...,
-    "out_descriptor": { ... } | None,
+    "out_descriptor": { ... } | None,  # output 数据的 descriptor（见 Section 9.2）
     "error": <str | None>,
 }
 ```
@@ -388,10 +407,27 @@ WorkerProxy.infer(inputs, context)
 }
 ```
 
+### SHM_ALLOC_REQUEST / SHM_ALLOC_RESPONSE（Output > 8KB 场景）
+
+```python
+# Worker → Master: 请求分配 output slot
+{"type": "SHM_ALLOC_REQUEST", "request_id": <str>, "size": <uint32>}
+
+# Master → Worker: 返回分配结果
+{
+    "type": "SHM_ALLOC_RESPONSE",
+    "request_id": <str>,
+    "status": "OK" | "RESOURCE_EXHAUSTED",
+    "shm_id": <str | None>,
+    "offset": <uint32>,
+    "slot_size": <uint32>,
+}
+```
+
 ### CANCEL / HEALTH_CHECK / HEALTH_STATUS / SHUTDOWN
 
 ```python
-{"type": "CANCEL", "request_id": <uint64>, "reason": <str>}
+{"type": "CANCEL", "request_id": <str>, "reason": <str>}
 {"type": "HEALTH_CHECK", "worker_id": <str>}
 {"type": "HEALTH_STATUS", "worker_id": <str>, "ok": <bool>, "detail": <str>}
 {"type": "SHUTDOWN"}
@@ -401,23 +437,54 @@ WorkerProxy.infer(inputs, context)
 
 ## 9. SHM 生命周期与回收
 
+### 9.1 Input 数据路径
+
 遵循 ipc-contract.md Section 6 的状态机，Phase 1 实现简化版：
 
 ```
-alloc → ALLOCATED
-write → WRITTEN
+Master alloc → ALLOCATED
+Master write → WRITTEN
 send INFER_SUBMIT → SUBMITTED
-worker reads → CONSUMED (worker 侧状态，master 不感知)
+Worker reads → CONSUMED (worker 侧状态，master 不感知)
 recv INFER_ACK → ACKED
-free → RECLAIMED
+Master free → RECLAIMED
 ```
 
-**回收规则：**
+**Input 回收规则：**
 - 正常路径：收到 INFER_ACK 后立即 free input descriptor
 - 超时路径：`IPC_SUBMIT_TIMEOUT_MS` (5s) 后仍无 ACK → EXPIRED → free
 - Worker 崩溃路径：WorkerManager 检测到崩溃 → 批量 free 所有该 Worker 的 in-flight descriptors
 
-**Phase 1 简化：** 不实现 lifetime_token + TTL GC。依赖 submit timeout 和崩溃检测来回收。
+### 9.2 Output 数据路径
+
+Output 与 Input 使用同一个 ShmPool（Master 管理），但所有权转移方向相反：
+
+```
+Worker 需要写 output:
+  ├─ <= 8KB → inline: 直接在 INFER_ACK 中嵌入 out_descriptor.inline_data
+  └─ > 8KB  → SHM:
+       Worker 发送 SHM_ALLOC_REQUEST → Master
+       Master alloc slot → 发送 SHM_ALLOC_RESPONSE(slot info)
+       Worker write output to slot
+       Worker 发送 INFER_ACK(out_descriptor with shm_id)
+       Master read output from slot → free slot
+```
+
+**Phase 1 简化**：Phase 1 的 toy model output 通常很小（< 8KB），**优先走 inline 路径**。
+对于 > 8KB output 的场景，Phase 1 采用简化方案：
+- Worker 进程启动时映射 Master 的 ShmPool（只读变为读写）
+- Worker 侧通过控制消息向 Master 请求 alloc（`SHM_ALLOC_REQUEST` / `SHM_ALLOC_RESPONSE`）
+- alloc 权仍在 Master（单点管理，无需跨进程锁）
+- Master 收到 INFER_ACK 后读取 output，然后 free output slot
+
+**Output 回收规则：**
+- 正常路径：Master 读取 output 后立即 free
+- 超时路径：与 input 相同，submit timeout 后 Master free 所有相关 slot
+- Worker 崩溃路径：同 input，批量 free
+
+### 9.3 简化说明
+
+**Phase 1 不实现 lifetime_token + TTL GC。** 依赖 submit timeout 和崩溃检测来回收。
 
 ---
 
@@ -449,7 +516,11 @@ tests/
 
 ## 11. 与 Phase 0 的关系
 
-Phase 0 的 Model / Backend / Registry 代码**不做修改**。Phase 1 在其上层新增：
+Phase 0 代码**仅做一处最小修改**：
+
+- `InferContext` 去掉 `frozen=True`（改为普通 `@dataclass`）。理由：`cancelled` 字段是运行时可变状态，需要在收到 CANCEL 消息后被 Worker 修改。这一变更不影响现有 Phase 0 测试（没有测试依赖 InferContext 的 frozen 特性）。
+
+其余 Model / Backend / Registry 代码不做修改。Phase 1 在其上层新增：
 
 ```
 Phase 0:  user code → Backend.infer() → Model.infer()  (in-process)
@@ -494,9 +565,15 @@ dependencies = [
 | Worker 启动 + LOAD_MODEL | spawn worker → send LOAD_MODEL → verify ACK |
 | Worker 推理 | load model → send INFER_SUBMIT → verify ACK + output |
 | Worker 健康检查 | send HEALTH_CHECK → verify HEALTH_STATUS |
+| Worker 推理期间健康检查 | 推理执行中发送 HEALTH_CHECK → verify 仍能响应（验证 run_in_executor） |
 | Worker 崩溃恢复 | kill worker → verify Manager 重启 → verify 推理恢复 |
 | Worker 优雅关闭 | send SHUTDOWN → verify process exit |
 | SHM 回收 | submit → kill worker → verify SHM slot 回收 |
+| ACK 丢失超时回收 | submit → 模拟 Worker 不回复 → verify submit_timeout 后 SHM 回收 |
+| schema_version 不匹配 | 发送 schema_version=99 的消息 → verify INVALID_ARGUMENT 拒绝 |
+| Cancel 与 deadline 优先级 | 同时触发 cancel 和 deadline → verify 返回先生效的状态码 |
+| Cancel 执行中请求 | 推理执行中发送 CANCEL → verify context.cancelled 被设置 |
+| Output > 8KB via SHM | 推理返回大 output → verify SHM_ALLOC_REQUEST/RESPONSE + output slot 回收 |
 
 ### 性能测试
 
@@ -521,3 +598,4 @@ dependencies = [
 | 日期 | 变更 |
 |---|---|
 | 2026-02-25 | 初始版本 |
+| 2026-02-25 | 修订：根据 Codex review 修复 7 个问题 — P0-1: 补充 output SHM 数据路径和生命周期；P0-2: Worker 推理改用 run_in_executor 避免阻塞 event loop；P0-3: Descriptor schema 对齐 ipc-contract（shm_name→shm_id，补充 reserved 字段）；P0-4: request_id 统一为 str；P1-5: InferContext 去掉 frozen（允许 cancel 修改）；P1-6: socket 路径加入 PID 隔离 + tmpdir + stale 清理；P1-7: 测试矩阵补充 ACK 丢失/schema 版本/cancel 优先级等场景 |
