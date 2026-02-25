@@ -38,11 +38,12 @@ docs/spikes/                # spike 报告
 ## Key Commands
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"   # uv installed at ~/.local/bin
-uv run pytest tests/ -v                # run tests
-uv run ruff check src/ tests/          # lint
-uv run mypy                            # type check
+uv run pytest tests/ -v       # run tests
+uv run ruff check src/ tests/ # lint
+uv run mypy                   # type check
 ```
+
+**Note:** Ensure `uv` is in your PATH (`export PATH="$HOME/.local/bin:$PATH"` if installed via official script).
 
 ## Architecture
 
