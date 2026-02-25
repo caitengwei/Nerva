@@ -7,6 +7,8 @@ import nerva.backends.pytorch as _pytorch_backend  # noqa: F401
 from nerva.backends.base import Backend, BatchMeta, InferContext, ModelConfig
 from nerva.backends.registry import get_backend, list_backends, register_backend
 from nerva.core.model import Model, ModelHandle, model
+from nerva.worker.manager import WorkerManager
+from nerva.worker.proxy import WorkerProxy
 
 __all__ = [
     "Backend",
@@ -15,6 +17,8 @@ __all__ = [
     "Model",
     "ModelConfig",
     "ModelHandle",
+    "WorkerManager",
+    "WorkerProxy",
     "get_backend",
     "list_backends",
     "model",
