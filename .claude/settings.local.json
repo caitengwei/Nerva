@@ -2,7 +2,19 @@
   "permissions": {
     "allow": [
       "Bash(find:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(uv sync:*)",
+      "Bash(curl -LsSf https://astral.sh/uv/install.sh | sh 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv sync --extra dev 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run pytest tests/ -v 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run ruff check src/ tests/ 2>&1)",
+      "Bash(export:*)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run python /Users/twcai/workspace/twcai/Nerva/spikes/s1_ipc_benchmark.py 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run python /Users/twcai/workspace/twcai/Nerva/spikes/s2_trace_prototype.py 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run python /Users/twcai/workspace/twcai/Nerva/spikes/s4_async_batcher_benchmark.py 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run ruff check src/ tests/ && uv run mypy 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run ruff check src/ tests/ && uv run mypy && uv run pytest tests/ -v 2>&1)",
+      "Bash(git config:*)"
     ]
   }
 }
