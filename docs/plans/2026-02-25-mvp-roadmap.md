@@ -158,7 +158,24 @@ tests/test_pytorch_backend.py      # 8 tests
 - Worker 崩溃后 Master 能检测并重启
 - SHM 分配/回收无泄漏
 
-**状态：** ⬜ 设计完成，待实现
+**验证结果：** ruff 0 errors, mypy 0 issues, 89 tests passed (16s)
+
+**状态：** ✅ 已完成 (2026-02-26)
+
+**产出文件：**
+```
+src/nerva/worker/process.py        # Worker 进程 main loop
+src/nerva/worker/proxy.py          # WorkerProxy 异步 RPC 封装
+src/nerva/worker/manager.py        # WorkerManager 生命周期管理
+src/nerva/worker/ipc.py            # IPC 消息编解码
+src/nerva/engine/shm_pool.py       # Shared Memory Pool
+tests/test_worker_process.py       # Worker 进程测试
+tests/test_worker_proxy.py         # WorkerProxy 测试
+tests/test_worker_manager.py       # WorkerManager 测试
+tests/test_ipc.py                  # IPC 消息测试
+tests/test_shm_pool.py             # SHM pool 测试
+tests/test_phase1_e2e.py           # 端到端集成测试
+```
 
 ---
 
@@ -166,16 +183,41 @@ tests/test_pytorch_backend.py      # 8 tests
 
 **目标：** 验证多模型串联 / 并联执行。
 
+**设计文档：** [`2026-02-26-phase2-design.md`](./2026-02-26-phase2-design.md)
+
 **范围：**
-- Graph IR 数据结构（`core/graph.py`）
-- Proxy 对象 + `trace()` transform（`core/proxy.py`）
-- 显式 DAG 构建 API（`core/graph.py`，兜底路径）
+- Graph IR 数据结构（`core/graph.py`）— Edge 含 field_path 和 dst_input_key
+- Proxy 对象 + `__getitem__` 路径追踪 + `trace()` 函数追踪（`core/proxy.py`）
 - `nerva.cond()` / `nerva.parallel()` 控制流原语（`core/primitives.py`）
-- DAG Executor 拓扑排序执行（`engine/executor.py`）
+- 事件驱动 DAG Executor（`engine/executor.py`）— in-degree table + done_queue
+- ModelHandle 双态行为（trace 模式 / 运行时模式）
+- Dict 输入映射支持多模型融合场景
 
-**验证标准：** 3 个 toy model 串联成 Pipeline，trace 和显式 DAG 两种方式均生成正确图，Executor 按拓扑序通过 WorkerProxy 执行并返回结果。
+**关键设计决策：**
+- Proxy.__getitem__ 记录 field_path tuple，执行时逐层取值
+- trace 上下文使用 contextvars（并发安全）
+- parallel 输出映射通过初始 field_path=(str(i),) 与 __getitem__ 统一
+- Executor 为每个节点生成唯一 request_id，避免 WorkerProxy 冲突
+- InferableProxy Protocol 解耦 Executor 与 WorkerProxy
 
-**状态：** ⬜ 待设计
+**验证结果：** ruff 0 errors, mypy 0 issues, 140 tests passed (21s)
+
+**状态：** ✅ 已完成 (2026-02-26)
+
+**产出文件：**
+```
+src/nerva/core/graph.py            # Edge, Node, Graph IR
+src/nerva/core/proxy.py            # Proxy, TraceContext, trace()
+src/nerva/core/primitives.py       # cond(), parallel()
+src/nerva/core/model.py            # ModelHandle.__call__ 双态（修改）
+src/nerva/engine/executor.py       # Executor, resolve_field_path
+src/nerva/__init__.py              # 新增导出（修改）
+tests/test_graph.py                # 10 tests
+tests/test_proxy.py                # 15 tests
+tests/test_primitives.py           # 5 tests
+tests/test_executor.py             # 13 tests (mock)
+tests/test_phase2_e2e.py           # 5 tests (real Worker)
+```
 
 ---
 
@@ -259,8 +301,7 @@ W4 (spikes) ──────────→ W5 (interface contracts)
                                     ✅                                     ✅
 
 Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 ──→ Phase 5
-  ✅         设计完成      待设计      待设计      待设计      待设计
-             待实现
+  ✅           ✅           ✅        待设计      待设计      待设计
 ```
 
 ---
@@ -276,6 +317,7 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 
 | [`mvp-defaults.md`](./mvp-defaults.md) | MVP 默认参数表 |
 | [`mvp-benchmark-plan.md`](./mvp-benchmark-plan.md) | 性能基准测试计划 |
 | [`2026-02-25-phase1-design.md`](./2026-02-25-phase1-design.md) | Phase 1 详细设计 |
+| [`2026-02-26-phase2-design.md`](./2026-02-26-phase2-design.md) | Phase 2 详细设计 |
 | [`docs/spikes/s1-*.md`](../spikes/s1-ipc-benchmark-report.md) | S1 IPC 延迟报告 |
 | [`docs/spikes/s2-*.md`](../spikes/s2-trace-prototype-report.md) | S2 Trace 原型报告 |
 | [`docs/spikes/s4-*.md`](../spikes/s4-async-batcher-report.md) | S4 Batching 报告 |
@@ -288,3 +330,4 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 
 |---|---|
 | 2026-02-25 | 初始版本 |
 | 2026-02-25 | 更新全部前置工作和 Phase 0 为已完成；补充关键决策、产出文件、spike 结论；更新 Phase 1-5 加入设计决策；新增文档索引 |
+| 2026-02-26 | Phase 1 和 Phase 2 标记为已完成；补充产出文件清单和关键设计决策；新增 Phase 2 设计文档链接 |

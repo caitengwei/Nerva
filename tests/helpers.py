@@ -49,3 +49,26 @@ class BigOutputModel(Model):
     async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
         size = int(inputs.get("size", 10000))
         return {"blob": "x" * size}
+
+
+class UpperModel(Model):
+    """Uppercases inputs["value"] and returns {"features": uppercased}."""
+
+    def load(self) -> None:
+        pass
+
+    async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        val = str(inputs.get("value", ""))
+        return {"features": val.upper()}
+
+
+class ConcatModel(Model):
+    """Concatenates inputs["a"] and inputs["b"] into {"result": a+b}."""
+
+    def load(self) -> None:
+        pass
+
+    async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        a = str(inputs.get("a", ""))
+        b = str(inputs.get("b", ""))
+        return {"result": a + b}

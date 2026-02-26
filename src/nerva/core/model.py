@@ -77,8 +77,24 @@ class ModelHandle:
         During tracing: records a node in the graph (via Proxy).
         During execution: dispatches to the Backend.
         """
-        # This will be overridden by the trace/execution runtime.
-        # Standalone call for Phase 0: direct in-process execution.
+        # Lazy import to avoid circular dependency (model → proxy → graph).
+        from nerva.core.proxy import Proxy, _extract_proxy_edges, get_trace_context
+
+        ctx = get_trace_context()
+        if ctx is not None:
+            # Trace mode: record Node + Edges, return Proxy.
+            from nerva.core.graph import Node
+
+            node_id = ctx.next_id(self.name)
+            node = Node(id=node_id, model_name=self.name, node_type="call")
+            ctx.graph.add_node(node)
+
+            for edge in _extract_proxy_edges(inputs, node_id):
+                ctx.graph.add_edge(edge)
+
+            return Proxy(source_node_id=node_id, name=f"{self.name}_out")
+
+        # Not in a trace context — standalone call is not supported.
         raise RuntimeError(
             f"ModelHandle '{self.name}' called outside of a pipeline context. "
             "Use a Pipeline or call backend.infer() directly."
