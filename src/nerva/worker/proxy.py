@@ -84,19 +84,7 @@ class WorkerProxy:
                 await self._recv_task
             self._recv_task = None
 
-        # Fail any pending futures.
-        for fut in self._pending.values():
-            if not fut.done():
-                fut.set_exception(RuntimeError("WorkerProxy closed"))
-        self._pending.clear()
-
-        if self._load_model_future is not None and not self._load_model_future.done():
-            self._load_model_future.set_exception(RuntimeError("WorkerProxy closed"))
-            self._load_model_future = None
-
-        if self._health_future is not None and not self._health_future.done():
-            self._health_future.set_exception(RuntimeError("WorkerProxy closed"))
-            self._health_future = None
+        self._fail_outstanding("WorkerProxy closed")
 
         if self._socket is not None:
             self._socket.close(linger=0)
@@ -118,27 +106,28 @@ class WorkerProxy:
         options: dict[str, Any] | None = None,
     ) -> None:
         """Send LOAD_MODEL, wait for ACK. Raise RuntimeError on failure."""
-        loop = asyncio.get_running_loop()
-        self._load_model_future = loop.create_future()
+        if self._load_model_future is not None and not self._load_model_future.done():
+            raise RuntimeError("load_model already in progress")
 
-        await self._send({
-            "type": MessageType.LOAD_MODEL.value,
-            "model_name": model_name,
-            "model_class": model_class_path,
-            "backend": backend,
-            "device": device,
-            "options": options or {},
-        })
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._load_model_future = fut
 
         try:
-            ack = await asyncio.wait_for(
-                self._load_model_future, timeout=self._submit_timeout * 6
-            )
+            await self._send({
+                "type": MessageType.LOAD_MODEL.value,
+                "model_name": model_name,
+                "model_class": model_class_path,
+                "backend": backend,
+                "device": device,
+                "options": options or {},
+            })
+            ack = await asyncio.wait_for(fut, timeout=self._submit_timeout * 6)
         except TimeoutError:
-            self._load_model_future = None
             raise RuntimeError(f"Timeout waiting for LOAD_MODEL_ACK for '{model_name}'") from None
-
-        self._load_model_future = None
+        finally:
+            if self._load_model_future is fut:
+                self._load_model_future = None
 
         status = ack.get("status", "")
         if status != AckStatus.OK.value:
@@ -177,6 +166,8 @@ class WorkerProxy:
             )
 
         loop = asyncio.get_running_loop()
+        if request_id in self._pending:
+            raise RuntimeError(f"Duplicate in-flight request_id '{request_id}'")
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[request_id] = fut
 
@@ -220,18 +211,21 @@ class WorkerProxy:
 
     async def health_check(self, timeout: float = 3.0) -> bool:
         """Send HEALTH_CHECK, return True if healthy."""
-        loop = asyncio.get_running_loop()
-        self._health_future = loop.create_future()
+        if self._health_future is not None and not self._health_future.done():
+            raise RuntimeError("health_check already in progress")
 
-        await self._send({"type": MessageType.HEALTH_CHECK.value})
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._health_future = fut
 
         try:
-            status = await asyncio.wait_for(self._health_future, timeout=timeout)
+            await self._send({"type": MessageType.HEALTH_CHECK.value})
+            status = await asyncio.wait_for(fut, timeout=timeout)
         except TimeoutError:
-            self._health_future = None
             return False
-
-        self._health_future = None
+        finally:
+            if self._health_future is fut:
+                self._health_future = None
         return bool(status.get("healthy", False))
 
     async def shutdown(self) -> None:
@@ -259,6 +253,7 @@ class WorkerProxy:
                 raw: bytes = await self._socket.recv()
             except zmq.ZMQError:
                 logger.debug("ZMQ recv error in recv_loop, exiting")
+                self._fail_outstanding("Worker disconnected")
                 break
             except asyncio.CancelledError:
                 break
@@ -289,3 +284,18 @@ class WorkerProxy:
 
             else:
                 logger.warning("Unexpected message type in recv_loop: %s", msg_type)
+
+    def _fail_outstanding(self, reason: str) -> None:
+        """Fail all pending RPC futures with a uniform runtime error."""
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(RuntimeError(reason))
+        self._pending.clear()
+
+        if self._load_model_future is not None and not self._load_model_future.done():
+            self._load_model_future.set_exception(RuntimeError(reason))
+        self._load_model_future = None
+
+        if self._health_future is not None and not self._health_future.done():
+            self._health_future.set_exception(RuntimeError(reason))
+        self._health_future = None

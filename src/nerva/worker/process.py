@@ -66,7 +66,11 @@ class _WorkerLoop:
                 except TimeoutError:
                     continue
 
-                msg = decode_message(raw)
+                try:
+                    msg = decode_message(raw)
+                except Exception:
+                    logger.exception("Failed to decode incoming message")
+                    continue
                 msg_type = msg.get("type", "")
 
                 if msg_type == MessageType.LOAD_MODEL.value:
@@ -152,8 +156,8 @@ class _WorkerLoop:
                 deadline_ms=msg.get("deadline_ms", 30000),
             )
 
-            # Run inference in a thread to avoid blocking the event loop.
-            output = await asyncio.to_thread(self._run_infer_sync, inputs, context)
+            # Run inference directly in the worker event loop.
+            output = await self._backend.infer(inputs, context)
 
             # Serialize output as inline data.
             output_bytes = msgpack.packb(output, use_bin_type=True)
@@ -177,11 +181,6 @@ class _WorkerLoop:
                 "status": AckStatus.INTERNAL.value,
                 "error": str(exc),
             })
-
-    def _run_infer_sync(self, inputs: dict[str, Any], context: InferContext) -> dict[str, Any]:
-        """Blocking wrapper — runs ``backend.infer()`` via ``asyncio.run()``."""
-        assert self._backend is not None
-        return asyncio.run(self._backend.infer(inputs, context))
 
     def _read_inputs(self, descriptor: Descriptor) -> dict[str, Any]:
         """Read inputs from either inline data or SHM."""

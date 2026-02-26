@@ -81,6 +81,7 @@ class WorkerManager:
                 "Use restart_worker() to recreate it."
             )
 
+        os.makedirs(self._tmpdir, exist_ok=True)
         socket_path = os.path.join(self._tmpdir, f"nerva-{self._pid}-{worker_id}.sock")
 
         # Clean stale socket file if it exists.
@@ -89,7 +90,7 @@ class WorkerManager:
 
         proxy = WorkerProxy(socket_path)
         proc = multiprocessing.Process(
-            target=worker_entry, args=(socket_path,), daemon=True
+            target=worker_entry, args=(socket_path,), daemon=False
         )
 
         entry = _WorkerEntry(

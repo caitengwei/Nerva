@@ -257,6 +257,41 @@ class TestWorkerHealthCheck:
                 ctx.term()
 
 
+class TestWorkerDecodeRobustness:
+    """Malformed control messages should not crash worker loop."""
+
+    async def test_malformed_message_does_not_crash_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sock_path = _make_socket_path(tmp_dir)
+            ctx = zmq.asyncio.Context()
+            socket = ctx.socket(zmq.PAIR)
+            socket.bind(f"ipc://{sock_path}")
+
+            proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
+            proc.start()
+            try:
+                msg = await _recv_msg(socket)
+                assert msg["type"] == MessageType.WORKER_READY.value
+
+                # 0xC1 is a reserved byte in MessagePack and always invalid.
+                await socket.send(b"\xc1")
+                await asyncio.sleep(0.1)
+                assert proc.is_alive()
+
+                await _send_msg(socket, {"type": MessageType.HEALTH_CHECK.value})
+                status = await _recv_msg(socket)
+                assert status["type"] == MessageType.HEALTH_STATUS.value
+                assert status["healthy"] is False
+            finally:
+                await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=2)
+                socket.close(linger=0)
+                ctx.term()
+
+
 class TestWorkerShutdown:
     """Send SHUTDOWN, verify process exits cleanly."""
 

@@ -27,6 +27,7 @@ class TestWorkerManagerStartAndInfer:
 
             entry = mgr._workers["echo"]
             assert entry.state == WorkerState.READY
+            assert entry.process.daemon is False
         finally:
             await mgr.shutdown_all()
 
@@ -71,6 +72,24 @@ class TestWorkerManagerShutdownIdempotent:
         await mgr.shutdown_all()
         # Second call should be a no-op, no exception.
         await mgr.shutdown_all()
+
+
+class TestWorkerManagerReuseAfterShutdown:
+    """A manager instance should remain reusable after shutdown_all()."""
+
+    async def test_start_worker_after_shutdown_all(self) -> None:
+        mgr = WorkerManager()
+        try:
+            handle = model("echo", EchoModel)
+            await mgr.start_worker(handle)
+            await mgr.shutdown_all()
+
+            proxy = await mgr.start_worker(handle)
+            ctx = InferContext(request_id="mgr-reuse-001", deadline_ms=30000)
+            result = await proxy.infer({"value": 123}, ctx)
+            assert result == {"echo": 123}
+        finally:
+            await mgr.shutdown_all()
 
 
 class TestWorkerManagerHealthCheck:
