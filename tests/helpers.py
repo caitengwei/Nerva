@@ -38,3 +38,14 @@ class CrashModel(Model):
 
     async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("CrashModel always fails")
+
+
+class BigOutputModel(Model):
+    """Returns payload with configurable size; default > inline threshold."""
+
+    def load(self) -> None:
+        pass
+
+    async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        size = int(inputs.get("size", 10000))
+        return {"blob": "x" * size}

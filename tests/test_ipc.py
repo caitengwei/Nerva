@@ -27,6 +27,8 @@ class TestMessageType:
             "LOAD_MODEL_ACK",
             "INFER_SUBMIT",
             "INFER_ACK",
+            "SHM_ALLOC_REQUEST",
+            "SHM_ALLOC_RESPONSE",
             "CANCEL",
             "HEALTH_CHECK",
             "HEALTH_STATUS",

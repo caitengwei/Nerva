@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from nerva.backends.base import InferContext
+from nerva.engine.shm_pool import ShmPool
 from nerva.worker.process import worker_entry
 from nerva.worker.proxy import WorkerProxy
 
@@ -157,3 +158,55 @@ class TestWorkerProxyConcurrencyGuards:
 
         with pytest.raises(RuntimeError, match="health_check already in progress"):
             await proxy.health_check()
+
+
+class TestWorkerProxyDeadlineAndCancel:
+    async def test_infer_deadline_exceeded(self) -> None:
+        async with _started_proxy() as proxy:
+            await proxy.load_model(
+                model_name="slow",
+                model_class_path="tests.helpers:SlowModel",
+                backend="pytorch",
+                device="cpu",
+            )
+
+            ctx = InferContext(request_id="req-deadline", deadline_ms=50)
+            with pytest.raises(RuntimeError, match="DEADLINE_EXCEEDED"):
+                await proxy.infer({"delay": 0.5}, ctx)
+
+    async def test_infer_cancel_aborted(self) -> None:
+        async with _started_proxy() as proxy:
+            await proxy.load_model(
+                model_name="slow",
+                model_class_path="tests.helpers:SlowModel",
+                backend="pytorch",
+                device="cpu",
+            )
+
+            request_id = "req-cancel"
+            ctx = InferContext(request_id=request_id, deadline_ms=30000)
+            infer_task = asyncio.create_task(proxy.infer({"delay": 2.0}, ctx))
+            await asyncio.sleep(0.05)
+            await proxy.cancel(request_id, reason="user cancelled")
+
+            with pytest.raises(RuntimeError, match="ABORTED"):
+                await infer_task
+
+
+class TestWorkerProxyOutputShmPath:
+    async def test_large_output_uses_shm(self) -> None:
+        async with _started_proxy() as proxy:
+            pool = ShmPool(size_classes_kb=[16], slots_per_class=2, name_prefix="out")
+            try:
+                await proxy.load_model(
+                    model_name="big-output",
+                    model_class_path="tests.helpers:BigOutputModel",
+                    backend="pytorch",
+                    device="cpu",
+                )
+                ctx = InferContext(request_id="req-big-output", deadline_ms=30000)
+                result = await proxy.infer({"size": 10000}, ctx, shm_pool=pool)
+                assert len(result["blob"]) == 10000
+                assert pool.stats[16 * 1024]["in_use"] == 0
+            finally:
+                pool.close()
