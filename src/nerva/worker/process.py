@@ -28,6 +28,16 @@ from nerva.worker.ipc import (
 )
 
 logger = logging.getLogger(__name__)
+DEFAULT_SHM_ALLOC_TIMEOUT_S = 3.0
+
+
+class _OutputShmAllocationError(Exception):
+    """Raised when output SHM allocation via Master fails."""
+
+    def __init__(self, status: AckStatus, error: str) -> None:
+        super().__init__(error)
+        self.status = status
+        self.error = error
 
 # ---------------------------------------------------------------------------
 # Internal worker loop
@@ -37,8 +47,14 @@ logger = logging.getLogger(__name__)
 class _WorkerLoop:
     """Async event loop running inside the worker subprocess."""
 
-    def __init__(self, socket_path: str) -> None:
+    def __init__(
+        self,
+        socket_path: str,
+        *,
+        shm_alloc_timeout_s: float = DEFAULT_SHM_ALLOC_TIMEOUT_S,
+    ) -> None:
         self._socket_path = socket_path
+        self._shm_alloc_timeout_s = shm_alloc_timeout_s
         self._backend: Backend | None = None
         self._running = False
         self._inflight: dict[str, asyncio.Task[None]] = {}
@@ -209,6 +225,14 @@ class _WorkerLoop:
                 "error": "request cancelled",
             })
             return
+        except _OutputShmAllocationError as exc:
+            logger.exception("Output SHM allocation failed for request '%s'", request_id)
+            await self._send({
+                "type": MessageType.INFER_ACK.value,
+                "request_id": request_id,
+                "status": exc.status.value,
+                "error": exc.error,
+            })
         except Exception as exc:
             logger.exception("Inference failed for request '%s'", request_id)
             await self._send({
@@ -339,15 +363,20 @@ class _WorkerLoop:
                 "request_id": request_id,
                 "size": size,
             })
-            resp = await asyncio.wait_for(fut, timeout=3.0)
+            resp = await asyncio.wait_for(fut, timeout=self._shm_alloc_timeout_s)
         finally:
             self._shm_alloc_futures.pop(request_id, None)
 
         status = resp.get("status", "")
-        if status != AckStatus.OK.value:
-            error = resp.get("error", "unknown error")
-            raise RuntimeError(f"Output SHM allocation failed: [{status}] {error}")
-        return resp
+        if status == AckStatus.OK.value:
+            return resp
+
+        error = str(resp.get("error", "unknown error"))
+        try:
+            ack_status = AckStatus(status)
+        except Exception:
+            ack_status = AckStatus.INTERNAL
+        raise _OutputShmAllocationError(ack_status, error)
 
     async def _cleanup(self) -> None:
         """Close socket, terminate context, unload backend."""
@@ -386,7 +415,11 @@ class _WorkerLoop:
 # ---------------------------------------------------------------------------
 
 
-def worker_entry(socket_path: str) -> None:
+def worker_entry(
+    socket_path: str,
+    *,
+    shm_alloc_timeout_s: float = DEFAULT_SHM_ALLOC_TIMEOUT_S,
+) -> None:
     """Entry point for ``multiprocessing.Process(target=worker_entry, args=(path,))``."""
-    loop = _WorkerLoop(socket_path)
+    loop = _WorkerLoop(socket_path, shm_alloc_timeout_s=shm_alloc_timeout_s)
     asyncio.run(loop.run())

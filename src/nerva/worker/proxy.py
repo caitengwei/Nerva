@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import deque
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from nerva.engine.shm_pool import ShmPool, ShmSlot
 
 logger = logging.getLogger(__name__)
+MAX_RECENT_COMPLETED_REQUESTS = 2048
 
 
 class WorkerProxy:
@@ -50,6 +52,8 @@ class WorkerProxy:
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._request_pools: dict[str, ShmPool | None] = {}
         self._output_slots: dict[str, tuple[ShmPool, ShmSlot]] = {}
+        self._recently_completed: deque[str] = deque()
+        self._recently_completed_set: set[str] = set()
 
         # Special one-shot futures for non-request-id messages.
         self._load_model_future: asyncio.Future[dict[str, Any]] | None = None
@@ -195,6 +199,7 @@ class WorkerProxy:
         finally:
             self._pending.pop(request_id, None)
             self._request_pools.pop(request_id, None)
+            self._mark_request_completed(request_id)
             # Free SHM slot if allocated.
             if shm_slot is not None and shm_pool is not None:
                 shm_pool.free(shm_slot)
@@ -294,7 +299,10 @@ class WorkerProxy:
                 if fut is not None and not fut.done():
                     fut.set_result(msg)
                 else:
-                    logger.warning("No pending future for request '%s'", request_id)
+                    if request_id in self._recently_completed_set:
+                        logger.debug("Late INFER_ACK for completed request '%s'", request_id)
+                    else:
+                        logger.warning("No pending future for request '%s'", request_id)
 
             elif msg_type == MessageType.SHM_ALLOC_REQUEST.value:
                 await self._handle_shm_alloc_request(msg)
@@ -312,6 +320,8 @@ class WorkerProxy:
 
         for request_id in list(self._output_slots.keys()):
             self._release_output_slot(request_id)
+        self._recently_completed.clear()
+        self._recently_completed_set.clear()
 
         if self._load_model_future is not None and not self._load_model_future.done():
             self._load_model_future.set_exception(RuntimeError(reason))
@@ -422,3 +432,14 @@ class WorkerProxy:
             return
         pool, slot = slot_entry
         pool.free(slot)
+
+    def _mark_request_completed(self, request_id: str) -> None:
+        """Track recently completed request IDs for late-ACK noise suppression."""
+        if request_id in self._recently_completed_set:
+            return
+
+        self._recently_completed.append(request_id)
+        self._recently_completed_set.add(request_id)
+        while len(self._recently_completed) > MAX_RECENT_COMPLETED_REQUESTS:
+            old = self._recently_completed.popleft()
+            self._recently_completed_set.discard(old)

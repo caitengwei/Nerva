@@ -96,3 +96,37 @@
 1. 在文档层同步更新 `docs/plans/2026-02-25-mvp-roadmap.md` 的 Phase 1 状态，避免“实现已完成但 roadmap 仍显示待实现”的漂移。
 2. 将 `deadline/cancel/output SHM` 的关键 e2e 用例纳入 CI 必跑集（非 slow）。
 3. 进入 Phase 2 时优先做显式 DAG Executor，先复用当前 Worker IPC 基座，再引入 trace 子集。
+
+---
+
+## 2026-02-26 第二轮收口（测试与可维护性）
+
+基于代码 review 反馈，本轮补充了测试工程化与边界路径覆盖：
+
+### 1) 测试去重（fixture 化）
+
+- 将 `tests/test_worker_proxy.py` 中重复的 worker 启停与 model load 逻辑抽为 `started_worker` fixture。
+- 效果：
+  - 测试可读性提升
+  - 生命周期清理逻辑集中，减少重复 teardown 漏改风险
+
+### 2) 边界/错误路径补测
+
+- 新增 `deadline_ms <= 0` 直接拒绝路径测试（期望 `DEADLINE_EXCEEDED`）。
+- 新增 output SHM 资源不足路径测试（期望 `RESOURCE_EXHAUSTED`）。
+- 新增 SHM 槽位竞争测试（两个请求竞争单槽位，第二个请求返回 `RESOURCE_EXHAUSTED`）。
+
+### 3) 行为细化
+
+- Worker output SHM 分配失败支持携带上游状态码（不再一律折叠为 `INTERNAL`）。
+- output SHM alloc 超时从硬编码改为参数化：
+  - `DEFAULT_SHM_ALLOC_TIMEOUT_S`
+  - `_WorkerLoop(..., shm_alloc_timeout_s=...)`
+- 降低 cancel/timeout 后“晚到 ACK”日志噪声：
+  - 对已完成请求的晚到 `INFER_ACK` 由 warning 降为 debug。
+
+### 4) 回归结果（第二轮）
+
+- `uv run pytest -q`：`92 passed`
+- `uv run ruff check ...`：通过
+- `uv run mypy`：通过
