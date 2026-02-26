@@ -244,6 +244,11 @@ class _WorkerLoop:
         finally:
             self._contexts.pop(request_id, None)
 
+    def _run_infer_sync(self, inputs: dict[str, Any], context: InferContext) -> dict[str, Any]:
+        """Blocking wrapper — runs ``backend.infer()`` via ``asyncio.run()``."""
+        assert self._backend is not None
+        return asyncio.run(self._backend.infer(inputs, context))
+
     def _read_inputs(self, descriptor: Descriptor) -> dict[str, Any]:
         """Read inputs from either inline data or SHM."""
         if descriptor.payload_codec == "raw_bytes_v1":
