@@ -344,7 +344,26 @@ class _WorkerLoop:
                 payload_codec="msgpack_dict_v1",
             )
 
-        alloc = await self._request_output_slot(request_id, len(output_bytes))
+        try:
+            alloc = await self._request_output_slot(request_id, len(output_bytes))
+        except _OutputShmAllocationError as exc:
+            if exc.status == AckStatus.UNAVAILABLE:
+                # No shm_pool associated with this request (e.g. Executor called
+                # proxy.infer() without a shm_pool).  Fall back to inline so the
+                # request still succeeds; performance is degraded but not broken.
+                logger.debug(
+                    "No shm_pool for '%s', falling back to inline output (%d B)",
+                    request_id,
+                    len(output_bytes),
+                )
+                return Descriptor(
+                    request_id=request_id,
+                    node_id=0,
+                    inline_data=output_bytes,
+                    length=len(output_bytes),
+                    payload_codec="msgpack_dict_v1",
+                )
+            raise
         shm_id = alloc["shm_id"]
         offset = alloc["offset"]
         slot_size = alloc["slot_size"]
