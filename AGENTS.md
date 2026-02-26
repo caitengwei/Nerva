@@ -42,3 +42,17 @@ uv run pytest tests/ -v
 - 提交前至少保证相关测试通过。
 - commit message 建议使用语义化前缀（如 `fix(...)`、`feat(...)`、`docs(...)`）。
 - 避免将本地工具配置或无关文件混入功能提交。
+
+## 7. 阶段状态核验（截至 2026-02-26）
+
+- 本仓当前核验结果：`uv run ruff check src/ tests/` 通过；`uv run mypy` 通过；`uv run pytest tests/ -v` 为 140 passed（18.21s）。
+- Phase 0 / Phase 1 / Phase 2 的 roadmap 状态与现有测试结果总体一致（均标记为已完成）。
+- 阻断风险：`cond()` / `parallel()` 分支若捕获上游 `Proxy`（非仅使用 pipeline 原始输入），当前实现会出现执行卡住（done_queue 无事件）或分支输入语义错误。
+- 结论口径：在该风险修复前，Phase 2 仅可判定“基础能力完成”，不应判定为“完全符合设计预期”。
+
+## 8. Phase 2 Review 补充必测项
+
+- `cond` 分支捕获上游输出：`out = a(x); cond(out["flag"], lambda: b(out), lambda: c(out))`。
+- `parallel` 分支捕获上游输出：`out = a(x); parallel(lambda: b(out), lambda: c(out))`。
+- 以上用例必须加超时断言，确保执行不会阻塞。
+- 必须校验分支节点实收输入符合业务语义，不是 predicate 值或其他错误透传值。
