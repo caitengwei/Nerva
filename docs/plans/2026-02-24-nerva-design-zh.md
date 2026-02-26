@@ -156,8 +156,18 @@ Master 与 Worker 之间采用双层通信：
 描述符结构（MVP）：
 - `request_id`、`node_id`
 - `shm_id`、`offset`、`length`
+- `inline_data`（小 payload inline）
+- `payload_codec`（`msgpack_dict_v1` / `raw_bytes_v1`）
+- `input_key`（`raw_bytes_v1` 场景下 bytes 对应的输入字段）
 - `dtype`、`shape`
 - `lifetime_token`（用于类似引用计数的回收）
+
+payload codec 约定（Phase 1.1）：
+- 默认 `msgpack_dict_v1`：输入按 dict 做 msgpack 编解码。
+- 单字段 bytes 可走 `raw_bytes_v1`：跳过 dict 级 `msgpack.packb`，由 `input_key` 在 Worker 侧还原为 `{input_key: bytes}`。
+
+减少中间拷贝约定（Phase 1.1）：
+- SHM + `msgpack_dict_v1` 解码优先使用 `memoryview -> msgpack.unpackb`，避免 `bytes(buf[slice])` 临时副本。
 
 生命周期（MVP）：
 1. Master 从 shm 池分配槽位并写入 payload

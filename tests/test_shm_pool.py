@@ -131,6 +131,21 @@ class TestWriteRead:
         finally:
             pool.close()
 
+    def test_read_view_roundtrip(self) -> None:
+        pool = ShmPool(size_classes_kb=[4], slots_per_class=2, name_prefix="tv")
+        try:
+            slot = pool.alloc(100)
+            data = b"hello shared memory view"
+            pool.write(slot, data)
+            view = pool.read_view(slot, len(data))
+            try:
+                assert isinstance(view, memoryview)
+                assert view.tobytes() == data
+            finally:
+                view.release()
+        finally:
+            pool.close()
+
     def test_write_full_slot(self) -> None:
         pool = ShmPool(size_classes_kb=[4], slots_per_class=2, name_prefix="t9")
         try:

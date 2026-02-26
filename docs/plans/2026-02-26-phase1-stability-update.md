@@ -130,3 +130,56 @@
 - `uv run pytest -q`：`92 passed`
 - `uv run ruff check ...`：通过
 - `uv run mypy`：通过
+
+---
+
+## 2026-02-26 第三轮收口（拷贝路径优化 + 协议补充）
+
+本轮目标是减少 IPC 热路径中的不必要中间拷贝，并将行为明确写入设计文档。
+
+### 1) Descriptor 扩展（兼容 schema v1）
+
+- 新增字段：
+  - `payload_codec`（默认 `msgpack_dict_v1`）
+  - `input_key`（`raw_bytes_v1` 场景必填）
+- 语义：
+  - `msgpack_dict_v1`：沿用原有 dict msgpack 编解码
+  - `raw_bytes_v1`：单字段 bytes 输入快速路径，跳过 dict 级 `msgpack.packb`
+
+### 2) 输入快速路径（raw bytes）
+
+- `WorkerProxy.infer()` 在输入为单字段 bytes 时走 `raw_bytes_v1`：
+  - 不再对整个 `inputs` 做 `msgpack.packb`
+  - descriptor 仅携带 raw bytes 与 `input_key`
+- Worker 侧按 codec 还原为 `{input_key: bytes}` 后进入 model infer。
+
+### 3) SHM 解码中间副本优化
+
+- SHM + `msgpack_dict_v1` 路径改为 `memoryview -> msgpack.unpackb`，
+  避免 `bytes(buf[slice])` 额外临时副本。
+- 说明：`raw_bytes_v1` 的 SHM 路径为保持 Python `bytes` 语义，当前仍保留一次 materialization。
+
+### 4) 测试补充
+
+- `tests/test_worker_process.py`
+  - 新增 `raw_bytes_v1` descriptor 推理用例。
+- `tests/test_worker_proxy.py`
+  - 新增“单字段 bytes 不触发输入 dict msgpack 序列化”用例。
+- `tests/test_shm_pool.py`
+  - 新增 `read_view()` roundtrip 用例。
+- `tests/test_ipc.py`
+  - 补充 `payload_codec/input_key` 默认值与 roundtrip 断言。
+
+### 5) 文档同步（设计变更落库）
+
+- `docs/plans/ipc-contract.md`
+  - Descriptor schema 增加 `payload_codec/input_key`
+  - 新增 codec 规则与 `memoryview` 约定
+- `docs/plans/2026-02-25-phase1-design.md`
+  - 更新请求生命周期、消息格式、测试矩阵和 changelog
+
+### 6) 回归结果（第三轮）
+
+- `uv run pytest tests/ -v`：`150 passed`
+- `uv run mypy`：通过
+- `uv run ruff check`（改动文件）：通过

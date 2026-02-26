@@ -141,6 +141,7 @@ tests/test_pytorch_backend.py      # 8 tests
 **范围：**
 - IPC 控制通道：ZeroMQ PAIR over `ipc://`，msgpack 序列化
 - IPC 数据通道：POSIX shared memory pool（slab + size classes），≤8KB inline 优化
+- Descriptor payload codec：`msgpack_dict_v1`（默认）与 `raw_bytes_v1`（单字段 bytes 快速路径）
 - Worker 进程 main loop（`worker/process.py`）
 - Worker Manager 生命周期管理（`worker/manager.py`）
 - Master 侧 WorkerProxy 异步 RPC 封装
@@ -149,6 +150,8 @@ tests/test_pytorch_backend.py      # 8 tests
 **关键设计决策：**
 - 控制通道选用 ZeroMQ PAIR（降低实现复杂度，省去帧解析和断线处理）
 - ≤8KB payload inline 到控制消息，>8KB 走 SHM（基于 S1 spike 数据）
+- 单字段 bytes 输入支持 `raw_bytes_v1`，跳过 dict 级 `msgpack.packb` 降低序列化开销
+- SHM + msgpack 解码优先 `memoryview -> msgpack.unpackb`，减少 `bytes(buf[slice])` 中间副本
 - model_class 通过 import path 字符串跨进程传递（避免 pickle 限制）
 - Phase 0 代码零修改，Backend/Model 原样运行在 Worker 进程中
 
@@ -158,7 +161,7 @@ tests/test_pytorch_backend.py      # 8 tests
 - Worker 崩溃后 Master 能检测并重启
 - SHM 分配/回收无泄漏
 
-**验证结果：** ruff 0 errors, mypy 0 issues, 89 tests passed (16s)
+**验证结果：** ruff 0 errors, mypy 0 issues, 150 tests passed (28s)
 
 **状态：** ✅ 已完成 (2026-02-26)
 

@@ -143,6 +143,8 @@ class TestDescriptor:
         assert d.offset == 0
         assert d.length == 0
         assert d.inline_data is None
+        assert d.payload_codec == "msgpack_dict_v1"
+        assert d.input_key is None
         assert d.dtype == "bytes"
         assert d.shape == []
         assert d.device == "cpu"
@@ -156,6 +158,8 @@ class TestDescriptor:
             shm_id="shm-abc",
             offset=64,
             length=256,
+            payload_codec="raw_bytes_v1",
+            input_key="value",
             dtype="float32",
             shape=[2, 128],
             device="cuda:0",

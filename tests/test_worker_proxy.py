@@ -11,6 +11,7 @@ import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+import msgpack
 import pytest
 
 from nerva.backends.base import InferContext
@@ -84,6 +85,30 @@ class TestWorkerProxyInfer:
             ctx = InferContext(request_id=f"req-{i:03d}", deadline_ms=30000)
             result = await proxy.infer({"value": i}, ctx)
             assert result == {"echo": i}
+
+    async def test_infer_single_bytes_uses_raw_fast_path(
+        self,
+        started_worker: StartedWorkerFactory,
+        monkeypatch,  # type: ignore[no-untyped-def]
+    ) -> None:
+        proxy = await started_worker("echo", "tests.helpers:EchoModel")
+
+        payload = b"\x00\x01\x02\xff"
+        expected_input_obj = {"value": payload}
+        original_packb = msgpack.packb
+
+        def _guard_packb(obj: Any, *args: Any, **kwargs: Any) -> bytes:
+            if obj == expected_input_obj:
+                raise AssertionError(
+                    "msgpack.packb should not be called for raw bytes fast path"
+                )
+            return original_packb(obj, *args, **kwargs)
+
+        monkeypatch.setattr("nerva.worker.proxy.msgpack.packb", _guard_packb)
+
+        ctx = InferContext(request_id="req-bytes-fast", deadline_ms=30000)
+        result = await proxy.infer(expected_input_obj, ctx)
+        assert result == {"echo": payload}
 
 
 class TestWorkerProxyErrorPropagation:

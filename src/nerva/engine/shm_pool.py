@@ -183,12 +183,20 @@ class ShmPool:
         assert buf is not None
         buf[slot.offset : slot.offset + len(data)] = data
 
-    def read(self, slot: ShmSlot, length: int) -> bytes:
-        """Read *length* bytes from *slot*."""
+    def read_view(self, slot: ShmSlot, length: int) -> memoryview:
+        """Return a memoryview of *length* bytes from *slot* without copying."""
         seg = self._segments[slot._class_idx]
         buf = seg.buf
         assert buf is not None
-        return bytes(buf[slot.offset : slot.offset + length])
+        return memoryview(buf)[slot.offset : slot.offset + length]
+
+    def read(self, slot: ShmSlot, length: int) -> bytes:
+        """Read *length* bytes from *slot*."""
+        view = self.read_view(slot, length)
+        try:
+            return view.tobytes()
+        finally:
+            view.release()
 
     def close(self) -> None:
         """Release and unlink all shared memory segments.  Idempotent."""

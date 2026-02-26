@@ -246,6 +246,29 @@ class _WorkerLoop:
 
     def _read_inputs(self, descriptor: Descriptor) -> dict[str, Any]:
         """Read inputs from either inline data or SHM."""
+        if descriptor.payload_codec == "raw_bytes_v1":
+            if descriptor.input_key is None:
+                raise ValueError("raw_bytes_v1 descriptor missing input_key")
+
+            if descriptor.is_inline:
+                assert descriptor.inline_data is not None
+                return {descriptor.input_key: descriptor.inline_data}
+
+            if descriptor.shm_id is None:
+                raise ValueError("Descriptor has neither inline_data nor shm_id")
+
+            shm = SharedMemory(name=descriptor.shm_id, create=False)
+            try:
+                buf = shm.buf
+                assert buf is not None
+                view = memoryview(buf)[descriptor.offset : descriptor.offset + descriptor.length]
+                try:
+                    return {descriptor.input_key: view.tobytes()}
+                finally:
+                    view.release()
+            finally:
+                shm.close()
+
         if descriptor.is_inline:
             assert descriptor.inline_data is not None
             return msgpack.unpackb(descriptor.inline_data, raw=False)  # type: ignore[no-any-return]
@@ -258,8 +281,11 @@ class _WorkerLoop:
         try:
             buf = shm.buf
             assert buf is not None
-            raw = bytes(buf[descriptor.offset : descriptor.offset + descriptor.length])
-            return msgpack.unpackb(raw, raw=False)  # type: ignore[no-any-return]
+            view = memoryview(buf)[descriptor.offset : descriptor.offset + descriptor.length]
+            try:
+                return msgpack.unpackb(view, raw=False)  # type: ignore[no-any-return]
+            finally:
+                view.release()
         finally:
             shm.close()
 
@@ -315,6 +341,7 @@ class _WorkerLoop:
                 node_id=0,
                 inline_data=output_bytes,
                 length=len(output_bytes),
+                payload_codec="msgpack_dict_v1",
             )
 
         alloc = await self._request_output_slot(request_id, len(output_bytes))
@@ -347,6 +374,7 @@ class _WorkerLoop:
             shm_id=shm_id,
             offset=offset,
             length=len(output_bytes),
+            payload_codec="msgpack_dict_v1",
         )
 
     async def _request_output_slot(self, request_id: str, size: int) -> dict[str, Any]:

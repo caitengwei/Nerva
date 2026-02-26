@@ -149,7 +149,14 @@ class WorkerProxy:
     ) -> dict[str, Any]:
         """Serialize inputs, send INFER_SUBMIT, wait for INFER_ACK, return output."""
         request_id = context.request_id
-        input_bytes = msgpack.packb(inputs, use_bin_type=True)
+        raw_bytes_input = self._extract_raw_bytes_input(inputs)
+        if raw_bytes_input is None:
+            input_key = None
+            payload_codec = "msgpack_dict_v1"
+            input_bytes = msgpack.packb(inputs, use_bin_type=True)
+        else:
+            input_key, input_bytes = raw_bytes_input
+            payload_codec = "raw_bytes_v1"
         shm_slot = None
 
         if len(input_bytes) <= IPC_CONTROL_INLINE_MAX_BYTES or shm_pool is None:
@@ -159,6 +166,8 @@ class WorkerProxy:
                 node_id=0,
                 inline_data=input_bytes,
                 length=len(input_bytes),
+                payload_codec=payload_codec,
+                input_key=input_key,
             )
         else:
             # SHM path.
@@ -170,6 +179,8 @@ class WorkerProxy:
                 shm_id=shm_slot.shm_name,
                 offset=shm_slot.offset,
                 length=len(input_bytes),
+                payload_codec=payload_codec,
+                input_key=input_key,
             )
 
         loop = asyncio.get_running_loop()
@@ -424,6 +435,17 @@ class WorkerProxy:
                 view.release()
         finally:
             shm.close()
+
+    @staticmethod
+    def _extract_raw_bytes_input(inputs: dict[str, Any]) -> tuple[str, bytes] | None:
+        """Return (input_key, payload) when inputs is a single raw-bytes field."""
+        if len(inputs) != 1:
+            return None
+
+        input_key, value = next(iter(inputs.items()))
+        if not isinstance(value, bytes):
+            return None
+        return input_key, value
 
     def _release_output_slot(self, request_id: str) -> None:
         """Free and forget output SHM slot allocated for *request_id*."""

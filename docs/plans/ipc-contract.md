@@ -79,6 +79,8 @@ descriptor = {
   length: u32,
   # Inline payload (None when using SHM)
   inline_data: bytes | None,  # payload bytes when <= IPC_CONTROL_INLINE_MAX_BYTES
+  payload_codec: str,         # "msgpack_dict_v1" | "raw_bytes_v1"
+  input_key: str | None,      # raw_bytes_v1 场景下表示 bytes 应映射到 inputs 的哪个 key
   dtype: str,                 # e.g. "float16", "int64", "bytes"
   shape: list[u32],           # bytes payload may use [length]
   device: str,                # "cpu" / "cuda:0" ... (reserved, Phase 1 不使用)
@@ -90,6 +92,11 @@ descriptor = {
 Inline 优化规则：
 - 当 payload <= `IPC_CONTROL_INLINE_MAX_BYTES` (8KB) 时，`shm_id = None`，数据放入 `inline_data`
 - 当 payload > 8KB 时，`inline_data = None`，数据通过 SHM 传输
+
+Payload codec 规则：
+- `payload_codec = "msgpack_dict_v1"`：默认路径，`inline_data/SHM` 承载的是 `msgpack.packb(dict)` 结果。
+- `payload_codec = "raw_bytes_v1"`：输入为单字段 bytes 时的快速路径，不再对该字段做 `msgpack.packb(dict)`；`input_key` 必填。
+- 未识别 `payload_codec` 或 `raw_bytes_v1` 缺少 `input_key` 时，返回 `INFER_ACK(status=INVALID_ARGUMENT)`。
 
 兼容策略：
 - `schema_version` 不匹配时，返回 `INFER_ACK(status=INVALID_ARGUMENT)` 并拒绝执行
@@ -104,6 +111,10 @@ Inline 优化规则：
 回收策略：
 - 正常路径：Worker `ACK` 后回收
 - 异常路径：基于 `lifetime_token` + TTL 的惰性 GC
+
+实现约定（减少中间拷贝）：
+- SHM + `msgpack_dict_v1` 解码时，优先直接使用 `memoryview` 喂给 `msgpack.unpackb`，避免 `bytes(buf[slice])` 临时副本。
+- `raw_bytes_v1` 在 SHM 路径下仍需产出 Python `bytes`（语义兼容），当前实现保留这一次必要复制。
 
 配置项（建议默认）：
 - `ipc_shm_total_bytes`: `IPC_SHM_TOTAL_BYTES`
@@ -220,3 +231,4 @@ Master 重启（MVP）：
 |---|---|
 | 2026-02-25 | 初始版本 |
 | 2026-02-25 | 修订：Descriptor schema 增加 inline_data 支持和 shm_id nullable；request_id 统一为 str；batch_meta 标注为 Phase 3 前 optional；补充 reserved 字段说明 |
+| 2026-02-26 | 修订：Descriptor 增加 `payload_codec/input_key`；新增 `raw_bytes_v1` 快速路径；补充 SHM 解码 `memoryview` 约定以减少中间拷贝 |

@@ -61,6 +61,8 @@ class Descriptor:
     offset: int = 0
     length: int = 0
     inline_data: bytes | None = None
+    payload_codec: str = "msgpack_dict_v1"
+    input_key: str | None = None
     dtype: str = "bytes"
     shape: list[int] = field(default_factory=list)
     device: str = "cpu"
@@ -82,6 +84,8 @@ class Descriptor:
             "offset": self.offset,
             "length": self.length,
             "inline_data": self.inline_data,
+            "payload_codec": self.payload_codec,
+            "input_key": self.input_key,
             "dtype": self.dtype,
             "shape": self.shape,
             "device": self.device,
@@ -100,6 +104,8 @@ class Descriptor:
             offset=d.get("offset", 0),
             length=d.get("length", 0),
             inline_data=d.get("inline_data"),
+            payload_codec=d.get("payload_codec", "msgpack_dict_v1"),
+            input_key=d.get("input_key"),
             dtype=d.get("dtype", "bytes"),
             shape=d.get("shape", []),
             device=d.get("device", "cpu"),
