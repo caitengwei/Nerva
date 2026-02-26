@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(git add:*)",
+      "Bash(git config:*)",
+      "Bash(git commit:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv run:*)",
+      "Bash(git:*)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run pytest tests/test_worker_proxy.py -v 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run ruff check src/nerva/worker/proxy.py tests/test_worker_proxy.py 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run mypy 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run pytest tests/ -v 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run pytest tests/test_worker_manager.py -v 2>&1)",
+      "Bash(true:*)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run ruff check src/ tests/ 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && uv run ruff check src/nerva/worker/manager.py tests/test_worker_manager.py 2>&1)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\" && timeout 120 uv run pytest tests/ -v 2>&1)",
+      "Bash(node:*)",
+      "Bash(npm config:*)",
+      "Bash(sw_vers:*)",
+      "Bash(npm install:*)",
+      "Bash(npm view:*)",
+      "Bash(npm uninstall:*)"
+    ]
+  }
+}
