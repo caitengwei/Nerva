@@ -8,6 +8,12 @@
 
 **Tech Stack:** Python 3.11+, pytest, pytest-asyncio, asyncio, json, time, statistics
 
+## 2026-02-27 更新（P1 修复）
+
+- B4 执行路径改为通过 `_ShmAwareProxy` 向 `WorkerProxy.infer()` 显式传入 `shm_pool`，避免默认仅走 inline 路径。
+- B4 结果 JSON 新增 `shm_alloc_calls` 字段，用于量化 SHM 使用次数。
+- `test_e2e_large_payload` 增加断言：`shm_alloc_calls > 0`，确保 Large 场景真实触发 SHM。
+
 ---
 
 ### Task 1: 添加 bench-results 到 .gitignore
@@ -542,7 +548,7 @@ git commit -m "feat(bench): B3 parallel speedup benchmark"
 
 **Step 1: 实现 B4 测试**
 
-B4 需要真实 Worker 进程，使用 WorkerManager 启动 4 个 worker。分 Small / Large 两档 payload。
+B4 需要真实 Worker 进程，使用 WorkerManager 启动 4 个 worker，并为每个 infer 调用注入 `shm_pool`。分 Small / Large 两档 payload。
 
 在 `tests/test_phase2_bench.py` 追加：
 
@@ -704,7 +710,7 @@ class TestB4E2EPipeline:
 **Step 2: 运行测试**
 
 Run: `uv run pytest tests/test_phase2_bench.py::TestB4E2EPipeline -v -s`
-Expected: PASS，终端打印 p50/p95/p99
+Expected: PASS，终端打印 p50/p95/p99，且 Large 场景满足 `shm_alloc_calls > 0`
 
 **Step 3: Commit**
 
@@ -743,7 +749,7 @@ Expected: B1-B4 全部 PASS
 **Step 5: 验证 JSON 产物**
 
 Run: `ls bench-results/phase2/`
-Expected: `B1_trace_overhead.json`, `B2_executor_overhead.json`, `B3_parallel_speedup.json`, `B4_e2e_small.json`, `B4_e2e_large.json`
+Expected: `B1_trace_overhead.json`, `B2_executor_overhead.json`, `B3_parallel_speedup.json`, `B4_e2e_small.json`, `B4_e2e_large.json`（其中 B4 JSON 含 `shm_alloc_calls`）
 
 **Step 6: Commit**
 

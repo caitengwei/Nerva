@@ -19,6 +19,7 @@ from nerva.backends.base import InferContext
 from nerva.core.graph import Edge, Graph, Node
 from nerva.core.primitives import parallel
 from nerva.engine.executor import Executor
+from nerva.engine.shm_pool import ShmPool
 from nerva.worker.manager import WorkerManager
 from tests.helpers import (
     BenchClassifier,
@@ -28,6 +29,34 @@ from tests.helpers import (
 )
 
 BENCH_DIR = Path("bench-results/phase2")
+
+
+class _CountingShmPool(ShmPool):
+    """ShmPool with allocation counter for benchmark observability."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.alloc_calls = 0
+
+    def alloc(self, size: int):  # type: ignore[override]
+        self.alloc_calls += 1
+        return super().alloc(size)
+
+
+class _ShmAwareProxy:
+    """Wrapper that always passes shm_pool to WorkerProxy.infer()."""
+
+    def __init__(self, proxy: Any, shm_pool: ShmPool) -> None:
+        self._proxy = proxy
+        self._shm_pool = shm_pool
+
+    async def infer(
+        self,
+        inputs: dict[str, Any],
+        context: InferContext,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return await self._proxy.infer(inputs, context, shm_pool=self._shm_pool)
 
 
 def _env_info() -> dict[str, str]:
@@ -357,14 +386,15 @@ class TestB4E2EPipeline:
         image_bytes_size: int,
         text: str,
         n_iters: int,
-    ) -> list[float]:
-        """Run the full 4-model DAG pipeline and return latencies in ms."""
+    ) -> tuple[list[float], int]:
+        """Run full 4-model DAG and return (latencies_ms, shm_alloc_calls)."""
         h_img = model("img_enc", BenchImageEncoder, backend="pytorch", device="cpu", dim=dim, delay_ms=delay_ms)
         h_txt = model("txt_enc", BenchTextEncoder, backend="pytorch", device="cpu", dim=dim, delay_ms=delay_ms)
         h_fusion = model("fusion", BenchFusionModel, backend="pytorch", device="cpu", dim=dim, delay_ms=delay_ms)
         h_cls = model("classifier", BenchClassifier, backend="pytorch", device="cpu", delay_ms=delay_ms)
 
         manager = WorkerManager()
+        shm_pool = _CountingShmPool()
         try:
             p_img = await manager.start_worker(h_img)
             p_txt = await manager.start_worker(h_txt)
@@ -391,10 +421,10 @@ class TestB4E2EPipeline:
             g.add_edge(Edge(src="fusion", dst="classifier", src_field_path=("fused_features",), dst_input_key="fused_features"))
 
             proxies: dict[str, Any] = {
-                "img_enc": p_img,
-                "txt_enc": p_txt,
-                "fusion": p_fusion,
-                "classifier": p_cls,
+                "img_enc": _ShmAwareProxy(p_img, shm_pool),
+                "txt_enc": _ShmAwareProxy(p_txt, shm_pool),
+                "fusion": _ShmAwareProxy(p_fusion, shm_pool),
+                "classifier": _ShmAwareProxy(p_cls, shm_pool),
             }
 
             pipeline_input: dict[str, Any] = {
@@ -419,13 +449,14 @@ class TestB4E2EPipeline:
                 assert "label" in result
                 assert "score" in result
 
-            return latencies_ms
+            return latencies_ms, shm_pool.alloc_calls
         finally:
             await manager.shutdown_all()
+            shm_pool.close()
 
     async def test_e2e_small_payload(self) -> None:
         """Small payload: 4KB image, 100B text, dim=768."""
-        latencies = await self._run_pipeline(
+        latencies, shm_alloc_calls = await self._run_pipeline(
             dim=768,
             delay_ms=0,
             image_bytes_size=4096,
@@ -442,6 +473,7 @@ class TestB4E2EPipeline:
             "image_bytes_size": 4096,
             "latency_ms": pcts,
             "avg_ms": round(mean(latencies), 3),
+            "shm_alloc_calls": shm_alloc_calls,
             "env": _env_info(),
         }
         _save_result("B4_e2e_small", result)
@@ -450,7 +482,7 @@ class TestB4E2EPipeline:
 
     async def test_e2e_large_payload(self) -> None:
         """Large payload: 256KB image, 1KB text, dim=1280."""
-        latencies = await self._run_pipeline(
+        latencies, shm_alloc_calls = await self._run_pipeline(
             dim=1280,
             delay_ms=0,
             image_bytes_size=256 * 1024,
@@ -467,8 +499,10 @@ class TestB4E2EPipeline:
             "image_bytes_size": 256 * 1024,
             "latency_ms": pcts,
             "avg_ms": round(mean(latencies), 3),
+            "shm_alloc_calls": shm_alloc_calls,
             "env": _env_info(),
         }
         _save_result("B4_e2e_large", result)
 
         print(f"\n[B4-large] p50={pcts['p50']:.1f}ms, p95={pcts['p95']:.1f}ms, p99={pcts['p99']:.1f}ms")
+        assert shm_alloc_calls > 0, "large payload did not trigger SHM allocations"

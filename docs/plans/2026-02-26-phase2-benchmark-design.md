@@ -39,8 +39,8 @@ class BenchClassifier(Model):
 
 | 档位 | image_bytes | text | feature dim | 单 feature 大小 | IPC 路径 |
 |------|------------|------|------------|----------------|---------|
-| Small | 4KB | 100B | 768 | ~3KB | inline（<8KB） |
-| Large | 256KB | 1KB | 1280 | ~5KB | 输入 SHM，输出 inline 边界 |
+| Small | 4KB | 100B | 768 | ~3KB | inline 为主，部分阶段可能触发 SHM |
+| Large | 256KB | 1KB | 1280 | ~5KB | 明确走 SHM 路径（输入/中间结果） |
 
 现实参考：CLIP ViT-L 输出 768-dim float32 ≈ 3KB，ViT-G 输出 1280-dim ≈ 5KB。
 
@@ -71,13 +71,14 @@ TextEncoder  ──┘
 | executor 调度层 | executor overhead (μs) | DAG 执行总耗时 - 各节点 infer 耗时之和 |
 | parallel 效率 | parallel speedup ratio | parallel(a,b) 耗时 / max(a,b) 耗时，理想值 ≈ 1.0 |
 | 端到端 | pipeline latency p50/p95/p99 (ms) | 多次执行的分位数 |
-| IPC 路径 | inline vs SHM 延迟差异 | Small 档 vs Large 档对比体现 |
+| IPC 路径 | SHM 分配次数 (`shm_alloc_calls`) | 直接观测是否触发 SHM 分配 |
 
 ## 7. 输出格式
 
 - pytest 用例，标记 `@pytest.mark.slow`
 - 每个 benchmark 输出 JSON 到 `bench-results/phase2/`
 - JSON 包含：指标值、环境信息（Python 版本、commit SHA、timestamp）
+- B4 结果额外包含 `shm_alloc_calls`，用于验证 IPC 路径
 - 终端 print summary 供人查看
 - assert sanity gate（executor overhead < 5ms，parallel speedup > 1.5x）
 
@@ -89,6 +90,7 @@ TextEncoder  ──┘
 | executor overhead | < 5ms | 调度层开销相对 IPC 应该很小 |
 | parallel speedup | > 1.5x | 并行应有明显增益（理想 2x） |
 | e2e error rate | 0% | 功能正确性 |
+| B4 Large SHM 触发 | `shm_alloc_calls > 0` | 防止“只测到 inline 路径” |
 
 ## 9. 文件结构
 
@@ -105,3 +107,4 @@ bench-results/
 | 日期 | 变更 |
 |------|------|
 | 2026-02-26 | 初始版本 |
+| 2026-02-27 | B4 增加 `shm_pool` 注入与 `shm_alloc_calls` 指标；Large 场景增加 SHM 触发断言 |
