@@ -25,6 +25,9 @@ class Model(ABC):
         4. Backend.unload_model() calls Model.unload() for cleanup
     """
 
+    def __init__(self) -> None:
+        self._options: dict[str, Any] = {}
+
     @abstractmethod
     def load(self) -> None:
         """Load model weights and initialize resources.
