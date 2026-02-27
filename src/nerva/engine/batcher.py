@@ -88,6 +88,9 @@ class DynamicBatcher:
         **kwargs: Any,
     ) -> dict[str, Any]:
         # 1. Deadline admission check.
+        # Admission check: deadline_ms is treated as a total TTL from call time.
+        # Elapsed time at this point is negligible (< scheduling jitter),
+        # so we compare directly without subtracting elapsed_ms.
         if context.deadline_ms < self._config.min_remaining_deadline_ms:
             raise RuntimeError("DEADLINE_EXCEEDED")
 
@@ -101,6 +104,7 @@ class DynamicBatcher:
                 timeout=self._config.queue_timeout_ms / 1000.0,
             )
         except TimeoutError as err:
+            future.cancel()
             raise RuntimeError("RESOURCE_EXHAUSTED") from err
 
         # 3. Wait for batch loop to resolve this request.

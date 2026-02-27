@@ -1,5 +1,7 @@
 from unittest.mock import AsyncMock
 
+import pytest
+
 from nerva.backends.base import InferContext
 from nerva.engine.batcher import BatchConfig, DynamicBatcher
 
@@ -44,11 +46,8 @@ async def test_batcher_context_manager() -> None:
         assert batcher is not None
 
 
-import pytest
-
-
 async def test_infer_deadline_admission_reject() -> None:
-    """剩余 deadline 不足时，infer() 立即拒绝。"""
+    """剩余 deadline 不足时, infer() 立即拒绝。"""
     inner = _make_inner()
     cfg = BatchConfig(min_remaining_deadline_ms=50.0)
     async with DynamicBatcher(inner, cfg) as batcher:
