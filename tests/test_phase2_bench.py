@@ -9,17 +9,20 @@ import subprocess
 import time
 from pathlib import Path
 from statistics import mean, median, stdev
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from nerva import model, trace
 from nerva.backends.base import InferContext
 from nerva.core.graph import Edge, Graph, Node
 from nerva.core.primitives import parallel
 from nerva.engine.executor import Executor
-from nerva.engine.shm_pool import ShmPool
+from nerva.engine.shm_pool import ShmPool, ShmSlot
 from nerva.worker.manager import WorkerManager
 from tests.helpers import (
     BenchClassifier,
@@ -38,7 +41,7 @@ class _CountingShmPool(ShmPool):
         super().__init__()
         self.alloc_calls = 0
 
-    def alloc(self, size: int):  # type: ignore[override]
+    def alloc(self, size: int) -> ShmSlot:
         self.alloc_calls += 1
         return super().alloc(size)
 
@@ -181,12 +184,19 @@ class TestB2ExecutorOverhead:
     async def test_executor_overhead(self) -> None:
         total_infer_ns = 0
 
-        async def timed_infer(inputs: Any, context: Any, **kwargs: Any) -> dict[str, Any]:
-            nonlocal total_infer_ns
-            t0 = time.perf_counter_ns()
-            result: dict[str, Any] = {"features": [0.1] * 768}
-            total_infer_ns += time.perf_counter_ns() - t0
-            return result
+        def _make_timed_proxy(
+            result_factory: Callable[[], dict[str, Any]],
+        ) -> AsyncMock:
+            async def _infer(inputs: Any, context: Any, **kwargs: Any) -> dict[str, Any]:
+                nonlocal total_infer_ns
+                t0 = time.perf_counter_ns()
+                result = result_factory()
+                total_infer_ns += time.perf_counter_ns() - t0
+                return result
+
+            proxy = AsyncMock()
+            proxy.infer = AsyncMock(side_effect=_infer)
+            return proxy
 
         # Build the 4-node multimodal DAG (no parallel node — flat graph).
         g = Graph()
@@ -208,41 +218,17 @@ class TestB2ExecutorOverhead:
             src_field_path=("fused_features",), dst_input_key="fused_features",
         ))
 
-        # Override fusion mock to return fused_features key.
-        async def fusion_infer(inputs: Any, context: Any, **kwargs: Any) -> dict[str, Any]:
-            nonlocal total_infer_ns
-            t0 = time.perf_counter_ns()
-            result: dict[str, Any] = {"fused_features": [0.3] * 512}
-            total_infer_ns += time.perf_counter_ns() - t0
-            return result
-
-        async def classifier_infer(inputs: Any, context: Any, **kwargs: Any) -> dict[str, Any]:
-            nonlocal total_infer_ns
-            t0 = time.perf_counter_ns()
-            result: dict[str, Any] = {"label": "cat", "score": 0.95}
-            total_infer_ns += time.perf_counter_ns() - t0
-            return result
-
         n_iters = 100
         overhead_us_list: list[float] = []
 
         for _ in range(n_iters):
             total_infer_ns = 0
 
-            img_proxy = AsyncMock()
-            img_proxy.infer = AsyncMock(side_effect=timed_infer)
-            txt_proxy = AsyncMock()
-            txt_proxy.infer = AsyncMock(side_effect=timed_infer)
-            fusion_proxy = AsyncMock()
-            fusion_proxy.infer = AsyncMock(side_effect=fusion_infer)
-            cls_proxy = AsyncMock()
-            cls_proxy.infer = AsyncMock(side_effect=classifier_infer)
-
             proxies: dict[str, Any] = {
-                "img_enc": img_proxy,
-                "txt_enc": txt_proxy,
-                "fusion": fusion_proxy,
-                "classifier": cls_proxy,
+                "img_enc": _make_timed_proxy(lambda: {"features": [0.1] * 768}),
+                "txt_enc": _make_timed_proxy(lambda: {"features": [0.1] * 768}),
+                "fusion": _make_timed_proxy(lambda: {"fused_features": [0.3] * 512}),
+                "classifier": _make_timed_proxy(lambda: {"label": "cat", "score": 0.95}),
             }
             ctx = InferContext(request_id="bench-b2", deadline_ms=30000)
             executor = Executor(g, proxies, ctx)
@@ -310,28 +296,28 @@ class TestB3ParallelSpeedup:
         seq_times: list[float] = []
         par_times: list[float] = []
 
-        for _ in range(n_iters):
-            mock_img = AsyncMock()
-            mock_img.infer = AsyncMock(side_effect=delayed_infer)
-            mock_txt = AsyncMock()
-            mock_txt.infer = AsyncMock(side_effect=delayed_infer)
-            proxies: dict[str, Any] = {"img_enc": mock_img, "txt_enc": mock_txt}
+        mock_img_seq = AsyncMock()
+        mock_img_seq.infer = AsyncMock(side_effect=delayed_infer)
+        mock_txt_seq = AsyncMock()
+        mock_txt_seq.infer = AsyncMock(side_effect=delayed_infer)
+        proxies_seq: dict[str, Any] = {"img_enc": mock_img_seq, "txt_enc": mock_txt_seq}
 
+        for _ in range(n_iters):
             ctx = InferContext(request_id="bench-b3-seq", deadline_ms=30000)
-            executor = Executor(g_seq, proxies, ctx)
+            executor = Executor(g_seq, proxies_seq, ctx)
             t0 = time.perf_counter()
             await executor.execute({"image_bytes": b"\x00"})
             seq_times.append(time.perf_counter() - t0)
 
-        for _ in range(n_iters):
-            mock_img = AsyncMock()
-            mock_img.infer = AsyncMock(side_effect=delayed_infer)
-            mock_txt = AsyncMock()
-            mock_txt.infer = AsyncMock(side_effect=delayed_infer)
-            proxies = {"img_enc": mock_img, "txt_enc": mock_txt}
+        mock_img_par = AsyncMock()
+        mock_img_par.infer = AsyncMock(side_effect=delayed_infer)
+        mock_txt_par = AsyncMock()
+        mock_txt_par.infer = AsyncMock(side_effect=delayed_infer)
+        proxies_par: dict[str, Any] = {"img_enc": mock_img_par, "txt_enc": mock_txt_par}
 
+        for _ in range(n_iters):
             ctx = InferContext(request_id="bench-b3-par", deadline_ms=30000)
-            executor = Executor(g_par, proxies, ctx)
+            executor = Executor(g_par, proxies_par, ctx)
             t0 = time.perf_counter()
             await executor.execute({"image_bytes": b"\x00"})
             par_times.append(time.perf_counter() - t0)

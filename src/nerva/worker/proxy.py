@@ -424,6 +424,11 @@ class WorkerProxy:
                 pool.free(slot)
 
         # Fallback for compatibility: read by shm_id directly if slot metadata is absent.
+        logger.warning(
+            "Missing output slot metadata for request '%s'; "
+            "falling back to direct SharedMemory read",
+            request_id,
+        )
         shm = SharedMemory(name=descriptor.shm_id, create=False)
         try:
             buf = shm.buf

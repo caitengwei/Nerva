@@ -233,6 +233,7 @@ class _WorkerLoop:
                 "status": exc.status.value,
                 "error": exc.error,
             })
+            return
         except Exception as exc:
             logger.exception("Inference failed for request '%s'", request_id)
             await self._send({
@@ -245,7 +246,12 @@ class _WorkerLoop:
             self._contexts.pop(request_id, None)
 
     def _run_infer_sync(self, inputs: dict[str, Any], context: InferContext) -> dict[str, Any]:
-        """Blocking wrapper — runs ``backend.infer()`` via ``asyncio.run()``."""
+        """Blocking wrapper for thread execution of async backend inference.
+
+        This runs inside ``asyncio.to_thread()``, so there is no running loop in
+        this thread. ``asyncio.run()`` is safe here and keeps backend.infer()
+        isolated from the worker event loop.
+        """
         assert self._backend is not None
         return asyncio.run(self._backend.infer(inputs, context))
 

@@ -182,9 +182,13 @@ class TestWorkerProxyOutputShmPath:
 
 
 class TestWorkerProxyShmAllocContention:
-    async def test_competing_alloc_requests(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    async def test_competing_alloc_requests(
+        self,
+        monkeypatch,  # type: ignore[no-untyped-def]
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
         """Two requests competing for one SHM slot: second should exhaust."""
-        proxy = WorkerProxy("/tmp/unused.sock")
+        proxy = WorkerProxy(os.path.join(tmp_path, "unused.sock"))
         sent: list[dict[str, Any]] = []
 
         async def _fake_send(msg: dict[str, Any]) -> None:
