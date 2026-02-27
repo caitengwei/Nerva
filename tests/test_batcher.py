@@ -1,4 +1,7 @@
-from nerva.engine.batcher import BatchConfig
+from unittest.mock import AsyncMock
+
+from nerva.backends.base import InferContext
+from nerva.engine.batcher import BatchConfig, DynamicBatcher
 
 
 def test_batch_config_defaults() -> None:
@@ -15,3 +18,27 @@ def test_batch_config_custom() -> None:
     assert cfg.max_batch_size == 8
     assert cfg.max_delay_ms == 5.0
     assert cfg.queue_capacity == 2048
+
+
+def _make_ctx(deadline_ms: int = 30000) -> InferContext:
+    return InferContext(request_id="test-req", deadline_ms=deadline_ms)
+
+
+def _make_inner() -> AsyncMock:
+    inner = AsyncMock()
+    inner.infer = AsyncMock(return_value={"result": "ok"})
+    return inner
+
+
+async def test_batcher_lifecycle() -> None:
+    """start() / stop() は例外を出さない。"""
+    inner = _make_inner()
+    batcher = DynamicBatcher(inner, BatchConfig())
+    await batcher.start()
+    await batcher.stop()
+
+
+async def test_batcher_context_manager() -> None:
+    inner = _make_inner()
+    async with DynamicBatcher(inner, BatchConfig()) as batcher:
+        assert batcher is not None
