@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    import asyncio
+
     from nerva.backends.base import InferContext
-    from nerva.engine.executor import InferableProxy
 
 
 @dataclass
@@ -29,6 +28,6 @@ class _PendingRequest:
     """A request waiting in the batcher queue."""
 
     inputs: dict[str, Any]
-    context: Any  # InferContext — kept as Any to avoid circular import at runtime
+    context: InferContext
     future: asyncio.Future[dict[str, Any]]
     enqueue_time: float = field(default_factory=time.monotonic)
