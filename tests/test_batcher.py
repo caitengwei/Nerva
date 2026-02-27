@@ -36,7 +36,7 @@ def _make_inner() -> AsyncMock:
 
 
 async def test_batcher_lifecycle() -> None:
-    """start() / stop() は例外を出さない。"""
+    """start() and stop() complete without raising exceptions."""
     inner = _make_inner()
     batcher = DynamicBatcher(inner, BatchConfig())
     await batcher.start()

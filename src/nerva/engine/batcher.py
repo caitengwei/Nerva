@@ -56,9 +56,12 @@ class DynamicBatcher:
             maxsize=config.queue_capacity
         )
         self._loop_task: asyncio.Task[None] | None = None
+        self._in_flight_futures: list[asyncio.Future[dict[str, Any]]] = []
 
     async def start(self) -> None:
         """Start the background batch loop."""
+        if self._loop_task is not None:
+            return  # Already running.
         self._loop_task = asyncio.create_task(self._batch_loop())
 
     async def stop(self) -> None:
@@ -73,6 +76,12 @@ class DynamicBatcher:
             req = self._queue.get_nowait()
             if not req.future.done():
                 req.future.set_exception(RuntimeError("batcher stopped"))
+        # Cancel futures for requests currently in-flight (already dequeued
+        # by _batch_loop but not yet resolved by gather).
+        for fut in self._in_flight_futures:
+            if not fut.done():
+                fut.set_exception(RuntimeError("batcher stopped"))
+        self._in_flight_futures.clear()
 
     async def __aenter__(self) -> DynamicBatcher:
         await self.start()
@@ -146,6 +155,10 @@ class DynamicBatcher:
             if not valid:
                 continue
 
+            # Register futures as in-flight before dispatching.
+            for req in valid:
+                self._in_flight_futures.append(req.future)
+
             # Dispatch valid requests concurrently.
             results = await asyncio.gather(
                 *(
@@ -163,3 +176,7 @@ class DynamicBatcher:
                     req.future.set_exception(result)
                 else:
                     req.future.set_result(result)
+            # Deregister futures after successful dispatch.
+            for req in valid:
+                with contextlib.suppress(ValueError):
+                    self._in_flight_futures.remove(req.future)

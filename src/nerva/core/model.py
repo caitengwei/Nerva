@@ -127,6 +127,8 @@ def model(
         model_class: User's Model subclass.
         backend: Backend name (e.g., "pytorch", "vllm").
         device: Target device (e.g., "cpu", "cuda:0").
+        batch_config: Optional batching configuration. If provided, the caller
+            should wrap the corresponding WorkerProxy with DynamicBatcher.
         **options: Backend-specific options.
 
     Returns:
