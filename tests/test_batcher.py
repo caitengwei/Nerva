@@ -189,36 +189,27 @@ async def test_queue_full_raises_resource_exhausted() -> None:
 
 
 async def test_stop_drains_pending_requests() -> None:
-    """After stop(), pending request futures receive an exception without leaking.
-
-    The request must still be in the queue (not yet dequeued by _batch_loop) when
-    stop() is called, so we call stop() immediately after creating the task and
-    yielding once to let the enqueue complete.
-    """
+    """stop() drains pending requests in the queue with RuntimeError."""
     inner = _make_inner()
-    # Large max_delay_ms so _batch_loop blocks on the first queue.get() indefinitely.
-    # queue_capacity=1 so the put() completes after a single yield.
-    cfg = BatchConfig(queue_capacity=1, max_delay_ms=10000.0)
+    cfg = BatchConfig(queue_capacity=10, max_delay_ms=10000.0)
     batcher = DynamicBatcher(inner, cfg)
     await batcher.start()
 
     ctx = _make_ctx()
     pending = asyncio.create_task(batcher.infer({"x": 1}, ctx))
-    # Yield to event loop so that:
-    #   1. The pending task runs and calls queue.put() (completes immediately, capacity=1).
-    #   2. _batch_loop is still waiting on the SECOND queue.get() for more items.
-    # At this point the item is IN the batch list (dequeued by _batch_loop's first get()),
-    # so we rely on stop() cancel + drain.  If the item was already taken by _batch_loop
-    # the future will be cancelled instead; either outcome is acceptable as "stopped".
+    # Yield once so the infer() coroutine can enqueue the request.
     await asyncio.sleep(0)
 
     await batcher.stop()
 
-    result = await asyncio.gather(pending, return_exceptions=True)
-    exc = result[0]
-    assert isinstance(exc, (RuntimeError, asyncio.CancelledError))
-    if isinstance(exc, RuntimeError):
-        assert "batcher stopped" in str(exc)
+    # wait_for protects against future hanging if drain logic has a bug.
+    results = await asyncio.wait_for(
+        asyncio.gather(pending, return_exceptions=True),
+        timeout=2.0,
+    )
+    exc = results[0]
+    assert isinstance(exc, RuntimeError)
+    assert "batcher stopped" in str(exc)
 
 
 async def test_inner_exception_propagated() -> None:
