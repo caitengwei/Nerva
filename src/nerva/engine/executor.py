@@ -119,7 +119,11 @@ class Executor:
                 elif node.node_type == "parallel":
                     result = await self._execute_parallel(node, node_inputs)
                 elif node.node_type == "cond":
-                    result = await self._execute_cond(node, node_inputs)
+                    result = await self._execute_cond(
+                        node,
+                        predicate_input=node_inputs,
+                        branch_inputs=inputs,
+                    )
                 else:
                     raise RuntimeError(f"Unknown node type: {node.node_type}")
 
@@ -236,10 +240,17 @@ class Executor:
         ))
         return results
 
-    async def _execute_cond(self, node: Node, inputs: Any) -> Any:
+    async def _execute_cond(
+        self,
+        node: Node,
+        *,
+        predicate_input: Any,
+        branch_inputs: Any,
+    ) -> Any:
         """Execute the selected branch of a cond node."""
-        # The inputs to a cond node is the predicate value.
-        predicate = inputs
+        # The cond node input is the predicate value. Branch execution should
+        # receive the executor input payload (not the predicate scalar).
+        predicate = predicate_input
 
         branch = node.true_branch if predicate else node.false_branch
 
@@ -247,4 +258,4 @@ class Executor:
             return predicate
 
         sub_executor = Executor(branch, self._proxies, self._context)
-        return await sub_executor.execute(inputs)
+        return await sub_executor.execute(branch_inputs)

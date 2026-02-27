@@ -225,6 +225,44 @@ class TestExecutorCond:
         result = await executor.execute(False)
         assert result == {"result": "false_path"}
 
+    async def test_cond_uses_predicate_for_branch_but_passes_payload_to_branch(self) -> None:
+        true_branch = Graph()
+        true_branch.add_node(Node(id="a_1", model_name="a"))
+        false_branch = Graph()
+        false_branch.add_node(Node(id="b_1", model_name="b"))
+
+        g = Graph()
+        g.add_node(Node(id="pred_1", model_name="pred"))
+        g.add_node(Node(
+            id="cond_1",
+            model_name="cond",
+            node_type="cond",
+            true_branch=true_branch,
+            false_branch=false_branch,
+        ))
+        g.add_edge(Edge(src="pred_1", dst="cond_1", src_field_path=("flag",)))
+
+        proxy_pred = make_mock_proxy(return_value={"flag": True})
+        proxy_a = make_mock_proxy(return_value={"result": "true_path"})
+        proxy_b = make_mock_proxy(return_value={"result": "false_path"})
+
+        payload = {"value": "hello"}
+        ctx = make_context()
+        executor = Executor(
+            g,
+            {"pred": proxy_pred, "a": proxy_a, "b": proxy_b},
+            ctx,
+        )
+        result = await executor.execute(payload)
+
+        assert result == {"result": "true_path"}
+        proxy_pred.infer.assert_called_once()
+        proxy_a.infer.assert_called_once()
+        proxy_b.infer.assert_not_called()
+
+        # Branch should receive the executor payload, not predicate boolean.
+        assert proxy_a.infer.call_args[0][0] == payload
+
 
 # ---------------------------------------------------------------------------
 # Executor: error handling

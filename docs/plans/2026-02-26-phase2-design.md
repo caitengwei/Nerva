@@ -271,7 +271,7 @@ Fail-fast:
 |------|---------|
 | `call` | `await proxies[model_name].infer(inputs, node_ctx)` |
 | `parallel` | 为每个 branch 创建子 Executor，`asyncio.gather` 并行，输出 `{"0": ..., "1": ...}` |
-| `cond` | 取 predicate 真实值，只执行选中分支的子 Executor |
+| `cond` | 取 predicate 真实值选择分支；分支执行输入保持为当前 executor 的 payload（而非 predicate 值） |
 
 ### 6.3 输入组装 (_build_node_inputs)
 
