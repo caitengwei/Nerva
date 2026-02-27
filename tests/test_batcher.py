@@ -42,3 +42,27 @@ async def test_batcher_context_manager() -> None:
     inner = _make_inner()
     async with DynamicBatcher(inner, BatchConfig()) as batcher:
         assert batcher is not None
+
+
+import pytest
+
+
+async def test_infer_deadline_admission_reject() -> None:
+    """剩余 deadline 不足时，infer() 立即拒绝。"""
+    inner = _make_inner()
+    cfg = BatchConfig(min_remaining_deadline_ms=50.0)
+    async with DynamicBatcher(inner, cfg) as batcher:
+        ctx = _make_ctx(deadline_ms=10)  # 10ms < 50ms threshold
+        with pytest.raises(RuntimeError, match="DEADLINE_EXCEEDED"):
+            await batcher.infer({"x": 1}, ctx)
+    inner.infer.assert_not_called()
+
+
+async def test_infer_returns_result() -> None:
+    """infer() 成功返回 inner 的结果。"""
+    inner = _make_inner()
+    inner.infer.return_value = {"out": 42}
+    async with DynamicBatcher(inner, BatchConfig(max_batch_size=1)) as batcher:
+        ctx = _make_ctx()
+        result = await batcher.infer({"x": 1}, ctx)
+    assert result == {"out": 42}

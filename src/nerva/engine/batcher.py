@@ -87,7 +87,75 @@ class DynamicBatcher:
         context: InferContext,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        raise NotImplementedError  # 在 Task 3 实现
+        # 1. Deadline admission check.
+        if context.deadline_ms < self._config.min_remaining_deadline_ms:
+            raise RuntimeError("DEADLINE_EXCEEDED")
+
+        # 2. Enqueue with backpressure timeout.
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        pending = _PendingRequest(inputs=inputs, context=context, future=future)
+        try:
+            await asyncio.wait_for(
+                self._queue.put(pending),
+                timeout=self._config.queue_timeout_ms / 1000.0,
+            )
+        except TimeoutError as err:
+            raise RuntimeError("RESOURCE_EXHAUSTED") from err
+
+        # 3. Wait for batch loop to resolve this request.
+        return await future
 
     async def _batch_loop(self) -> None:
-        raise NotImplementedError  # 在 Task 3 实现
+        config = self._config
+        while True:
+            # Wait for the first request (blocking).
+            first = await self._queue.get()
+            batch: list[_PendingRequest] = [first]
+            batch_deadline = time.monotonic() + config.max_delay_ms / 1000.0
+
+            # Accumulate up to max_batch_size within the time window.
+            while len(batch) < config.max_batch_size:
+                remaining = batch_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    item = await asyncio.wait_for(
+                        self._queue.get(), timeout=remaining
+                    )
+                    batch.append(item)
+                except TimeoutError:
+                    break
+
+            # Filter expired requests.
+            now = time.monotonic()
+            valid: list[_PendingRequest] = []
+            for req in batch:
+                elapsed_ms = (now - req.enqueue_time) * 1000.0
+                remaining_ms = req.context.deadline_ms - elapsed_ms
+                if remaining_ms < 0:
+                    if not req.future.done():
+                        req.future.set_exception(RuntimeError("DEADLINE_EXCEEDED"))
+                else:
+                    valid.append(req)
+
+            if not valid:
+                continue
+
+            # Dispatch valid requests concurrently.
+            results = await asyncio.gather(
+                *(
+                    self._inner.infer(req.inputs, req.context)
+                    for req in valid
+                ),
+                return_exceptions=True,
+            )
+
+            # Distribute results back to futures.
+            for req, result in zip(valid, results, strict=True):
+                if req.future.done():
+                    continue
+                if isinstance(result, BaseException):
+                    req.future.set_exception(result)
+                else:
+                    req.future.set_result(result)
