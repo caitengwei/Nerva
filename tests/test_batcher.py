@@ -212,6 +212,31 @@ async def test_stop_drains_pending_requests() -> None:
     assert "batcher stopped" in str(exc)
 
 
+async def test_stop_drains_window_requests() -> None:
+    """stop() drains requests dequeued but still in the aggregation window."""
+    inner = _make_inner()
+    # Long delay window so the request stays in the aggregation window.
+    cfg = BatchConfig(queue_capacity=10, max_delay_ms=10000.0)
+    batcher = DynamicBatcher(inner, cfg)
+    await batcher.start()
+
+    ctx = _make_ctx()
+    pending = asyncio.create_task(batcher.infer({"x": 1}, ctx))
+    # Sleep briefly so _batch_loop has a chance to dequeue the request and
+    # enter the aggregation window before stop() is called.
+    await asyncio.sleep(0.01)
+
+    await batcher.stop()
+
+    results = await asyncio.wait_for(
+        asyncio.gather(pending, return_exceptions=True),
+        timeout=2.0,
+    )
+    exc = results[0]
+    assert isinstance(exc, RuntimeError)
+    assert "batcher stopped" in str(exc)
+
+
 async def test_inner_exception_propagated() -> None:
     """inner.infer() 抛出的异常透传给调用方 future。"""
     inner = _make_inner()

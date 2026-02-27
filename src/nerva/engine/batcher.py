@@ -124,6 +124,9 @@ class DynamicBatcher:
         while True:
             # Wait for the first request (blocking).
             first = await self._queue.get()
+            # Register immediately so stop() can drain this future even if
+            # CancelledError is raised during the aggregation window below.
+            self._in_flight_futures.append(first.future)
             batch: list[_PendingRequest] = [first]
             batch_deadline = time.monotonic() + config.max_delay_ms / 1000.0
 
@@ -136,6 +139,8 @@ class DynamicBatcher:
                     item = await asyncio.wait_for(
                         self._queue.get(), timeout=remaining
                     )
+                    # Register immediately after dequeue for the same reason.
+                    self._in_flight_futures.append(item.future)
                     batch.append(item)
                 except TimeoutError:
                     break
@@ -149,17 +154,16 @@ class DynamicBatcher:
                 if remaining_ms < 0:
                     if not req.future.done():
                         req.future.set_exception(RuntimeError("DEADLINE_EXCEEDED"))
+                    # Deregister from in-flight since we are resolving it here.
+                    with contextlib.suppress(ValueError):
+                        self._in_flight_futures.remove(req.future)
                 else:
                     valid.append(req)
 
             if not valid:
                 continue
 
-            # Register futures as in-flight before dispatching.
-            for req in valid:
-                self._in_flight_futures.append(req.future)
-
-            # Dispatch valid requests concurrently.
+            # Dispatch valid requests concurrently (already registered as in-flight above).
             results = await asyncio.gather(
                 *(
                     self._inner.infer(req.inputs, req.context)
