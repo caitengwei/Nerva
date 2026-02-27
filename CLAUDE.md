@@ -4,18 +4,25 @@ High-performance model inference serving framework. Python-first philosophy with
 
 ## Status
 
-Phase 0 complete. Phase 1 design complete, pending implementation.
+Phase 0, 1, 2 complete. 140 tests passing.
 
 ## Project Layout
 
 ```
 src/nerva/                  # 主包（src layout）
   core/model.py             # Model ABC, ModelHandle, model()
+  core/graph.py             # Edge, Node, Graph IR
+  core/proxy.py             # Proxy, TraceContext, trace()
+  core/primitives.py        # cond(), parallel()
   backends/base.py          # Backend ABC, ModelConfig, InferContext, BatchMeta
   backends/registry.py      # register_backend / get_backend / list_backends
   backends/pytorch.py       # PyTorchBackend
-  engine/                   # (Phase 1+) batcher, scheduler, shm_pool
-  worker/                   # (Phase 1+) process, manager, ipc
+  engine/executor.py        # DAG Executor (event-driven)
+  engine/shm_pool.py        # Shared Memory Pool
+  worker/process.py         # Worker process main loop
+  worker/proxy.py           # WorkerProxy (async RPC)
+  worker/manager.py         # WorkerManager (lifecycle)
+  worker/ipc.py             # IPC message codec
   server/                   # (Phase 4+) ASGI app, RPC, protocol
   observability/            # (Phase 5+) metrics, logging
 tests/                      # pytest + pytest-asyncio (asyncio_mode=auto)
@@ -47,12 +54,19 @@ uv run mypy                   # type check
 
 ## Architecture
 
-Call chain: Orchestrator → Backend → Model
+Call chain: trace() → Graph → Executor → WorkerProxy → Worker → Backend → Model
 
 - **Model** — user subclass, implements `load()` + `infer()`
 - **Backend** — execution backend (PyTorchBackend wraps Model, manages lifecycle)
-- **ModelHandle** — lazy declaration from `model()`, not loaded until pipeline starts
+- **ModelHandle** — lazy declaration from `model()`, dual-mode `__call__` (trace/runtime)
 - **Backend registry** — `@register_backend("name")` decorator pattern
+- **Graph IR** — Edge (with field_path/input_key), Node, Graph (topo sort)
+- **Proxy** — trace-time placeholder, records dependencies via `__getitem__`
+- **trace()** — builds Graph by tracing user pipeline function
+- **cond()/parallel()** — control flow primitives (sub-graph embedding)
+- **Executor** — event-driven DAG executor (in-degree table + done_queue)
+- **WorkerProxy** — async RPC wrapper for Worker subprocess (ZeroMQ PAIR)
+- **WorkerManager** — spawns/restarts/shuts down Worker processes
 
 ## Design Decisions (from Design Review)
 

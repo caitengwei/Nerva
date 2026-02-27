@@ -207,6 +207,65 @@ class TestWorkerInfer:
                 socket.close(linger=0)
                 ctx.term()
 
+    async def test_infer_raw_bytes_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sock_path = _make_socket_path(tmp_dir)
+            ctx = zmq.asyncio.Context()
+            socket = ctx.socket(zmq.PAIR)
+            socket.bind(f"ipc://{sock_path}")
+
+            proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
+            proc.start()
+            try:
+                msg = await _recv_msg(socket)
+                assert msg["type"] == MessageType.WORKER_READY.value
+
+                await _send_msg(socket, {
+                    "type": MessageType.LOAD_MODEL.value,
+                    "model_name": "echo",
+                    "model_class": "tests.helpers:EchoModel",
+                    "backend": "pytorch",
+                    "device": "cpu",
+                })
+                ack = await _recv_msg(socket)
+                assert ack["status"] == AckStatus.OK.value
+
+                payload = b"\x00\x01\x02\xff"
+                descriptor = Descriptor(
+                    request_id="req-bytes-001",
+                    node_id=0,
+                    inline_data=payload,
+                    length=len(payload),
+                    payload_codec="raw_bytes_v1",
+                    input_key="value",
+                )
+
+                await _send_msg(socket, {
+                    "type": MessageType.INFER_SUBMIT.value,
+                    "request_id": "req-bytes-001",
+                    "descriptor": descriptor.to_dict(),
+                    "deadline_ms": 30000,
+                })
+
+                infer_ack = await _recv_msg(socket)
+                assert infer_ack["type"] == MessageType.INFER_ACK.value
+                assert infer_ack["status"] == AckStatus.OK.value
+                assert infer_ack["request_id"] == "req-bytes-001"
+
+                out_desc = Descriptor.from_dict(infer_ack["descriptor"])
+                assert out_desc.is_inline
+                assert out_desc.inline_data is not None
+                output = msgpack.unpackb(out_desc.inline_data, raw=False)
+                assert output == {"echo": payload}
+            finally:
+                await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=2)
+                socket.close(linger=0)
+                ctx.term()
+
 
 class TestWorkerHealthCheck:
     """Send HEALTH_CHECK, verify HEALTH_STATUS."""

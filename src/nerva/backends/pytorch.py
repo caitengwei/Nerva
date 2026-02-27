@@ -46,6 +46,7 @@ class PyTorchBackend(Backend):
             config.device,
         )
         instance = config.model_class()
+        instance._options = config.backend_options
         instance.load()
         self._model = instance
         logger.info("Model '%s' loaded successfully", config.model_name)

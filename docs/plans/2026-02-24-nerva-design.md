@@ -178,8 +178,18 @@ Two-layer communication between Master and Worker:
 Descriptor schema (MVP):
 - `request_id`, `node_id`
 - `shm_id`, `offset`, `length`
+- `inline_data` (small payload inline)
+- `payload_codec` (`msgpack_dict_v1` / `raw_bytes_v1`)
+- `input_key` (target input field for `raw_bytes_v1`)
 - `dtype`, `shape`
 - `lifetime_token` (for ref-count style reclaim)
+
+Payload codec convention (Phase 1.1):
+- Default `msgpack_dict_v1`: payload is msgpack-encoded dict.
+- Single-field bytes can use `raw_bytes_v1`: skip dict-level `msgpack.packb`; Worker reconstructs `{input_key: bytes}`.
+
+Reduced-copy convention (Phase 1.1):
+- For SHM + `msgpack_dict_v1`, prefer `memoryview -> msgpack.unpackb` to avoid `bytes(buf[slice])` temporary copies.
 
 Lifecycle (MVP):
 1. Master allocates slot from shm pool and writes payload

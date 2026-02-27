@@ -8,13 +8,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import deque
+from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, Any
 
 import msgpack
 import zmq
 import zmq.asyncio
 
-from nerva.engine.shm_pool import IPC_CONTROL_INLINE_MAX_BYTES
+from nerva.engine.shm_pool import IPC_CONTROL_INLINE_MAX_BYTES, ShmPoolExhausted
 from nerva.worker.ipc import (
     AckStatus,
     Descriptor,
@@ -25,9 +27,10 @@ from nerva.worker.ipc import (
 
 if TYPE_CHECKING:
     from nerva.backends.base import InferContext
-    from nerva.engine.shm_pool import ShmPool
+    from nerva.engine.shm_pool import ShmPool, ShmSlot
 
 logger = logging.getLogger(__name__)
+MAX_RECENT_COMPLETED_REQUESTS = 2048
 
 
 class WorkerProxy:
@@ -47,6 +50,10 @@ class WorkerProxy:
 
         # Pending infer futures keyed by request_id.
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._request_pools: dict[str, ShmPool | None] = {}
+        self._output_slots: dict[str, tuple[ShmPool, ShmSlot]] = {}
+        self._recently_completed: deque[str] = deque()
+        self._recently_completed_set: set[str] = set()
 
         # Special one-shot futures for non-request-id messages.
         self._load_model_future: asyncio.Future[dict[str, Any]] | None = None
@@ -142,7 +149,14 @@ class WorkerProxy:
     ) -> dict[str, Any]:
         """Serialize inputs, send INFER_SUBMIT, wait for INFER_ACK, return output."""
         request_id = context.request_id
-        input_bytes = msgpack.packb(inputs, use_bin_type=True)
+        raw_bytes_input = self._extract_raw_bytes_input(inputs)
+        if raw_bytes_input is None:
+            input_key = None
+            payload_codec = "msgpack_dict_v1"
+            input_bytes = msgpack.packb(inputs, use_bin_type=True)
+        else:
+            input_key, input_bytes = raw_bytes_input
+            payload_codec = "raw_bytes_v1"
         shm_slot = None
 
         if len(input_bytes) <= IPC_CONTROL_INLINE_MAX_BYTES or shm_pool is None:
@@ -152,6 +166,8 @@ class WorkerProxy:
                 node_id=0,
                 inline_data=input_bytes,
                 length=len(input_bytes),
+                payload_codec=payload_codec,
+                input_key=input_key,
             )
         else:
             # SHM path.
@@ -163,6 +179,8 @@ class WorkerProxy:
                 shm_id=shm_slot.shm_name,
                 offset=shm_slot.offset,
                 length=len(input_bytes),
+                payload_codec=payload_codec,
+                input_key=input_key,
             )
 
         loop = asyncio.get_running_loop()
@@ -170,6 +188,7 @@ class WorkerProxy:
             raise RuntimeError(f"Duplicate in-flight request_id '{request_id}'")
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[request_id] = fut
+        self._request_pools[request_id] = shm_pool
 
         try:
             await self._send({
@@ -182,24 +201,35 @@ class WorkerProxy:
             ack = await asyncio.wait_for(fut, timeout=self._submit_timeout)
         except TimeoutError:
             self._pending.pop(request_id, None)
+            self._release_output_slot(request_id)
+            with contextlib.suppress(Exception):
+                await self.cancel(request_id, reason="submit timeout")
             raise RuntimeError(
                 f"Timeout waiting for INFER_ACK for request '{request_id}'"
             ) from None
         finally:
             self._pending.pop(request_id, None)
+            self._request_pools.pop(request_id, None)
+            self._mark_request_completed(request_id)
             # Free SHM slot if allocated.
             if shm_slot is not None and shm_pool is not None:
                 shm_pool.free(shm_slot)
 
         status = ack.get("status", "")
+        if status == AckStatus.DEADLINE_EXCEEDED.value:
+            self._release_output_slot(request_id)
+            raise RuntimeError(f"Infer failed: [{status}] deadline exceeded")
+        if status == AckStatus.ABORTED.value:
+            self._release_output_slot(request_id)
+            raise RuntimeError(f"Infer failed: [{status}] request was cancelled")
         if status != AckStatus.OK.value:
             error = ack.get("error", "unknown error")
+            self._release_output_slot(request_id)
             raise RuntimeError(f"Infer failed: [{status}] {error}")
 
         # Deserialize output from descriptor.
         out_descriptor = Descriptor.from_dict(ack["descriptor"])
-        assert out_descriptor.inline_data is not None
-        return msgpack.unpackb(out_descriptor.inline_data, raw=False)  # type: ignore[no-any-return]
+        return self._decode_output(out_descriptor, request_id)
 
     async def cancel(self, request_id: str, reason: str = "") -> None:
         """Send CANCEL (best-effort)."""
@@ -280,7 +310,13 @@ class WorkerProxy:
                 if fut is not None and not fut.done():
                     fut.set_result(msg)
                 else:
-                    logger.warning("No pending future for request '%s'", request_id)
+                    if request_id in self._recently_completed_set:
+                        logger.debug("Late INFER_ACK for completed request '%s'", request_id)
+                    else:
+                        logger.warning("No pending future for request '%s'", request_id)
+
+            elif msg_type == MessageType.SHM_ALLOC_REQUEST.value:
+                await self._handle_shm_alloc_request(msg)
 
             else:
                 logger.warning("Unexpected message type in recv_loop: %s", msg_type)
@@ -291,6 +327,12 @@ class WorkerProxy:
             if not fut.done():
                 fut.set_exception(RuntimeError(reason))
         self._pending.clear()
+        self._request_pools.clear()
+
+        for request_id in list(self._output_slots.keys()):
+            self._release_output_slot(request_id)
+        self._recently_completed.clear()
+        self._recently_completed_set.clear()
 
         if self._load_model_future is not None and not self._load_model_future.done():
             self._load_model_future.set_exception(RuntimeError(reason))
@@ -299,3 +341,132 @@ class WorkerProxy:
         if self._health_future is not None and not self._health_future.done():
             self._health_future.set_exception(RuntimeError(reason))
         self._health_future = None
+
+    async def _handle_shm_alloc_request(self, msg: dict[str, Any]) -> None:
+        """Allocate an output SHM slot for a worker request and respond."""
+        request_id = msg.get("request_id", "")
+        size = msg.get("size", 0)
+
+        if not isinstance(size, int) or size <= 0:
+            await self._send({
+                "type": MessageType.SHM_ALLOC_RESPONSE.value,
+                "request_id": request_id,
+                "status": AckStatus.INVALID_ARGUMENT.value,
+                "error": f"Invalid SHM allocation size: {size!r}",
+            })
+            return
+
+        pool = self._request_pools.get(request_id)
+        if pool is None:
+            await self._send({
+                "type": MessageType.SHM_ALLOC_RESPONSE.value,
+                "request_id": request_id,
+                "status": AckStatus.UNAVAILABLE.value,
+                "error": "No shm_pool associated with request",
+            })
+            return
+
+        # Release stale output allocation if worker retries for the same request.
+        self._release_output_slot(request_id)
+
+        try:
+            slot = pool.alloc(size)
+        except ShmPoolExhausted as exc:
+            await self._send({
+                "type": MessageType.SHM_ALLOC_RESPONSE.value,
+                "request_id": request_id,
+                "status": AckStatus.RESOURCE_EXHAUSTED.value,
+                "error": str(exc),
+            })
+            return
+        except Exception as exc:
+            await self._send({
+                "type": MessageType.SHM_ALLOC_RESPONSE.value,
+                "request_id": request_id,
+                "status": AckStatus.INTERNAL.value,
+                "error": str(exc),
+            })
+            return
+
+        self._output_slots[request_id] = (pool, slot)
+        await self._send({
+            "type": MessageType.SHM_ALLOC_RESPONSE.value,
+            "request_id": request_id,
+            "status": AckStatus.OK.value,
+            "shm_id": slot.shm_name,
+            "offset": slot.offset,
+            "slot_size": slot.slot_size,
+        })
+
+    def _decode_output(
+        self,
+        descriptor: Descriptor,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Decode output payload from inline bytes or output SHM slot."""
+        if descriptor.is_inline:
+            assert descriptor.inline_data is not None
+            self._release_output_slot(request_id)
+            return msgpack.unpackb(descriptor.inline_data, raw=False)  # type: ignore[no-any-return]
+
+        if descriptor.shm_id is None:
+            self._release_output_slot(request_id)
+            raise RuntimeError("INFER_ACK descriptor has neither inline_data nor shm_id")
+
+        slot_entry = self._output_slots.pop(request_id, None)
+        if slot_entry is not None:
+            pool, slot = slot_entry
+            view = pool.read_view(slot, descriptor.length)
+            try:
+                return msgpack.unpackb(view, raw=False)  # type: ignore[no-any-return]
+            finally:
+                view.release()
+                pool.free(slot)
+
+        # Fallback for compatibility: read by shm_id directly if slot metadata is absent.
+        logger.warning(
+            "Missing output slot metadata for request '%s'; "
+            "falling back to direct SharedMemory read",
+            request_id,
+        )
+        shm = SharedMemory(name=descriptor.shm_id, create=False)
+        try:
+            buf = shm.buf
+            assert buf is not None
+            view = memoryview(buf)[descriptor.offset : descriptor.offset + descriptor.length]
+            try:
+                return msgpack.unpackb(view, raw=False)  # type: ignore[no-any-return]
+            finally:
+                view.release()
+        finally:
+            shm.close()
+
+    @staticmethod
+    def _extract_raw_bytes_input(inputs: dict[str, Any]) -> tuple[str, bytes] | None:
+        """Return (input_key, payload) when inputs is a single raw-bytes field."""
+        if len(inputs) != 1:
+            return None
+
+        input_key, value = next(iter(inputs.items()))
+        if not isinstance(value, bytes):
+            return None
+        return input_key, value
+
+    def _release_output_slot(self, request_id: str) -> None:
+        """Free and forget output SHM slot allocated for *request_id*."""
+        slot_entry = self._output_slots.pop(request_id, None)
+        if slot_entry is None:
+            return
+        pool, slot = slot_entry
+        pool.free(slot)
+
+    def _mark_request_completed(self, request_id: str) -> None:
+        """Track recently completed request IDs for late-ACK noise suppression."""
+        if request_id in self._recently_completed_set:
+            return
+
+        self._recently_completed.append(request_id)
+        self._recently_completed_set.add(request_id)
+        while len(self._recently_completed) > MAX_RECENT_COMPLETED_REQUESTS:
+            old = self._recently_completed.popleft()
+            self._recently_completed_set.discard(old)

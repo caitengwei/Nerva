@@ -322,7 +322,9 @@ class WorkerProxy:
 ```
 WorkerProxy.infer(inputs, context)
   │
-  ├─ 1. 序列化 inputs → bytes (msgpack)
+  ├─ 1. 选择 payload codec
+  │     ├─ 单字段 bytes：raw_bytes_v1（跳过 dict 级 msgpack 序列化）
+  │     └─ 其他输入：msgpack_dict_v1（msgpack.packb(inputs)）
   ├─ 2. 判断 inline vs SHM
   │     ├─ <= 8KB → inline_data = bytes
   │     └─ > 8KB  → ShmPool.alloc() → ShmPool.write() → descriptor
@@ -360,6 +362,8 @@ WorkerProxy.infer(inputs, context)
         "offset": <uint32>,
         "length": <uint32>,
         "inline_data": <bytes | None>,
+        "payload_codec": <str>,       # "msgpack_dict_v1" | "raw_bytes_v1"
+        "input_key": <str | None>,    # raw_bytes_v1 时必填
         "dtype": <str>,
         "shape": [<uint32>, ...],
         "device": <str>,              # reserved
@@ -369,6 +373,11 @@ WorkerProxy.infer(inputs, context)
     "batch_meta": None,  # Phase 1 不启用 batching（Phase 3 前为 None）
 }
 ```
+
+payload codec 约定：
+- `msgpack_dict_v1`：默认值，descriptor payload 为 `msgpack.packb(dict)` 结果。
+- `raw_bytes_v1`：仅用于单字段 bytes 输入，通过 `input_key` 还原为 `{input_key: bytes}`。
+- 当前实现中 output descriptor 仍统一使用 `msgpack_dict_v1`。
 
 ### INFER_ACK
 
@@ -454,6 +463,10 @@ Master free → RECLAIMED
 - 正常路径：收到 INFER_ACK 后立即 free input descriptor
 - 超时路径：`IPC_SUBMIT_TIMEOUT_MS` (5s) 后仍无 ACK → EXPIRED → free
 - Worker 崩溃路径：WorkerManager 检测到崩溃 → 批量 free 所有该 Worker 的 in-flight descriptors
+
+**减少中间拷贝约定（Phase 1.1）：**
+- SHM + `msgpack_dict_v1` 解码时，优先直接使用 `memoryview` 喂给 `msgpack.unpackb`，避免 `bytes(buf[slice])` 中间副本。
+- `raw_bytes_v1` 的 SHM 路径为保持 Python `bytes` 语义，当前保留一次 `bytes` materialization。
 
 ### 9.2 Output 数据路径
 
@@ -570,6 +583,7 @@ dependencies = [
 | Worker 优雅关闭 | send SHUTDOWN → verify process exit |
 | SHM 回收 | submit → kill worker → verify SHM slot 回收 |
 | ACK 丢失超时回收 | submit → 模拟 Worker 不回复 → verify submit_timeout 后 SHM 回收 |
+| 单字段 bytes 快速路径 | 发送 `raw_bytes_v1` descriptor → verify Worker 输入为 `{input_key: bytes}` |
 | schema_version 不匹配 | 发送 schema_version=99 的消息 → verify INVALID_ARGUMENT 拒绝 |
 | Cancel 与 deadline 优先级 | 同时触发 cancel 和 deadline → verify 返回先生效的状态码 |
 | Cancel 执行中请求 | 推理执行中发送 CANCEL → verify context.cancelled 被设置 |
@@ -599,3 +613,4 @@ dependencies = [
 |---|---|
 | 2026-02-25 | 初始版本 |
 | 2026-02-25 | 修订：根据 Codex review 修复 7 个问题 — P0-1: 补充 output SHM 数据路径和生命周期；P0-2: Worker 推理改用 run_in_executor 避免阻塞 event loop；P0-3: Descriptor schema 对齐 ipc-contract（shm_name→shm_id，补充 reserved 字段）；P0-4: request_id 统一为 str；P1-5: InferContext 去掉 frozen（允许 cancel 修改）；P1-6: socket 路径加入 PID 隔离 + tmpdir + stale 清理；P1-7: 测试矩阵补充 ACK 丢失/schema 版本/cancel 优先级等场景 |
+| 2026-02-26 | 修订：补充 `payload_codec/input_key` 协议字段；新增单字段 bytes `raw_bytes_v1` 快速路径；补充 SHM 解码 `memoryview` 减少中间拷贝约定 |
