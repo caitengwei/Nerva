@@ -235,14 +235,24 @@ tests/test_phase2_e2e.py           # 5 tests (real Worker)
 - Backpressure / queue overflow 拒绝
 - Cancellation propagation
 
-**关键决策（来自 Design Review #8）：**
-- 不做 padding，按 size 一致性组 batch
-- batch 等待时间计入请求 deadline
-- 默认 `max_delay_ms = 10`
+**关键设计决策：**
+- DynamicBatcher 作为 InferableProxy wrapper，对 Executor 完全透明
+- Deadline 准入 + 批次聚合合并进 Batcher，不单独做 Scheduler
+- 组图时透明：BatchConfig 通过 model() 参数声明，不影响 trace()
+- Backpressure：等待 + 超时拒绝（queue_timeout_ms），RESOURCE_EXHAUSTED
+- 批次并发执行：asyncio.gather 并发 N 个单请求（MVP，不改 Model 接口）
 
-**验证标准：** 并发发送 N 个请求，Batcher 正确聚合为 batch；过期请求被拒绝；取消信号正确传播。
+**验证结果：** ruff 0 errors, mypy 0 issues, 176 tests passed (23.84s)
 
-**状态：** ⬜ 待设计
+**状态：** ✅ 已完成 (2026-02-27)
+
+**产出文件：**
+```
+src/nerva/engine/batcher.py        # DynamicBatcher, BatchConfig, _PendingRequest
+src/nerva/core/model.py            # model() + ModelHandle 新增 batch_config（修改）
+tests/test_batcher.py              # 单元测试（mock inner proxy）13 tests
+tests/test_phase3_e2e.py           # 集成测试（真实 Worker）2 tests
+```
 
 ---
 
@@ -304,7 +314,7 @@ W4 (spikes) ──────────→ W5 (interface contracts)
                                     ✅                                     ✅
 
 Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 ──→ Phase 5
-  ✅           ✅           ✅        待设计      待设计      待设计
+  ✅           ✅           ✅           ✅        待设计      待设计
 ```
 
 ---
@@ -334,3 +344,4 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 
 | 2026-02-25 | 初始版本 |
 | 2026-02-25 | 更新全部前置工作和 Phase 0 为已完成；补充关键决策、产出文件、spike 结论；更新 Phase 1-5 加入设计决策；新增文档索引 |
 | 2026-02-26 | Phase 1 和 Phase 2 标记为已完成；补充产出文件清单和关键设计决策；新增 Phase 2 设计文档链接 |
+| 2026-02-27 | Phase 3 标记为已完成；补充产出文件和关键设计决策 |
