@@ -207,9 +207,10 @@ def parallel(*fns: Callable[[], Any]) -> tuple[Proxy, ...]:
 **执行流程（trace 阶段）：**
 1. 为每个 branch 函数临时 swap_graph 到独立子图
 2. 执行 branch 函数，收集子图
-3. 恢复父图
-4. 创建 `parallel` Node，嵌入所有子图
-5. 返回 tuple of Proxy，每个 Proxy 的初始 `field_path=(str(i),)`
+3. 校验每个子图边界（子图非空，且所有 edge 的 src/dst 都属于子图节点）
+4. 恢复父图
+5. 创建 `parallel` Node，嵌入所有子图
+6. 返回 tuple of Proxy，每个 Proxy 的初始 `field_path=(str(i),)`
 
 **关键设计：parallel 输出映射**
 
@@ -227,9 +228,10 @@ def cond(predicate: Any, true_fn: Callable[[], Any], false_fn: Callable[[], Any]
 
 **执行流程（trace 阶段）：**
 1. 分别 trace true/false branch 为独立子图
-2. 创建 `cond` Node，嵌入两个子图
-3. predicate 若为 Proxy → 创建 predicate → cond 的边
-4. 返回 Proxy(source_node_id=cond_id)
+2. 校验两个子图边界（子图非空，且所有 edge 的 src/dst 都属于子图节点）
+3. 创建 `cond` Node，嵌入两个子图
+4. predicate 若为 Proxy → 创建 predicate → cond 的边
+5. 返回 Proxy(source_node_id=cond_id)
 
 ---
 
@@ -245,6 +247,7 @@ def cond(predicate: Any, true_fn: Callable[[], Any], false_fn: Callable[[], Any]
   done_queue = asyncio.Queue()
 
   启动所有 in_degree == 0 的节点
+  若无可启动节点 -> fail-fast 报错（避免等待空队列导致阻塞）
 
 主循环:
   while remaining > 0:
@@ -388,11 +391,11 @@ Phase 2 新增以下公共 API（通过 `nerva.__init__` 导出）：
 
 - **test_graph.py** (10 cases) — Graph 构建、node_map、predecessors/successors、incoming_edges、拓扑排序（linear/diamond）、环路检测、Edge frozen/field_path/dst_input_key
 - **test_proxy.py** (15 cases) — Proxy.__getitem__ 单层/链式/非 string 报错；_extract_proxy_edges 单 Proxy/dict/None 源/混合值；trace linear/getitem/diamond/dict mapping；context 隔离；ModelHandle trace 模式
-- **test_primitives.py** (5 cases) — parallel 基本/输出 field_path；cond 基本/predicate 边；嵌套 parallel-in-cond
+- **test_primitives.py** (8 cases) — parallel 基本/输出 field_path；cond 基本/predicate 边；嵌套 parallel-in-cond；空 branch/cross-graph capture 校验
 
 ### 11.2 Executor 测试（mock）
 
-- **test_executor.py** (13 cases) — resolve_field_path（empty/single/nested/missing）；linear 执行/field_path；diamond dict 输入组装；parallel 节点；cond true/false 分支；fail-fast；missing proxy 报错；空图
+- **test_executor.py** (14 cases) — resolve_field_path（empty/single/nested/missing）；linear 执行/field_path；diamond dict 输入组装；parallel 节点；cond true/false 分支；fail-fast；missing proxy 报错；空图；无 source 节点 fail-fast
 
 ### 11.3 端到端集成测试
 

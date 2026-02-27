@@ -1,7 +1,5 @@
 # Phase 2 DAG Benchmark Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** 实现 4 个 benchmark 用例（B1-B4），量化 Phase 2 DAG 编排层的 trace 开销、executor 调度开销、并行效率和端到端延迟。
 
 **Architecture:** 在 `tests/helpers.py` 新增 4 个 benchmark model（BenchImageEncoder / BenchTextEncoder / BenchFusionModel / BenchClassifier），在 `tests/test_phase2_bench.py` 实现 B1-B4 用例。模型通过 `options` 接收 `dim` 和 `delay_ms` 参数，用 `asyncio.sleep` 模拟计算，构造 realistic 大小的 float list 输出。JSON 结果输出到 `bench-results/phase2/`。

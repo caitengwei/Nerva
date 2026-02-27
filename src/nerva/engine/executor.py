@@ -134,6 +134,12 @@ class Executor:
                 task = asyncio.create_task(_run_node(node.id))
                 running[node.id] = task
 
+        if not running:
+            raise RuntimeError(
+                "Graph has no source nodes (in_degree == 0); it may contain a "
+                "cycle and cannot be executed by this executor."
+            )
+
         remaining = len(graph.nodes)
         while remaining > 0:
             item = await done_queue.get()

@@ -2,6 +2,8 @@
 
 from typing import Any
 
+import pytest
+
 from nerva import Model, cond, model, parallel, trace
 
 
@@ -122,3 +124,48 @@ class TestCond:
         # False branch has a parallel node.
         assert len(cond_node.false_branch.nodes) == 1
         assert cond_node.false_branch.nodes[0].node_type == "parallel"
+
+
+class TestBranchValidation:
+    def test_parallel_rejects_empty_branch(self) -> None:
+        def pipeline(x: Any) -> Any:
+            return parallel(lambda: x)
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"parallel\(branch 0\): branch traced to an empty sub-graph",
+        ):
+            trace(pipeline)
+
+    def test_parallel_rejects_cross_graph_capture(self) -> None:
+        a = model("a", DummyModel)
+        b = model("b", DummyModel)
+
+        def pipeline(x: Any) -> Any:
+            a_out = a(x)
+            return parallel(lambda: b(a_out))
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"parallel\(branch 0\): detected cross-graph edge",
+        ):
+            trace(pipeline)
+
+    def test_cond_rejects_cross_graph_capture(self) -> None:
+        pred = model("pred", DummyModel)
+        a = model("a", DummyModel)
+        b = model("b", DummyModel)
+
+        def pipeline(x: Any) -> Any:
+            pred_out = pred(x)
+            return cond(
+                pred_out,
+                lambda: a(pred_out),
+                lambda: b(x),
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"cond\(true_fn\): detected cross-graph edge",
+        ):
+            trace(pipeline)

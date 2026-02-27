@@ -263,3 +263,22 @@ class TestExecutorErrors:
         executor = Executor(g, {}, ctx)
         result = await executor.execute({"input": 1})
         assert result == {"input": 1}
+
+    async def test_no_source_nodes_raises(self) -> None:
+        g = Graph()
+        g.add_node(Node(id="a_1", model_name="a"))
+        g.add_node(Node(id="b_1", model_name="b"))
+        g.add_edge(Edge(src="a_1", dst="b_1"))
+        g.add_edge(Edge(src="b_1", dst="a_1"))
+
+        proxy_a = make_mock_proxy(return_value={"x": 1})
+        proxy_b = make_mock_proxy(return_value={"y": 2})
+
+        ctx = make_context()
+        executor = Executor(g, {"a": proxy_a, "b": proxy_b}, ctx)
+
+        with pytest.raises(RuntimeError, match="Graph has no source nodes"):
+            await executor.execute({"input": 1})
+
+        proxy_a.infer.assert_not_called()
+        proxy_b.infer.assert_not_called()

@@ -15,6 +15,30 @@ from nerva.core.graph import Edge, Graph, Node
 from nerva.core.proxy import Proxy, _require_trace_context
 
 
+def _validate_branch_graph(
+    graph: Graph,
+    *,
+    primitive: str,
+    branch_name: str,
+) -> None:
+    """Validate traced sub-graph boundaries for control-flow branches."""
+    node_ids = {node.id for node in graph.nodes}
+    if not node_ids:
+        raise RuntimeError(
+            f"{primitive}({branch_name}): branch traced to an empty sub-graph. "
+            "This usually means the branch captured parent Proxies instead of "
+            "building operations inside the branch."
+        )
+
+    for edge in graph.edges:
+        if edge.src not in node_ids or edge.dst not in node_ids:
+            raise RuntimeError(
+                f"{primitive}({branch_name}): detected cross-graph edge "
+                f"{edge.src!r}->{edge.dst!r}. Branch functions must build "
+                "their computation only from values produced inside the branch."
+            )
+
+
 def parallel(*fns: Callable[[], Any]) -> tuple[Proxy, ...]:
     """Execute multiple branches in parallel.
 
@@ -34,11 +58,17 @@ def parallel(*fns: Callable[[], Any]) -> tuple[Proxy, ...]:
     parent_graph = ctx.graph
     branch_graphs: list[Graph] = []
 
-    for fn in fns:
+    for idx, fn in enumerate(fns):
         sub_graph = Graph()
         ctx.swap_graph(sub_graph)
         fn()
-        branch_graphs.append(ctx.graph)
+        branch_graph = ctx.graph
+        _validate_branch_graph(
+            branch_graph,
+            primitive="parallel",
+            branch_name=f"branch {idx}",
+        )
+        branch_graphs.append(branch_graph)
 
     # Restore parent graph (swap_graph sets ctx.graph = parent_graph).
     ctx.swap_graph(parent_graph)
@@ -92,12 +122,22 @@ def cond(
     ctx.swap_graph(true_sub)
     true_fn()
     true_graph = ctx.graph
+    _validate_branch_graph(
+        true_graph,
+        primitive="cond",
+        branch_name="true_fn",
+    )
 
     # Trace false branch.
     false_sub = Graph()
     ctx.swap_graph(false_sub)
     false_fn()
     false_graph = ctx.graph
+    _validate_branch_graph(
+        false_graph,
+        primitive="cond",
+        branch_name="false_fn",
+    )
 
     # Restore parent graph (swap_graph sets ctx.graph = parent_graph).
     ctx.swap_graph(parent_graph)
