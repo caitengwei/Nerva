@@ -144,7 +144,11 @@ class RpcHandler:
         # Execute pipeline.
         executor = self._pipelines[pipeline_name]
         try:
-            result = await executor.execute(inputs)
+            result = await executor.execute(
+                inputs,
+                deadline_ms=deadline_ms,
+                request_id=str(request_id),
+            )
         except Exception as exc:
             code, message = _map_exception(exc)
             return Response(

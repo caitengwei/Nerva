@@ -176,3 +176,24 @@ class TestRpcHandler:
         assert frames[0].frame_type == FrameType.ERROR
         error = msgpack.unpackb(frames[0].payload)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
+
+    def test_deadline_passed_to_executor(self) -> None:
+        mock_executor = AsyncMock()
+        mock_executor.execute.return_value = {"out": 1}
+        app = build_rpc_app({"test": mock_executor})
+        client = TestClient(app)
+
+        body = _make_request_frames("test", {"x": 1})
+        deadline = int(time.time() * 1000) + 5000
+        client.post(
+            "/rpc/test",
+            content=body,
+            headers={
+                "content-type": "application/x-nerva-rpc",
+                "x-nerva-deadline-ms": str(deadline),
+                "x-nerva-stream": "0",
+            },
+        )
+        call_kwargs = mock_executor.execute.call_args
+        assert "deadline_ms" in call_kwargs.kwargs
+        assert call_kwargs.kwargs["deadline_ms"] > 0
