@@ -67,11 +67,12 @@ class DynamicBatcher:
 
     async def stop(self) -> None:
         """Stop the batch loop and drain remaining requests."""
-        if self._loop_task is not None:
-            self._loop_task.cancel()
+        loop_task = self._loop_task
+        self._loop_task = None  # Immediately reject new infer() calls.
+        if loop_task is not None:
+            loop_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._loop_task
-            self._loop_task = None
+                await loop_task
         # Drain remaining requests.
         while not self._queue.empty():
             req = self._queue.get_nowait()
@@ -114,13 +115,17 @@ class DynamicBatcher:
         pending = _PendingRequest(
             inputs=inputs, context=context, future=future, kwargs=dict(kwargs)
         )
+        effective_timeout_ms = min(self._config.queue_timeout_ms, context.deadline_ms)
         try:
             await asyncio.wait_for(
                 self._queue.put(pending),
-                timeout=self._config.queue_timeout_ms / 1000.0,
+                timeout=effective_timeout_ms / 1000.0,
             )
         except TimeoutError as err:
             future.cancel()
+            elapsed_ms = (time.monotonic() - pending.enqueue_time) * 1000.0
+            if context.deadline_ms - elapsed_ms <= 0:
+                raise RuntimeError("DEADLINE_EXCEEDED") from err
             raise RuntimeError("RESOURCE_EXHAUSTED") from err
 
         # 3. Wait for batch loop to resolve this request.
