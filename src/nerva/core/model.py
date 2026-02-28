@@ -104,6 +104,25 @@ class ModelHandle:
         )
 
 
+_model_registry: dict[str, ModelHandle] = {}
+
+
+def get_model_handle(name: str) -> ModelHandle:
+    """Look up a registered ModelHandle by name.
+
+    Raises:
+        KeyError: If no handle with the given name has been registered.
+    """
+    if name not in _model_registry:
+        raise KeyError(f"No model handle registered for '{name}'")
+    return _model_registry[name]
+
+
+def list_model_handles() -> dict[str, ModelHandle]:
+    """Return a copy of all registered model handles."""
+    return dict(_model_registry)
+
+
 def model(
     name: str,
     model_class: type[Model],
@@ -131,10 +150,12 @@ def model(
         raise TypeError(
             f"model_class must be a subclass of nerva.Model, got {model_class}"
         )
-    return ModelHandle(
+    handle = ModelHandle(
         name=name,
         model_class=model_class,
         backend=backend,
         device=device,
         options=options,
     )
+    _model_registry[name] = handle
+    return handle
