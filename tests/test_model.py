@@ -72,3 +72,19 @@ class TestModelLifecycle:
         instance = DummyModel()
         instance.load()
         instance.unload()  # Should not raise
+
+
+def test_model_with_batch_config() -> None:
+    """model() accepts batch_config and stores it on ModelHandle."""
+    from nerva.engine.batcher import BatchConfig
+
+    cfg = BatchConfig(max_batch_size=8, max_delay_ms=5.0)
+    handle = model("m", DummyModel, batch_config=cfg)
+    assert handle.batch_config is cfg
+    assert handle.batch_config.max_batch_size == 8
+
+
+def test_model_without_batch_config() -> None:
+    """batch_config defaults to None — existing behavior unaffected."""
+    handle = model("m", DummyModel)
+    assert handle.batch_config is None

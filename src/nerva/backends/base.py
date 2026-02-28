@@ -35,7 +35,7 @@ class InferContext:
     """
 
     request_id: str
-    deadline_ms: int
+    deadline_ms: int  # Relative TTL from call time (ms). Phase 4: server layer must convert absolute epoch to relative TTL before populating this field.
     trace_id: str | None = None
     cancelled: bool = False
 

@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from nerva.engine.batcher import BatchConfig
 
 
 class Model(ABC):
@@ -73,6 +76,7 @@ class ModelHandle:
     backend: str
     device: str
     options: dict[str, Any] = field(default_factory=dict)
+    batch_config: BatchConfig | None = None
 
     def __call__(self, inputs: Any) -> Any:
         """Invoke the model.
@@ -110,6 +114,7 @@ def model(
     *,
     backend: str = "pytorch",
     device: str = "cpu",
+    batch_config: BatchConfig | None = None,
     **options: Any,
 ) -> ModelHandle:
     """Declare a model for use in a pipeline.
@@ -122,6 +127,8 @@ def model(
         model_class: User's Model subclass.
         backend: Backend name (e.g., "pytorch", "vllm").
         device: Target device (e.g., "cpu", "cuda:0").
+        batch_config: Optional batching configuration. If provided, the caller
+            should wrap the corresponding WorkerProxy with DynamicBatcher.
         **options: Backend-specific options.
 
     Returns:
@@ -137,4 +144,5 @@ def model(
         backend=backend,
         device=device,
         options=options,
+        batch_config=batch_config,
     )
