@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -159,28 +158,46 @@ async def test_expired_request_filtered_in_batch() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_infer_before_start_raises() -> None:
+    """infer() raises RuntimeError when batch loop is not started."""
+    inner = _make_inner()
+    batcher = DynamicBatcher(inner, BatchConfig())
+    ctx = _make_ctx()
+    with pytest.raises(RuntimeError, match="batcher not started"):
+        await batcher.infer({"x": 1}, ctx)
+
+
 async def test_queue_full_raises_resource_exhausted() -> None:
     """infer() raises RESOURCE_EXHAUSTED when queue is full beyond queue_timeout_ms."""
-    inner = _make_inner()
-    cfg = BatchConfig(queue_capacity=1, queue_timeout_ms=50.0)
-    batcher = DynamicBatcher(inner, cfg)
-    # start() not called; _batch_loop does not run; queue is not drained
+    slow_event = asyncio.Event()
 
-    ctx = _make_ctx()
-    # Fill queue to capacity (capacity=1)
-    fill_task = asyncio.create_task(batcher.infer({"x": 1}, ctx))
-    await asyncio.sleep(0.01)
+    async def slow_infer(
+        inputs: dict[str, Any], context: InferContext, **kw: Any
+    ) -> dict[str, Any]:
+        await slow_event.wait()
+        return {"ok": True}
 
-    # 第二个请求应超时后抛 RESOURCE_EXHAUSTED
-    with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
-        await asyncio.wait_for(
-            batcher.infer({"x": 2}, ctx),
-            timeout=1.0,
-        )
+    inner = AsyncMock()
+    inner.infer.side_effect = slow_infer
 
-    fill_task.cancel()
-    with contextlib.suppress(BaseException):
-        await fill_task
+    # capacity=1, batch_size=1: first request dequeued into dispatch (blocked by slow_infer),
+    # second request fills the queue, third request triggers RESOURCE_EXHAUSTED.
+    cfg = BatchConfig(queue_capacity=1, queue_timeout_ms=50.0, max_batch_size=1)
+    async with DynamicBatcher(inner, cfg) as batcher:
+        ctx = _make_ctx()
+        # First request: dequeued by batch loop, blocked in slow_infer.
+        t1 = asyncio.create_task(batcher.infer({"x": 1}, ctx))
+        await asyncio.sleep(0.02)
+        # Second request: fills the queue (capacity=1).
+        t2 = asyncio.create_task(batcher.infer({"x": 2}, ctx))
+        await asyncio.sleep(0.01)
+        # Third request: queue full, should timeout with RESOURCE_EXHAUSTED.
+        with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
+            await asyncio.wait_for(batcher.infer({"x": 3}, ctx), timeout=1.0)
+
+        slow_event.set()
+        # Clean up remaining tasks.
+        await asyncio.gather(t1, t2, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------

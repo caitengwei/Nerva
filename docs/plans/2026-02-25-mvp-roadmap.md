@@ -233,7 +233,7 @@ tests/test_phase2_e2e.py           # 5 tests (real Worker)
 - `batch()` transform
 - Deadline-aware scheduler（`engine/scheduler.py`）
 - Backpressure / queue overflow 拒绝
-- Cancellation propagation
+- Cancellation propagation（部分：deadline 过期过滤 + stop() drain；主动取消推迟至 Phase 4+）
 
 **关键设计决策：**
 - DynamicBatcher 作为 InferableProxy wrapper，对 Executor 完全透明

@@ -39,6 +39,7 @@ class _PendingRequest:
     inputs: dict[str, Any]
     context: InferContext
     future: asyncio.Future[dict[str, Any]]
+    kwargs: dict[str, Any] = field(default_factory=dict)
     enqueue_time: float = field(default_factory=time.monotonic)
 
 
@@ -96,6 +97,10 @@ class DynamicBatcher:
         context: InferContext,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        # 0. Fail-fast if batch loop is not running.
+        if self._loop_task is None:
+            raise RuntimeError("batcher not started; call start() or use 'async with'")
+
         # 1. Deadline admission check.
         # Admission check: deadline_ms is treated as a total TTL from call time.
         # Elapsed time at this point is negligible (< scheduling jitter),
@@ -106,7 +111,9 @@ class DynamicBatcher:
         # 2. Enqueue with backpressure timeout.
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
-        pending = _PendingRequest(inputs=inputs, context=context, future=future)
+        pending = _PendingRequest(
+            inputs=inputs, context=context, future=future, kwargs=dict(kwargs)
+        )
         try:
             await asyncio.wait_for(
                 self._queue.put(pending),
@@ -151,7 +158,7 @@ class DynamicBatcher:
             for req in batch:
                 elapsed_ms = (now - req.enqueue_time) * 1000.0
                 remaining_ms = req.context.deadline_ms - elapsed_ms
-                if remaining_ms < 0:
+                if remaining_ms <= 0:
                     if not req.future.done():
                         req.future.set_exception(RuntimeError("DEADLINE_EXCEEDED"))
                     # Deregister from in-flight since we are resolving it here.
@@ -166,7 +173,7 @@ class DynamicBatcher:
             # Dispatch valid requests concurrently (already registered as in-flight above).
             results = await asyncio.gather(
                 *(
-                    self._inner.infer(req.inputs, req.context)
+                    self._inner.infer(req.inputs, req.context, **req.kwargs)
                     for req in valid
                 ),
                 return_exceptions=True,

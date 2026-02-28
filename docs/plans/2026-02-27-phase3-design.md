@@ -9,7 +9,7 @@
 - 请求聚合（size 触发 + timer 触发）
 - Deadline 感知准入控制
 - 队列满时有界等待 + 超时拒绝（backpressure）
-- Cancellation propagation
+- Cancellation propagation（部分实现：deadline 过期过滤 + stop() drain；主动取消推迟至 Phase 4+）
 
 ### 1.2 范围
 
