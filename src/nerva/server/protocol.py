@@ -51,8 +51,15 @@ class Frame:
     payload: bytes
 
 
+_MAX_U64 = (1 << 64) - 1
+
+
 def encode_frame(frame: Frame) -> bytes:
     """Encode a Frame into wire bytes (header + payload)."""
+    if not (0 <= frame.request_id <= _MAX_U64):
+        raise ProtocolError(
+            f"request_id {frame.request_id} out of u64 range [0, {_MAX_U64}]"
+        )
     if len(frame.payload) > MAX_PAYLOAD_BYTES:
         raise ProtocolError(
             f"payload size {len(frame.payload)} exceeds max {MAX_PAYLOAD_BYTES}"
@@ -106,8 +113,12 @@ def decode_frame(data: bytes) -> tuple[Frame, int]:
         )
 
     payload = data[HEADER_SIZE:total]
+    try:
+        ft = FrameType(frame_type)
+    except ValueError:
+        raise ProtocolError(f"unknown frame type: {frame_type}") from None
     frame = Frame(
-        frame_type=FrameType(frame_type),
+        frame_type=ft,
         request_id=request_id,
         flags=flags,
         payload=payload,

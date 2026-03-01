@@ -35,7 +35,8 @@ def _error_frame(request_id: int, code: ErrorCode, message: str) -> bytes:
     """Build an ERROR frame."""
     retryable = code in (ErrorCode.DEADLINE_EXCEEDED, ErrorCode.RESOURCE_EXHAUSTED)
     payload = msgpack.packb(
-        {"code": int(code), "message": message, "retryable": retryable}
+        {"code": int(code), "message": message, "retryable": retryable},
+        use_bin_type=True,
     )
     return encode_frame(Frame(FrameType.ERROR, request_id, 0, payload))
 
@@ -83,6 +84,13 @@ class RpcHandler:
             except ValueError:
                 request_id = uuid.uuid4().int & ((1 << 64) - 1)
                 logger.warning("invalid x-nerva-request-id %r, using generated id", request_id_str)
+            else:
+                if request_id < 0 or request_id >= (1 << 64):
+                    logger.warning(
+                        "out-of-range x-nerva-request-id %r, using generated id",
+                        request_id_str,
+                    )
+                    request_id = uuid.uuid4().int & ((1 << 64) - 1)
         else:
             request_id = uuid.uuid4().int & ((1 << 64) - 1)
 
@@ -194,6 +202,16 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
 
+        # Validate END frame presence (unary protocol: OPEN + DATA + END).
+        end_frames = [f for f in frames if f.frame_type == FrameType.END]
+        if not end_frames:
+            return Response(
+                content=_error_frame(
+                    request_id, ErrorCode.INVALID_ARGUMENT, "no END frame received"
+                ),
+                media_type=CONTENT_TYPE,
+            )
+
         # Extract DATA payload (first DATA frame; MVP only uses one).
         data_frames = [f for f in frames if f.frame_type == FrameType.DATA]
         if not data_frames:
@@ -231,10 +249,10 @@ class RpcHandler:
 
         # Build response: DATA + END.
         resp_data = encode_frame(
-            Frame(FrameType.DATA, request_id, 0, msgpack.packb(result))
+            Frame(FrameType.DATA, request_id, 0, msgpack.packb(result, use_bin_type=True))
         )
         resp_end = encode_frame(
-            Frame(FrameType.END, request_id, 0, msgpack.packb({"status": 0}))
+            Frame(FrameType.END, request_id, 0, msgpack.packb({"status": 0}, use_bin_type=True))
         )
         return Response(
             content=resp_data + resp_end,

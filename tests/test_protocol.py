@@ -136,3 +136,38 @@ class TestEncodeValidation:
         )
         with pytest.raises(ProtocolError, match="payload"):
             encode_frame(frame)
+
+    def test_request_id_negative(self) -> None:
+        frame = Frame(frame_type=FrameType.DATA, request_id=-1, flags=0, payload=b"")
+        with pytest.raises(ProtocolError, match=r"request_id.*out of u64 range"):
+            encode_frame(frame)
+
+    def test_request_id_overflow(self) -> None:
+        frame = Frame(
+            frame_type=FrameType.DATA, request_id=(1 << 64), flags=0, payload=b""
+        )
+        with pytest.raises(ProtocolError, match=r"request_id.*out of u64 range"):
+            encode_frame(frame)
+
+
+class TestDecodeUnknownFrameType:
+    def test_unknown_frame_type_raises_protocol_error(self) -> None:
+        """Unknown frame_type byte should raise ProtocolError, not ValueError."""
+        import struct
+
+        from nerva.server.protocol import _HEADER_FMT
+
+        header = struct.pack(
+            _HEADER_FMT,
+            0x4E56,  # magic
+            1,  # version
+            99,  # unknown frame_type
+            0,  # flags
+            1,  # request_id
+            1,  # stream_id
+            0,  # payload_len
+            0,  # crc32
+            0,  # ext_hdr_len
+        )
+        with pytest.raises(ProtocolError, match="unknown frame type: 99"):
+            decode_frame(header)

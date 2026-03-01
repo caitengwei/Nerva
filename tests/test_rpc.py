@@ -248,6 +248,21 @@ class TestRpcHandler:
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
         assert "unsupported stream mode" in error["message"]
 
+    def test_missing_end_frame(self) -> None:
+        """OPEN + DATA but no END frame."""
+        client = self._make_app()
+        open_payload = msgpack.packb({"pipeline": "classify"})
+        data_payload = msgpack.packb({"x": 1})
+        body = b""
+        body += encode_frame(Frame(FrameType.OPEN, 1, 0, open_payload))
+        body += encode_frame(Frame(FrameType.DATA, 1, 0, data_payload))
+        resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        frames = _decode_response_frames(resp.content)
+        assert frames[0].frame_type == FrameType.ERROR
+        error = msgpack.unpackb(frames[0].payload)
+        assert error["code"] == ErrorCode.INVALID_ARGUMENT
+        assert "no END frame" in error["message"]
+
     def test_missing_open_frame(self) -> None:
         """DATA frame only, no OPEN frame."""
         client = self._make_app()
