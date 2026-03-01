@@ -26,12 +26,30 @@ def _collect_model_names(pipelines: dict[str, Graph]) -> set[str]:
     """Collect all unique model names from pipeline graphs.
 
     Skips control-flow nodes (cond, parallel) which are not real models.
+    Recurses into cond/parallel sub-graphs to discover models in branches.
     """
     names: set[str] = set()
-    for graph in pipelines.values():
+    visited: set[int] = set()
+
+    def _walk(graph: Graph) -> None:
+        gid = id(graph)
+        if gid in visited:
+            return
+        visited.add(gid)
         for node in graph.nodes:
             if node.node_type == "call":
                 names.add(node.model_name)
+            elif node.node_type == "cond":
+                if node.true_branch is not None:
+                    _walk(node.true_branch)
+                if node.false_branch is not None:
+                    _walk(node.false_branch)
+            elif node.node_type == "parallel":
+                for branch in node.branches:
+                    _walk(branch)
+
+    for graph in pipelines.values():
+        _walk(graph)
     return names
 
 

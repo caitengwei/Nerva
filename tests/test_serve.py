@@ -44,6 +44,65 @@ class TestCollectModelNames:
         names = _collect_model_names({"pipe": g})
         assert names == {"a"}
 
+    def test_recurses_into_cond_branches(self) -> None:
+        true_branch = Graph()
+        true_branch.add_node(Node(id="b_1", model_name="b"))
+        false_branch = Graph()
+        false_branch.add_node(Node(id="c_1", model_name="c"))
+
+        g = Graph()
+        g.add_node(Node(id="a_1", model_name="a"))
+        g.add_node(
+            Node(
+                id="cond_1",
+                model_name="cond",
+                node_type="cond",
+                true_branch=true_branch,
+                false_branch=false_branch,
+            )
+        )
+        names = _collect_model_names({"pipe": g})
+        assert names == {"a", "b", "c"}
+
+    def test_recurses_into_parallel_branches(self) -> None:
+        branch1 = Graph()
+        branch1.add_node(Node(id="b_1", model_name="b"))
+        branch2 = Graph()
+        branch2.add_node(Node(id="c_1", model_name="c"))
+
+        g = Graph()
+        g.add_node(Node(id="a_1", model_name="a"))
+        g.add_node(
+            Node(
+                id="par_1",
+                model_name="parallel",
+                node_type="parallel",
+                branches=[branch1, branch2],
+            )
+        )
+        names = _collect_model_names({"pipe": g})
+        assert names == {"a", "b", "c"}
+
+    def test_deduplicates_across_branches(self) -> None:
+        """Same model used in both branches is only spawned once."""
+        true_branch = Graph()
+        true_branch.add_node(Node(id="shared_1", model_name="shared"))
+        false_branch = Graph()
+        false_branch.add_node(Node(id="shared_2", model_name="shared"))
+
+        g = Graph()
+        g.add_node(
+            Node(
+                id="cond_1",
+                model_name="cond",
+                node_type="cond",
+                true_branch=true_branch,
+                false_branch=false_branch,
+            )
+        )
+        names = _collect_model_names({"pipe": g})
+        assert names == {"shared"}
+
 
 class TestBuildPipelines:
     async def test_build_pipelines(self) -> None:

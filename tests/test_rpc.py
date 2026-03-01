@@ -80,7 +80,7 @@ class TestRpcHandler:
         frames = _decode_response_frames(resp.content)
         assert len(frames) == 2  # DATA + END
         assert frames[0].frame_type == FrameType.DATA
-        result = msgpack.unpackb(frames[0].payload)
+        result = msgpack.unpackb(frames[0].payload, raw=False)
         assert result == {"label": "cat", "score": 0.95}
         assert frames[1].frame_type == FrameType.END
 
@@ -101,7 +101,7 @@ class TestRpcHandler:
         frames = _decode_response_frames(resp.content)
         assert len(frames) == 1
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
 
     def test_deadline_already_expired(self) -> None:
@@ -119,7 +119,7 @@ class TestRpcHandler:
         )
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.DEADLINE_EXCEEDED
 
     def test_executor_exception_maps_to_internal(self) -> None:
@@ -139,7 +139,7 @@ class TestRpcHandler:
         )
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INTERNAL
 
     def test_resource_exhausted_error(self) -> None:
@@ -158,7 +158,7 @@ class TestRpcHandler:
             },
         )
         frames = _decode_response_frames(resp.content)
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.RESOURCE_EXHAUSTED
 
     def test_missing_deadline_header(self) -> None:
@@ -174,7 +174,7 @@ class TestRpcHandler:
         )
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
 
     def test_deadline_passed_to_executor(self) -> None:
@@ -214,7 +214,7 @@ class TestRpcHandler:
         resp = client.post("/rpc/classify", content=body, headers=headers)
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
         assert "invalid x-nerva-deadline-ms" in error["message"]
 
@@ -232,7 +232,7 @@ class TestRpcHandler:
         )
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
         assert "x-nerva-stream" in error["message"]
 
@@ -244,7 +244,7 @@ class TestRpcHandler:
         resp = client.post("/rpc/classify", content=body, headers=headers)
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
         assert "unsupported stream mode" in error["message"]
 
@@ -259,7 +259,7 @@ class TestRpcHandler:
         resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
         assert "no END frame" in error["message"]
 
@@ -271,7 +271,7 @@ class TestRpcHandler:
         resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
         assert "no OPEN frame" in error["message"]
 
@@ -287,7 +287,7 @@ class TestRpcHandler:
         resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
         assert "does not match URL" in error["message"]
 
@@ -302,7 +302,7 @@ class TestRpcHandler:
         resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
         assert "invalid DATA frame" in error["message"]
 
@@ -314,5 +314,5 @@ class TestRpcHandler:
         body = _make_request_frames("classify", {"x": 1})
         resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
         frames = _decode_response_frames(resp.content)
-        error = msgpack.unpackb(frames[0].payload)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.DEADLINE_EXCEEDED
