@@ -246,27 +246,49 @@ tests/test_phase2_e2e.py           # 5 tests (real Worker)
 
 ---
 
-### Phase 4 — RPC 服务层 + Streaming
+### Phase 4 — Binary RPC Serving Layer (Unary)
 
-**目标：** 对外暴露 HTTP 服务。
+**目标：** 通过 HTTP Binary RPC 协议暴露 Nerva pipelines，自动管理 Worker 进程。
+
+**设计文档：** [`2026-02-28-phase4-design.md`](./2026-02-28-phase4-design.md)
 
 **范围：**
-- ASSI 应用入口（`server/app.py`）
-- Binary Streaming RPC 数据面 handler（`server/rpc.py`）
-- Binary frame 编解码（`server/protocol.py`）
-- `stream()` transform
-- `serve()` 独立 deployment API（不再是 transform）
-- Management API（model load/unload, health）
-- 中间件（metrics, logging, error handling）
+- Binary frame 编解码（`server/protocol.py`）— 32-byte fixed header + msgpack payload
+- Binary RPC handler（`server/rpc.py`）— OPEN+DATA+END 帧解析，错误映射，deadline passthrough
+- ASGI 应用组装（`server/app.py`）— RPC route + `/v1/health` + `/v1/models` management routes
+- `serve()` 顶层 API（`server/serve.py`）— 自动扫描 Graph、查找 ModelHandle、spawn Worker、启动 uvicorn
+- Model handle registry（`core/model.py`）— `model()` 注册、`get_model_handle()` / `list_model_handles()` 查找
+- Public API export — `nerva.serve`, `nerva.get_model_handle`, `nerva.list_model_handles`
 
-**关键决策：**
+**关键设计决策：**
 - serve() 从 transform 链剥离，Pipeline 可独立执行
-- Binary Protocol v1 用于音频等二进制数据场景
-- 后续迭代增加 HTTP + JSON 协议支持
+- Binary Protocol v1（magic 0x4E56, version 1）用于音频等二进制数据场景
+- Frame header 32 bytes big-endian，MVP 固定 stream_id=1, crc32=0, ext_hdr_len=0
+- 绝对 deadline epoch ms 通过 `x-nerva-deadline-ms` header 传入，RPC handler 转换为相对 TTL
+- 错误映射：pipeline not found → INVALID_ARGUMENT(3), deadline expired → DEADLINE_EXCEEDED(4), 内部错误 → INTERNAL(13)
+- `_PipelineExecutor` 在每次请求创建新的 `Executor` + `InferContext`，保证请求隔离
+- 后续迭代增加 Streaming RPC 和 HTTP+JSON 协议支持
 
-**验证标准：** 通过 HTTP 客户端调用 Pipeline，unary 和 streaming 模式均正常。
+**验证结果：** ruff 0 errors, mypy 0 issues, 200 tests passed (23s)
 
-**状态：** ⬜ 待设计
+**状态：** ✅ 已完成 (2026-02-28)
+
+**产出文件：**
+```
+src/nerva/server/protocol.py       # FrameType, Frame, encode/decode, ProtocolError
+src/nerva/server/rpc.py            # RpcHandler, ErrorCode, build_rpc_app
+src/nerva/server/app.py            # build_app() — ASGI 应用组装
+src/nerva/server/serve.py          # serve(), _collect_model_names(), _build_pipelines(), _PipelineExecutor
+src/nerva/server/__init__.py       # server 包初始化
+src/nerva/core/model.py            # _model_registry, get_model_handle(), list_model_handles()（修改）
+src/nerva/__init__.py              # 新增 serve, get_model_handle, list_model_handles 导出（修改）
+tests/test_protocol.py             # 15 tests
+tests/test_rpc.py                  # 8 tests
+tests/test_app.py                  # 4 tests
+tests/test_serve.py                # 5 tests
+tests/test_phase4_e2e.py           # 5 tests (real Worker + httpx AsyncClient)
+tests/test_model.py                # 13 tests (含 4 个新增 registry tests)
+```
 
 ---
 
@@ -304,7 +326,7 @@ W4 (spikes) ──────────→ W5 (interface contracts)
                                     ✅                                     ✅
 
 Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 ──→ Phase 5
-  ✅           ✅           ✅        待设计      待设计      待设计
+  ✅           ✅           ✅        待设计        ✅        待设计
 ```
 
 ---
