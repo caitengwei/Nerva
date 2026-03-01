@@ -77,9 +77,14 @@ class RpcHandler:
 
         # Generate or extract request ID.
         request_id_str = request.headers.get("x-nerva-request-id")
-        request_id = (
-            int(request_id_str) if request_id_str else uuid.uuid4().int & ((1 << 64) - 1)
-        )
+        if request_id_str:
+            try:
+                request_id = int(request_id_str)
+            except ValueError:
+                request_id = uuid.uuid4().int & ((1 << 64) - 1)
+                logger.warning("invalid x-nerva-request-id %r, using generated id", request_id_str)
+        else:
+            request_id = uuid.uuid4().int & ((1 << 64) - 1)
 
         # Validate pipeline exists.
         if pipeline_name not in self._pipelines:
@@ -104,8 +109,39 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
 
+        # Validate stream mode header (Phase 4: unary only).
+        stream_header = request.headers.get("x-nerva-stream")
+        if stream_header is None:
+            return Response(
+                content=_error_frame(
+                    request_id,
+                    ErrorCode.INVALID_ARGUMENT,
+                    "missing required header: x-nerva-stream",
+                ),
+                media_type=CONTENT_TYPE,
+            )
+        if stream_header != "0":
+            return Response(
+                content=_error_frame(
+                    request_id,
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"unsupported stream mode: {stream_header!r} (only '0' supported)",
+                ),
+                media_type=CONTENT_TYPE,
+            )
+
         # Convert absolute epoch ms to relative TTL ms.
-        deadline_epoch_ms = int(deadline_header)
+        try:
+            deadline_epoch_ms = int(deadline_header)
+        except ValueError:
+            return Response(
+                content=_error_frame(
+                    request_id,
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"invalid x-nerva-deadline-ms: {deadline_header!r}",
+                ),
+                media_type=CONTENT_TYPE,
+            )
         now_ms = int(time.time() * 1000)
         deadline_ms = deadline_epoch_ms - now_ms
 
@@ -129,7 +165,36 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
 
-        # Extract DATA payload (first DATA frame).
+        # Validate OPEN frame exists and pipeline name matches URL path.
+        open_frames = [f for f in frames if f.frame_type == FrameType.OPEN]
+        if not open_frames:
+            return Response(
+                content=_error_frame(
+                    request_id, ErrorCode.INVALID_ARGUMENT, "no OPEN frame received"
+                ),
+                media_type=CONTENT_TYPE,
+            )
+        try:
+            open_meta = msgpack.unpackb(open_frames[0].payload, raw=False)
+        except Exception:
+            return Response(
+                content=_error_frame(
+                    request_id, ErrorCode.INVALID_ARGUMENT, "invalid OPEN frame payload"
+                ),
+                media_type=CONTENT_TYPE,
+            )
+        open_pipeline = open_meta.get("pipeline") if isinstance(open_meta, dict) else None
+        if open_pipeline and open_pipeline != pipeline_name:
+            return Response(
+                content=_error_frame(
+                    request_id,
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"OPEN pipeline '{open_pipeline}' does not match URL '{pipeline_name}'",
+                ),
+                media_type=CONTENT_TYPE,
+            )
+
+        # Extract DATA payload (first DATA frame; MVP only uses one).
         data_frames = [f for f in frames if f.frame_type == FrameType.DATA]
         if not data_frames:
             return Response(
@@ -139,7 +204,15 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
 
-        inputs: dict[str, Any] = msgpack.unpackb(data_frames[0].payload, raw=False)
+        try:
+            inputs: dict[str, Any] = msgpack.unpackb(data_frames[0].payload, raw=False)
+        except Exception:
+            return Response(
+                content=_error_frame(
+                    request_id, ErrorCode.INVALID_ARGUMENT, "invalid DATA frame payload"
+                ),
+                media_type=CONTENT_TYPE,
+            )
 
         # Execute pipeline.
         executor = self._pipelines[pipeline_name]

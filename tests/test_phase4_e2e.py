@@ -11,7 +11,6 @@ import msgpack
 import pytest
 
 from nerva import model, trace
-from nerva.core.model import _model_registry
 from nerva.server.app import build_app
 from nerva.server.protocol import Frame, FrameType, decode_frame, encode_frame
 from nerva.server.serve import _build_pipelines
@@ -44,7 +43,6 @@ def _decode_frames(body: bytes) -> list[Frame]:
 @pytest.fixture
 async def e2e_client() -> Any:
     """Build full app with real Worker, yield async httpx client, cleanup."""
-    _model_registry.clear()
     handle = model("echo", EchoModel, backend="pytorch", device="cpu")
     graph = trace(lambda inp: handle(inp))
 
@@ -54,10 +52,10 @@ async def e2e_client() -> Any:
 
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        yield client
-
-    await manager.shutdown_all()
-    _model_registry.clear()
+        try:
+            yield client
+        finally:
+            await manager.shutdown_all()
 
 
 def _rpc_headers(deadline_offset_ms: int = 30000) -> dict[str, str]:

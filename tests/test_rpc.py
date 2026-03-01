@@ -197,3 +197,107 @@ class TestRpcHandler:
         call_kwargs = mock_executor.execute.call_args
         assert "deadline_ms" in call_kwargs.kwargs
         assert call_kwargs.kwargs["deadline_ms"] > 0
+
+    def _rpc_headers(self, deadline_offset_ms: int = 30000) -> dict[str, str]:
+        deadline = int(time.time() * 1000) + deadline_offset_ms
+        return {
+            "content-type": "application/x-nerva-rpc",
+            "x-nerva-deadline-ms": str(deadline),
+            "x-nerva-stream": "0",
+        }
+
+    def test_invalid_deadline_header(self) -> None:
+        client = self._make_app()
+        body = _make_request_frames("classify", {"x": 1})
+        headers = self._rpc_headers()
+        headers["x-nerva-deadline-ms"] = "not-a-number"
+        resp = client.post("/rpc/classify", content=body, headers=headers)
+        frames = _decode_response_frames(resp.content)
+        assert frames[0].frame_type == FrameType.ERROR
+        error = msgpack.unpackb(frames[0].payload)
+        assert error["code"] == ErrorCode.INVALID_ARGUMENT
+        assert "invalid x-nerva-deadline-ms" in error["message"]
+
+    def test_missing_stream_header(self) -> None:
+        client = self._make_app()
+        body = _make_request_frames("classify", {"x": 1})
+        deadline = int(time.time() * 1000) + 30000
+        resp = client.post(
+            "/rpc/classify",
+            content=body,
+            headers={
+                "content-type": "application/x-nerva-rpc",
+                "x-nerva-deadline-ms": str(deadline),
+            },
+        )
+        frames = _decode_response_frames(resp.content)
+        assert frames[0].frame_type == FrameType.ERROR
+        error = msgpack.unpackb(frames[0].payload)
+        assert error["code"] == ErrorCode.INVALID_ARGUMENT
+        assert "x-nerva-stream" in error["message"]
+
+    def test_unsupported_stream_mode(self) -> None:
+        client = self._make_app()
+        body = _make_request_frames("classify", {"x": 1})
+        headers = self._rpc_headers()
+        headers["x-nerva-stream"] = "1"
+        resp = client.post("/rpc/classify", content=body, headers=headers)
+        frames = _decode_response_frames(resp.content)
+        assert frames[0].frame_type == FrameType.ERROR
+        error = msgpack.unpackb(frames[0].payload)
+        assert error["code"] == ErrorCode.INVALID_ARGUMENT
+        assert "unsupported stream mode" in error["message"]
+
+    def test_missing_open_frame(self) -> None:
+        """DATA frame only, no OPEN frame."""
+        client = self._make_app()
+        data_payload = msgpack.packb({"x": 1})
+        body = encode_frame(Frame(FrameType.DATA, 1, 0, data_payload))
+        resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        frames = _decode_response_frames(resp.content)
+        assert frames[0].frame_type == FrameType.ERROR
+        error = msgpack.unpackb(frames[0].payload)
+        assert error["code"] == ErrorCode.INVALID_ARGUMENT
+        assert "no OPEN frame" in error["message"]
+
+    def test_open_frame_pipeline_mismatch(self) -> None:
+        """OPEN frame pipeline name differs from URL path."""
+        client = self._make_app()
+        open_payload = msgpack.packb({"pipeline": "wrong_name"})
+        data_payload = msgpack.packb({"x": 1})
+        body = b""
+        body += encode_frame(Frame(FrameType.OPEN, 1, 0, open_payload))
+        body += encode_frame(Frame(FrameType.DATA, 1, 0, data_payload))
+        body += encode_frame(Frame(FrameType.END, 1, 0, b""))
+        resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        frames = _decode_response_frames(resp.content)
+        assert frames[0].frame_type == FrameType.ERROR
+        error = msgpack.unpackb(frames[0].payload)
+        assert error["code"] == ErrorCode.INVALID_ARGUMENT
+        assert "does not match URL" in error["message"]
+
+    def test_invalid_data_frame_payload(self) -> None:
+        """DATA frame with invalid msgpack payload."""
+        client = self._make_app()
+        open_payload = msgpack.packb({"pipeline": "classify"})
+        body = b""
+        body += encode_frame(Frame(FrameType.OPEN, 1, 0, open_payload))
+        body += encode_frame(Frame(FrameType.DATA, 1, 0, b"\xff\xfe\xfd"))
+        body += encode_frame(Frame(FrameType.END, 1, 0, b""))
+        resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        frames = _decode_response_frames(resp.content)
+        assert frames[0].frame_type == FrameType.ERROR
+        error = msgpack.unpackb(frames[0].payload)
+        assert error["code"] == ErrorCode.INVALID_ARGUMENT
+        assert "invalid DATA frame" in error["message"]
+
+    def test_deadline_exceeded_string_match(self) -> None:
+        """Exception containing DEADLINE_EXCEEDED maps correctly."""
+        client = self._make_app(
+            executor_side_effect=RuntimeError("DEADLINE_EXCEEDED: timeout")
+        )
+        body = _make_request_frames("classify", {"x": 1})
+        resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        frames = _decode_response_frames(resp.content)
+        error = msgpack.unpackb(frames[0].payload)
+        assert error["code"] == ErrorCode.DEADLINE_EXCEEDED

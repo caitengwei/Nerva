@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nerva.core.graph import Graph, Node
-from nerva.core.model import Model, _model_registry, model
+from nerva.core.model import Model, model
 from nerva.server.serve import _build_pipelines, _collect_model_names
 
 
@@ -46,12 +46,6 @@ class TestCollectModelNames:
 
 
 class TestBuildPipelines:
-    def setup_method(self) -> None:
-        _model_registry.clear()
-
-    def teardown_method(self) -> None:
-        _model_registry.clear()
-
     async def test_build_pipelines(self) -> None:
         handle = model("echo", DummyModel)
         g = Graph()

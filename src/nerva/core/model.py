@@ -7,9 +7,12 @@ that is materialized when the pipeline is started.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class Model(ABC):
@@ -157,5 +160,7 @@ def model(
         device=device,
         options=options,
     )
+    if name in _model_registry:
+        logger.warning("overwriting existing model handle for '%s'", name)
     _model_registry[name] = handle
     return handle

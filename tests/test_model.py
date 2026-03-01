@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from nerva import Model, ModelHandle, model
-from nerva.core.model import _model_registry, get_model_handle, list_model_handles
+from nerva.core.model import get_model_handle, list_model_handles
 
 
 class DummyModel(Model):
@@ -23,9 +23,6 @@ class BadNotAModel:
 
 
 class TestModelDeclaration:
-    def teardown_method(self) -> None:
-        _model_registry.clear()
-
     def test_model_returns_handle(self) -> None:
         handle = model("test", DummyModel, backend="pytorch", device="cpu")
         assert isinstance(handle, ModelHandle)
@@ -79,12 +76,6 @@ class TestModelLifecycle:
 
 
 class TestModelRegistry:
-    def setup_method(self) -> None:
-        _model_registry.clear()
-
-    def teardown_method(self) -> None:
-        _model_registry.clear()
-
     def test_model_registers_handle(self) -> None:
         handle = model("test_reg", DummyModel)
         assert get_model_handle("test_reg") is handle
