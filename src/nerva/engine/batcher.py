@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from nerva.backends.base import InferContext
     from nerva.engine.executor import InferableProxy
+    from nerva.observability.metrics import NervaMetrics
 
 
 @dataclass
@@ -50,9 +51,18 @@ class DynamicBatcher:
     inner proxy, applying deadline-aware admission and backpressure.
     """
 
-    def __init__(self, inner: InferableProxy, config: BatchConfig) -> None:
+    def __init__(
+        self,
+        inner: InferableProxy,
+        config: BatchConfig,
+        *,
+        model_name: str = "unknown",
+        metrics: NervaMetrics | None = None,
+    ) -> None:
         self._inner = inner
         self._config = config
+        self._model_name = model_name
+        self._metrics = metrics
         self._queue: asyncio.Queue[_PendingRequest] = asyncio.Queue(
             maxsize=config.queue_capacity
         )
@@ -116,6 +126,8 @@ class DynamicBatcher:
             inputs=inputs, context=context, future=future, kwargs=dict(kwargs)
         )
         effective_timeout_ms = min(self._config.queue_timeout_ms, context.deadline_ms)
+        if self._metrics:
+            self._metrics.queue_depth.labels(model=self._model_name).set(self._queue.qsize())
         try:
             await asyncio.wait_for(
                 self._queue.put(pending),
@@ -174,6 +186,14 @@ class DynamicBatcher:
 
             if not valid:
                 continue
+
+            # Record metrics for this batch.
+            if self._metrics:
+                self._metrics.batch_size.labels(model=self._model_name).observe(len(valid))
+                dispatch_time = time.monotonic()
+                for req in valid:
+                    wait_s = dispatch_time - req.enqueue_time
+                    self._metrics.batch_wait_seconds.labels(model=self._model_name).observe(wait_s)
 
             # Dispatch valid requests concurrently (already registered as in-flight above).
             results = await asyncio.gather(

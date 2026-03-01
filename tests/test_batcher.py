@@ -295,3 +295,31 @@ async def test_concurrent_requests_no_cross_talk() -> None:
     assert len(results) == n
     returned_ids = {r["echo"] for r in results}
     assert returned_ids == set(range(n))
+
+
+from prometheus_client import CollectorRegistry  # noqa: E402
+
+from nerva.observability.metrics import NervaMetrics  # noqa: E402
+
+
+async def test_batcher_metrics_batch_size() -> None:
+    """Batcher records batch_size histogram when dispatching."""
+    reg = CollectorRegistry()
+    m = NervaMetrics(registry=reg)
+    cfg = BatchConfig(max_batch_size=4, max_delay_ms=5.0)
+    inner = _make_inner()
+
+    async with DynamicBatcher(inner, cfg, model_name="test-model", metrics=m) as batcher:
+        ctx = InferContext(request_id="r1", deadline_ms=5000)
+        await batcher.infer({"x": 1}, ctx)
+
+    assert m.batch_size.labels(model="test-model")._sum.get() >= 1
+
+
+async def test_batcher_without_metrics_no_error() -> None:
+    """Batcher with no metrics= arg works unchanged."""
+    inner = _make_inner()
+    async with DynamicBatcher(inner, BatchConfig()) as batcher:
+        ctx = InferContext(request_id="r1", deadline_ms=5000)
+        result = await batcher.infer({"x": 1}, ctx)
+    assert result is not None
