@@ -10,6 +10,7 @@ from nerva.core.graph import Edge, Graph, Node
 from nerva.core.model import Model, ModelHandle, get_model_handle, list_model_handles, model
 from nerva.core.primitives import cond, parallel
 from nerva.core.proxy import Proxy, trace
+from nerva.engine.batcher import BatchConfig, DynamicBatcher
 from nerva.engine.executor import Executor
 from nerva.server.serve import serve
 from nerva.worker.manager import WorkerManager
@@ -17,7 +18,9 @@ from nerva.worker.proxy import WorkerProxy
 
 __all__ = [
     "Backend",
+    "BatchConfig",
     "BatchMeta",
+    "DynamicBatcher",
     "Edge",
     "Executor",
     "Graph",

@@ -1,0 +1,297 @@
+import asyncio
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+
+from nerva.backends.base import InferContext
+from nerva.engine.batcher import BatchConfig, DynamicBatcher
+
+
+def test_batch_config_defaults() -> None:
+    cfg = BatchConfig()
+    assert cfg.max_batch_size == 32
+    assert cfg.max_delay_ms == 10.0
+    assert cfg.queue_capacity == 2048
+    assert cfg.queue_timeout_ms == 100.0
+    assert cfg.min_remaining_deadline_ms == 5.0
+
+
+def test_batch_config_custom() -> None:
+    cfg = BatchConfig(max_batch_size=8, max_delay_ms=5.0)
+    assert cfg.max_batch_size == 8
+    assert cfg.max_delay_ms == 5.0
+    assert cfg.queue_capacity == 2048
+
+
+def _make_ctx(deadline_ms: int = 30000) -> InferContext:
+    return InferContext(request_id="test-req", deadline_ms=deadline_ms)
+
+
+def _make_inner() -> AsyncMock:
+    inner = AsyncMock()
+    inner.infer = AsyncMock(return_value={"result": "ok"})
+    return inner
+
+
+async def test_batcher_lifecycle() -> None:
+    """start() and stop() complete without raising exceptions."""
+    inner = _make_inner()
+    batcher = DynamicBatcher(inner, BatchConfig())
+    await batcher.start()
+    await batcher.stop()
+
+
+async def test_batcher_context_manager() -> None:
+    inner = _make_inner()
+    async with DynamicBatcher(inner, BatchConfig()) as batcher:
+        assert batcher is not None
+
+
+async def test_infer_deadline_admission_reject() -> None:
+    """剩余 deadline 不足时, infer() 立即拒绝。"""
+    inner = _make_inner()
+    cfg = BatchConfig(min_remaining_deadline_ms=50.0)
+    async with DynamicBatcher(inner, cfg) as batcher:
+        ctx = _make_ctx(deadline_ms=10)  # 10ms < 50ms threshold
+        with pytest.raises(RuntimeError, match="DEADLINE_EXCEEDED"):
+            await batcher.infer({"x": 1}, ctx)
+    inner.infer.assert_not_called()
+
+
+async def test_infer_returns_result() -> None:
+    """infer() 成功返回 inner 的结果。"""
+    inner = _make_inner()
+    inner.infer.return_value = {"out": 42}
+    async with DynamicBatcher(inner, BatchConfig(max_batch_size=1)) as batcher:
+        ctx = _make_ctx()
+        result = await batcher.infer({"x": 1}, ctx)
+    assert result == {"out": 42}
+
+
+# ---------------------------------------------------------------------------
+# Task 4: size 触发 + timer 触发
+# ---------------------------------------------------------------------------
+
+
+async def test_size_trigger() -> None:
+    """max_batch_size full triggers dispatch; inner call count matches batch size."""
+    call_count = 0
+
+    async def counting_infer(
+        inputs: dict[str, Any], context: InferContext, **kw: Any
+    ) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        return {"v": inputs["v"]}
+
+    inner = AsyncMock()
+    inner.infer.side_effect = counting_infer
+
+    cfg = BatchConfig(max_batch_size=4, max_delay_ms=1000.0)  # 靠 size 触发
+    async with DynamicBatcher(inner, cfg) as batcher:
+        ctx = _make_ctx()
+        tasks = [
+            asyncio.create_task(batcher.infer({"v": i}, ctx))
+            for i in range(4)
+        ]
+        results = await asyncio.gather(*tasks)
+
+    assert len(results) == 4
+    assert call_count == 4
+    assert {r["v"] for r in results} == {0, 1, 2, 3}
+
+
+async def test_timer_trigger() -> None:
+    """Small batch dispatches automatically after max_delay_ms without blocking."""
+    inner = _make_inner()
+    inner.infer.return_value = {"done": True}
+
+    cfg = BatchConfig(max_batch_size=100, max_delay_ms=20.0)  # 靠 timer
+    async with DynamicBatcher(inner, cfg) as batcher:
+        ctx = _make_ctx()
+        result = await asyncio.wait_for(
+            batcher.infer({"x": 1}, ctx),
+            timeout=1.0,
+        )
+
+    assert result == {"done": True}
+
+
+# ---------------------------------------------------------------------------
+# Task 5: 批次内 deadline 过滤
+# ---------------------------------------------------------------------------
+
+
+async def test_expired_request_filtered_in_batch() -> None:
+    """Requests that expire after enqueue are skipped at dispatch; inner not called for them."""
+    inner = _make_inner()
+    inner.infer.return_value = {"ok": True}
+
+    # max_batch_size=10 ensures timer (max_delay_ms=30) triggers the batch rather than size.
+    # deadline_ms=1 means the expired request's TTL is 1ms; the 30ms delay window far exceeds
+    # that, so by the time of dispatch elapsed_ms > 1 and the request is filtered out.
+    cfg = BatchConfig(
+        max_batch_size=10,
+        max_delay_ms=30.0,
+        min_remaining_deadline_ms=0.0,  # allow deadline_ms=1 requests to be admitted
+    )
+    async with DynamicBatcher(inner, cfg) as batcher:
+        expired_ctx = _make_ctx(deadline_ms=1)   # 1ms; expires almost immediately after enqueue
+        valid_ctx = _make_ctx(deadline_ms=30000)
+
+        expired_task = asyncio.create_task(batcher.infer({"x": "expired"}, expired_ctx))
+        valid_task = asyncio.create_task(batcher.infer({"x": "valid"}, valid_ctx))
+
+        expired_result, valid_result = await asyncio.gather(
+            expired_task, valid_task, return_exceptions=True
+        )
+
+    assert isinstance(expired_result, RuntimeError)
+    assert "DEADLINE_EXCEEDED" in str(expired_result)
+    assert valid_result == {"ok": True}
+    assert inner.infer.call_count == 1  # expired skipped; only one call for valid request
+
+
+# ---------------------------------------------------------------------------
+# Task 6: backpressure — 队列满超时
+# ---------------------------------------------------------------------------
+
+
+async def test_infer_before_start_raises() -> None:
+    """infer() raises RuntimeError when batch loop is not started."""
+    inner = _make_inner()
+    batcher = DynamicBatcher(inner, BatchConfig())
+    ctx = _make_ctx()
+    with pytest.raises(RuntimeError, match="batcher not started"):
+        await batcher.infer({"x": 1}, ctx)
+
+
+async def test_queue_full_raises_resource_exhausted() -> None:
+    """infer() raises RESOURCE_EXHAUSTED when queue is full beyond queue_timeout_ms."""
+    slow_event = asyncio.Event()
+
+    async def slow_infer(
+        inputs: dict[str, Any], context: InferContext, **kw: Any
+    ) -> dict[str, Any]:
+        await slow_event.wait()
+        return {"ok": True}
+
+    inner = AsyncMock()
+    inner.infer.side_effect = slow_infer
+
+    # capacity=1, batch_size=1: first request dequeued into dispatch (blocked by slow_infer),
+    # second request fills the queue, third request triggers RESOURCE_EXHAUSTED.
+    cfg = BatchConfig(queue_capacity=1, queue_timeout_ms=50.0, max_batch_size=1)
+    async with DynamicBatcher(inner, cfg) as batcher:
+        ctx = _make_ctx()
+        # First request: dequeued by batch loop, blocked in slow_infer.
+        t1 = asyncio.create_task(batcher.infer({"x": 1}, ctx))
+        await asyncio.sleep(0.02)
+        # Second request: fills the queue (capacity=1).
+        t2 = asyncio.create_task(batcher.infer({"x": 2}, ctx))
+        await asyncio.sleep(0.01)
+        # Third request: queue full, should timeout with RESOURCE_EXHAUSTED.
+        with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
+            await asyncio.wait_for(batcher.infer({"x": 3}, ctx), timeout=1.0)
+
+        slow_event.set()
+        # Clean up remaining tasks.
+        await asyncio.gather(t1, t2, return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# Task 7: stop() drain + inner 异常透传
+# ---------------------------------------------------------------------------
+
+
+async def test_stop_drains_pending_requests() -> None:
+    """stop() drains pending requests in the queue with RuntimeError."""
+    inner = _make_inner()
+    cfg = BatchConfig(queue_capacity=10, max_delay_ms=10000.0)
+    batcher = DynamicBatcher(inner, cfg)
+    await batcher.start()
+
+    ctx = _make_ctx()
+    pending = asyncio.create_task(batcher.infer({"x": 1}, ctx))
+    # Yield once so the infer() coroutine can enqueue the request.
+    await asyncio.sleep(0)
+
+    await batcher.stop()
+
+    # wait_for protects against future hanging if drain logic has a bug.
+    results = await asyncio.wait_for(
+        asyncio.gather(pending, return_exceptions=True),
+        timeout=2.0,
+    )
+    exc = results[0]
+    assert isinstance(exc, RuntimeError)
+    assert "batcher stopped" in str(exc)
+
+
+async def test_stop_drains_window_requests() -> None:
+    """stop() drains requests dequeued but still in the aggregation window."""
+    inner = _make_inner()
+    # Long delay window so the request stays in the aggregation window.
+    cfg = BatchConfig(queue_capacity=10, max_delay_ms=10000.0)
+    batcher = DynamicBatcher(inner, cfg)
+    await batcher.start()
+
+    ctx = _make_ctx()
+    pending = asyncio.create_task(batcher.infer({"x": 1}, ctx))
+    # Sleep briefly so _batch_loop has a chance to dequeue the request and
+    # enter the aggregation window before stop() is called.
+    await asyncio.sleep(0.01)
+
+    await batcher.stop()
+
+    results = await asyncio.wait_for(
+        asyncio.gather(pending, return_exceptions=True),
+        timeout=2.0,
+    )
+    exc = results[0]
+    assert isinstance(exc, RuntimeError)
+    assert "batcher stopped" in str(exc)
+
+
+async def test_inner_exception_propagated() -> None:
+    """inner.infer() 抛出的异常透传给调用方 future。"""
+    inner = _make_inner()
+    inner.infer.side_effect = ValueError("model crash")
+
+    cfg = BatchConfig(max_batch_size=1)
+    async with DynamicBatcher(inner, cfg) as batcher:
+        ctx = _make_ctx()
+        with pytest.raises(ValueError, match="model crash"):
+            await batcher.infer({"x": 1}, ctx)
+
+
+# ---------------------------------------------------------------------------
+# Task 8: 并发正确性
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_requests_no_cross_talk() -> None:
+    """Concurrent infer() calls return results matched 1-to-1 with their requests."""
+    async def echo_infer(
+        inputs: dict[str, Any], context: InferContext, **kw: Any
+    ) -> dict[str, Any]:
+        await asyncio.sleep(0.001)
+        return {"echo": inputs["id"]}
+
+    inner = AsyncMock()
+    inner.infer.side_effect = echo_infer
+
+    cfg = BatchConfig(max_batch_size=16, max_delay_ms=10.0)
+    async with DynamicBatcher(inner, cfg) as batcher:
+        ctx = _make_ctx()
+        n = 50
+        tasks = [
+            asyncio.create_task(batcher.infer({"id": i}, ctx))
+            for i in range(n)
+        ]
+        results = await asyncio.gather(*tasks)
+
+    assert len(results) == n
+    returned_ids = {r["echo"] for r in results}
+    assert returned_ids == set(range(n))
