@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from nerva import Model, ModelHandle, model
+from nerva.core.model import get_model_handle, list_model_handles
 
 
 class DummyModel(Model):
@@ -72,6 +73,27 @@ class TestModelLifecycle:
         instance = DummyModel()
         instance.load()
         instance.unload()  # Should not raise
+
+
+class TestModelRegistry:
+    def test_model_registers_handle(self) -> None:
+        handle = model("test_reg", DummyModel)
+        assert get_model_handle("test_reg") is handle
+
+    def test_get_missing_raises(self) -> None:
+        with pytest.raises(KeyError, match="test_missing"):
+            get_model_handle("test_missing")
+
+    def test_list_handles(self) -> None:
+        model("a", DummyModel)
+        model("b", DummyModel)
+        handles = list_model_handles()
+        assert set(handles.keys()) == {"a", "b"}
+
+    def test_duplicate_name_overwrites(self) -> None:
+        model("dup", DummyModel, device="cpu")
+        handle2 = model("dup", DummyModel, device="cuda:0")
+        assert get_model_handle("dup") is handle2
 
 
 def test_model_with_batch_config() -> None:

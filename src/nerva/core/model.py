@@ -7,12 +7,15 @@ that is materialized when the pipeline is started.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from nerva.engine.batcher import BatchConfig
+
+logger = logging.getLogger(__name__)
 
 
 class Model(ABC):
@@ -108,6 +111,25 @@ class ModelHandle:
         )
 
 
+_model_registry: dict[str, ModelHandle] = {}
+
+
+def get_model_handle(name: str) -> ModelHandle:
+    """Look up a registered ModelHandle by name.
+
+    Raises:
+        KeyError: If no handle with the given name has been registered.
+    """
+    if name not in _model_registry:
+        raise KeyError(f"No model handle registered for '{name}'")
+    return _model_registry[name]
+
+
+def list_model_handles() -> dict[str, ModelHandle]:
+    """Return a copy of all registered model handles."""
+    return dict(_model_registry)
+
+
 def model(
     name: str,
     model_class: type[Model],
@@ -138,7 +160,7 @@ def model(
         raise TypeError(
             f"model_class must be a subclass of nerva.Model, got {model_class}"
         )
-    return ModelHandle(
+    handle = ModelHandle(
         name=name,
         model_class=model_class,
         backend=backend,
@@ -146,3 +168,7 @@ def model(
         options=options,
         batch_config=batch_config,
     )
+    if name in _model_registry:
+        logger.warning("overwriting existing model handle for '%s'", name)
+    _model_registry[name] = handle
+    return handle
