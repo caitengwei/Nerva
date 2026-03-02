@@ -129,6 +129,7 @@ class _NervaASGIApp:
         self._on_shutdown = on_shutdown
         self._started = False
         self._lock: asyncio.Lock | None = None
+        self._lifecycle_loop: asyncio.AbstractEventLoop | None = None
 
     def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:
@@ -142,6 +143,7 @@ class _NervaASGIApp:
             return
         async with self._get_lock():
             if not self._started:
+                self._lifecycle_loop = asyncio.get_running_loop()
                 await self._on_startup()
                 self._started = True
 
@@ -156,6 +158,28 @@ class _NervaASGIApp:
                 await self._on_shutdown()
             finally:
                 self._started = False
+                self._lifecycle_loop = None
+
+    def __del__(self) -> None:
+        """Best-effort auto cleanup for hosts that never send lifespan events."""
+        if not self._started:
+            return
+        loop = self._lifecycle_loop
+        if loop is None or loop.is_closed():
+            return
+        shutdown_hook = self._on_shutdown
+
+        def _schedule_shutdown() -> None:
+            task = loop.create_task(shutdown_hook())
+
+            def _swallow_result(done: asyncio.Task[Any]) -> None:
+                with contextlib.suppress(BaseException):
+                    done.result()
+
+            task.add_done_callback(_swallow_result)
+
+        with contextlib.suppress(Exception):
+            loop.call_soon_threadsafe(_schedule_shutdown)
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] == "lifespan":

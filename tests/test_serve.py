@@ -163,6 +163,46 @@ class TestNervaASGIAppLifecycle:
         await app.shutdown()
         on_shutdown.assert_awaited_once()
 
+    async def test_auto_shutdown_on_gc(self) -> None:
+        """无 lifespan 场景下, GC 回收 app 时会自动触发 shutdown。"""
+        import asyncio
+        import gc
+
+        import httpx
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def _ok(_request: Any) -> JSONResponse:
+            return JSONResponse({"ok": True})
+
+        on_startup = AsyncMock()
+        on_shutdown = AsyncMock()
+        app = _NervaASGIApp(
+            starlette_app=Starlette(routes=[Route("/ok", _ok, methods=["GET"])]),
+            on_startup=on_startup,
+            on_shutdown=on_shutdown,
+        )
+
+        async def _invoke_once(target: _NervaASGIApp) -> int:
+            transport = httpx.ASGITransport(app=target)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get("/ok")
+            return resp.status_code
+
+        assert await _invoke_once(app) == 200
+        on_startup.assert_awaited_once()
+        on_shutdown.assert_not_awaited()
+
+        del app
+        gc.collect()
+
+        for _ in range(20):
+            if on_shutdown.await_count >= 1:
+                break
+            await asyncio.sleep(0.01)
+        on_shutdown.assert_awaited_once()
+
 
 class TestBuildNervaApp:
     async def test_health_endpoint(self) -> None:

@@ -13,7 +13,7 @@ With conditional routing:
 """
 
 import nerva
-from nerva import Model, model, serve, trace
+from nerva import Model, build_nerva_app, model, trace
 
 # --- Model implementations ---
 
@@ -82,8 +82,6 @@ classifier = model("classifier", ToyClassifier, backend="pytorch", device="cpu")
 
 
 def multimodal_classify(request: object) -> object:
-    assert isinstance(request, dict)
-
     # Parallel: run both encoders concurrently
     img_feat, txt_feat = nerva.parallel(
         lambda: image_encoder({"image_bytes": request["image"]}),
@@ -98,8 +96,6 @@ def multimodal_classify(request: object) -> object:
 
 
 def adaptive_classify(request: object) -> object:
-    assert isinstance(request, dict)
-
     features = nerva.cond(
         request.get("media_type") == "image_only",
         # True branch: image encoder only
@@ -118,7 +114,7 @@ def adaptive_classify(request: object) -> object:
 # --- Apply transforms and serve ---
 
 graph = trace(multimodal_classify)
-app = serve(graph, route="/rpc/multimodal_classify")
+app = build_nerva_app({"multimodal_classify": graph})
 
 
 # --- Expected usage ---
