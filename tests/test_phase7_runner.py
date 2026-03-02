@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from scripts.bench.run_phase7 import (
     BenchmarkRun,
@@ -10,6 +10,9 @@ from scripts.bench.run_phase7 import (
     build_matrix,
     write_artifacts,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_build_matrix_contains_c1000() -> None:

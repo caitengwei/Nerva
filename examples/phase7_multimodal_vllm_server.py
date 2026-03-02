@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nerva import Model, build_nerva_app, model, trace
-from nerva.core.graph import Graph
+
+if TYPE_CHECKING:
+    from nerva.core.graph import Graph
 
 
 class MMPreprocessModel(Model):

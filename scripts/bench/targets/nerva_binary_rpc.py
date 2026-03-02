@@ -6,9 +6,9 @@ from typing import Any
 
 import httpx
 import msgpack
+from scripts.bench.targets.base import TargetResponse
 
 from nerva.server.protocol import Frame, FrameType, ProtocolError, decode_frame, encode_frame
-from scripts.bench.targets.base import TargetResponse
 
 BinarySender = Callable[[str, bytes, dict[str, str], int], Awaitable[bytes]]
 

@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import shlex
+import shutil
 import subprocess
-from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, cast
+
+import uvicorn
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from starlette.requests import Request
 
 
 def build_triton_command(
@@ -36,6 +49,48 @@ def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _run_mock_server(*, host: str, port: int, model_repo: str) -> int:
+    model_name = "phase7_mm_vllm"
+    with os.scandir(model_repo) as entries:
+        for entry in entries:
+            if entry.is_dir():
+                model_name = entry.name
+                break
+
+    async def ready(_request: Request) -> JSONResponse:
+        return JSONResponse({"ready": True, "backend": "mock_triton"})
+
+    async def infer(request: Request) -> JSONResponse:
+        body: dict[str, Any] = cast("dict[str, Any]", await request.json())
+        prompt = ""
+        inputs = body.get("inputs")
+        if isinstance(inputs, list) and inputs:
+            first = inputs[0]
+            if isinstance(first, dict):
+                data = first.get("data")
+                if isinstance(data, list) and data:
+                    prompt = str(data[0])
+        payload = {
+            "model_name": model_name,
+            "outputs": [{"name": "text", "data": [f"[mock-triton] {prompt}"]}],
+        }
+        return JSONResponse(payload)
+
+    app = Starlette(
+        routes=[
+            Route("/v2/health/ready", ready, methods=["GET"]),
+            Route(f"/v2/models/{model_name}/infer", infer, methods=["POST"]),
+        ]
+    )
+    print(
+        json.dumps(
+            {"mode": "mock_triton", "host": host, "port": port, "model_repo": model_repo}
+        )
+    )
+    uvicorn.run(app, host=host, port=port, log_level="info")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _cli(argv)
     cmd = build_triton_command(
@@ -48,6 +103,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dry_run:
         print(shlex.join(cmd))
         return 0
+
+    if shutil.which("tritonserver") is None:
+        return _run_mock_server(host="0.0.0.0", port=args.http_port, model_repo=args.model_repo)
 
     completed = subprocess.run(cmd, check=False)
     return completed.returncode

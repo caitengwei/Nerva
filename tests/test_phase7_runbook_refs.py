@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 RUNBOOK = Path("docs/plans/2026-03-02-phase7-e2e-benchmark-runbook.md")
 
 

@@ -5,7 +5,6 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
-
 from scripts.bench.targets.base import TargetResponse
 
 JSONSender = Callable[[str, dict[str, Any], int], Awaitable[dict[str, Any]]]

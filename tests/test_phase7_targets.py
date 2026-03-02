@@ -3,12 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 import msgpack
-
-from nerva.server.protocol import Frame, FrameType, encode_frame
 from scripts.bench.targets.base import TargetResponse
 from scripts.bench.targets.nerva_binary_rpc import NervaBinaryRPCTarget
 from scripts.bench.targets.triton_infer import TritonInferTarget
 from scripts.bench.targets.vllm_openai_api import VLLMOpenAIAPITarget
+
+from nerva.server.protocol import Frame, FrameType, encode_frame
 
 
 def test_target_response_schema() -> None:

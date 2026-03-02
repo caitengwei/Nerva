@@ -4,16 +4,22 @@ import argparse
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Sequence
-
-import httpx
+from urllib import request
+from urllib.error import URLError
 
 StatusGetter = Callable[[str], Awaitable[int]]
 
 
 async def _default_getter(url: str) -> int:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, timeout=2.0)
-        return resp.status_code
+    def _fetch_status() -> int:
+        req = request.Request(url, method="GET")
+        with request.urlopen(req, timeout=2.0) as resp:
+            return int(resp.status)
+
+    try:
+        return await asyncio.to_thread(_fetch_status)
+    except URLError:
+        return 599
 
 
 async def wait_service_ready(
