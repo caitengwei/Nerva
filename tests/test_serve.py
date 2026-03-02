@@ -8,6 +8,7 @@ import pytest
 
 from nerva.core.graph import Graph, Node
 from nerva.core.model import Model, model
+from nerva.core.proxy import trace
 from nerva.server.serve import _build_pipelines, _collect_model_names
 
 
@@ -129,3 +130,67 @@ class TestBuildPipelines:
 
         with pytest.raises(KeyError, match="nonexistent"):
             await _build_pipelines({"pipe": g}, mock_manager)
+
+
+class TestBuildNervaApp:
+    async def test_health_endpoint(self) -> None:
+        """build_nerva_app() 启动后 /v1/health 返回 ok。"""
+        import httpx
+
+        from nerva.server.serve import build_nerva_app
+        from tests.helpers import EchoModel
+
+        handle = model("echo_app_health", EchoModel, backend="pytorch", device="cpu")
+        graph = trace(lambda inp: handle(inp))
+        app = build_nerva_app({"echo": graph})
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/v1/health")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+    async def test_rpc_echo_end_to_end(self) -> None:
+        """build_nerva_app() 能跑通真实 Worker 进程的推理请求。"""
+        import time
+
+        import httpx
+        import msgpack
+
+        from nerva import trace
+        from nerva.server.protocol import Frame, FrameType, decode_frame, encode_frame
+        from nerva.server.serve import build_nerva_app
+        from tests.helpers import EchoModel
+
+        handle = model("echo_app_rpc", EchoModel, backend="pytorch", device="cpu")
+        graph = trace(lambda inp: handle(inp))
+        app = build_nerva_app({"echo": graph})
+
+        def _make_body() -> bytes:
+            return (
+                encode_frame(Frame(FrameType.OPEN, 1, 0, msgpack.packb({"pipeline": "echo"})))
+                + encode_frame(Frame(FrameType.DATA, 1, 0, msgpack.packb({"value": "world"})))
+                + encode_frame(Frame(FrameType.END, 1, 0, b""))
+            )
+
+        deadline = int(time.time() * 1000) + 30000
+        headers = {
+            "content-type": "application/x-nerva-rpc",
+            "x-nerva-deadline-ms": str(deadline),
+            "x-nerva-stream": "0",
+        }
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/rpc/echo", content=_make_body(), headers=headers)
+
+        assert resp.status_code == 200
+        frames = []
+        offset = 0
+        while offset < len(resp.content):
+            frame, consumed = decode_frame(resp.content[offset:])
+            frames.append(frame)
+            offset += consumed
+        data_frame = next(f for f in frames if f.frame_type == FrameType.DATA)
+        result = msgpack.unpackb(data_frame.payload, raw=False)
+        assert result == {"echo": "world"}

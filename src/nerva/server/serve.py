@@ -8,11 +8,11 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 import uvicorn
+from starlette.applications import Starlette
 
 from nerva.backends.base import InferContext
 from nerva.core.model import get_model_handle
 from nerva.engine.executor import Executor
-from nerva.server.app import build_app
 from nerva.worker.manager import WorkerManager
 
 if TYPE_CHECKING:
@@ -108,6 +108,131 @@ class _PipelineExecutor:
         return await executor.execute(inputs)
 
 
+class _NervaASGIApp:
+    """ASGI application wrapper that lazily starts workers on first HTTP request.
+
+    This design ensures workers are initialised regardless of whether the ASGI
+    host sends a lifespan scope (uvicorn does; httpx ASGITransport does not).
+    Workers are shut down when the lifespan scope ends (production servers) or
+    when the GC collects the object.
+    """
+
+    def __init__(
+        self,
+        starlette_app: Starlette,
+        on_startup: Any,
+        on_shutdown: Any,
+    ) -> None:
+        self._app = starlette_app
+        self._on_startup = on_startup
+        self._on_shutdown = on_shutdown
+        self._started = False
+        self._lock: asyncio.Lock | None = None
+
+    async def _ensure_started(self) -> None:
+        """Idempotent: run startup exactly once."""
+        if self._started:
+            return
+        # Lazily create the lock inside the running event loop.
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            if not self._started:
+                await self._on_startup()
+                self._started = True
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            # Forward lifespan events to the inner Starlette app but also
+            # drive our own startup/shutdown hooks.
+            await self._handle_lifespan(scope, receive, send)
+        else:
+            # For http/websocket scopes, ensure workers are up before dispatch.
+            await self._ensure_started()
+            await self._app(scope, receive, send)
+
+    async def _handle_lifespan(self, scope: Any, receive: Any, send: Any) -> None:
+        """Handle lifespan scope: startup → yield → shutdown."""
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                try:
+                    await self._ensure_started()
+                    await send({"type": "lifespan.startup.complete"})
+                except Exception as exc:
+                    await send({"type": "lifespan.startup.failed", "message": str(exc)})
+                    return
+            elif message["type"] == "lifespan.shutdown":
+                try:
+                    await self._on_shutdown()
+                    self._started = False
+                except Exception:
+                    pass
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+
+
+def build_nerva_app(pipelines: dict[str, Graph]) -> _NervaASGIApp:
+    """Return an ASGI app with worker lifecycle managed automatically.
+
+    Workers are started lazily on the first HTTP request (when running under
+    httpx in tests) or on the ASGI lifespan startup event (when running under
+    uvicorn in production). Workers are shut down on the lifespan shutdown
+    event (production) or when the GC collects the object.
+
+    Use this when you want to control the server yourself:
+
+        app = build_nerva_app({"classify": graph})
+        # uvicorn mymodule:app --port 8080
+
+    Args:
+        pipelines: Mapping from pipeline name to traced Graph.
+
+    Returns:
+        An ASGI application (compatible with Starlette/uvicorn).
+    """
+    import prometheus_client
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Route
+
+    from nerva.server.rpc import RpcHandler
+
+    manager = WorkerManager()
+    live_executors: dict[str, Any] = {}
+    live_model_info: list[dict[str, Any]] = []
+
+    async def _on_startup() -> None:
+        execs, info = await _build_pipelines(pipelines, manager)
+        live_executors.update(execs)
+        live_model_info.extend(info)
+
+    async def _on_shutdown() -> None:
+        await manager.shutdown_all()
+
+    rpc_handler = RpcHandler(live_executors)
+
+    async def _health(request: Any) -> JSONResponse:
+        return JSONResponse({"status": "ok"})
+
+    async def _models(request: Any) -> JSONResponse:
+        return JSONResponse({"models": live_model_info})
+
+    async def _metrics(request: Any) -> Response:
+        data = prometheus_client.generate_latest()
+        return Response(content=data, media_type=prometheus_client.CONTENT_TYPE_LATEST)
+
+    starlette_app = Starlette(
+        routes=[
+            Route("/rpc/{pipeline_name}", rpc_handler.handle, methods=["POST"]),
+            Route("/v1/health", _health, methods=["GET"]),
+            Route("/v1/models", _models, methods=["GET"]),
+            Route("/metrics", _metrics, methods=["GET"]),
+        ],
+    )
+
+    return _NervaASGIApp(starlette_app, _on_startup, _on_shutdown)
+
+
 def serve(
     pipelines: dict[str, Graph],
     *,
@@ -124,16 +249,5 @@ def serve(
         host: Bind address.
         port: Bind port.
     """
-
-    async def _run() -> None:
-        manager = WorkerManager()
-        try:
-            executors, model_info = await _build_pipelines(pipelines, manager)
-            app = build_app(pipelines=executors, model_info=model_info)
-            config = uvicorn.Config(app, host=host, port=port, log_level="info")
-            server = uvicorn.Server(config)
-            await server.serve()
-        finally:
-            await manager.shutdown_all()
-
-    asyncio.run(_run())
+    app = build_nerva_app(pipelines)
+    uvicorn.run(app, host=host, port=port, log_level="info")

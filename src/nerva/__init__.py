@@ -14,7 +14,7 @@ from nerva.engine.batcher import BatchConfig, DynamicBatcher
 from nerva.engine.executor import Executor
 from nerva.observability.logging import configure_logging
 from nerva.observability.metrics import NervaMetrics, get_metrics
-from nerva.server.serve import serve
+from nerva.server.serve import build_nerva_app, serve
 from nerva.worker.manager import WorkerManager
 from nerva.worker.proxy import WorkerProxy
 
@@ -35,6 +35,7 @@ __all__ = [
     "Proxy",
     "WorkerManager",
     "WorkerProxy",
+    "build_nerva_app",
     "cond",
     "configure_logging",
     "get_backend",
