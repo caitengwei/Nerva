@@ -13,8 +13,7 @@ With conditional routing:
 """
 
 import nerva
-from nerva import Model, model, serve, trace
-
+from nerva import Model, build_nerva_app, model, trace
 
 # --- Model implementations ---
 
@@ -52,7 +51,10 @@ class ToyFusionModel(Model):
         assert isinstance(img_feat, list) and isinstance(txt_feat, list)
         # Toy fusion: element-wise average
         min_len = min(len(img_feat), len(txt_feat))
-        fused = [(a + b) / 2.0 for a, b in zip(img_feat[:min_len], txt_feat[:min_len])]
+        fused = [
+            (a + b) / 2.0
+            for a, b in zip(img_feat[:min_len], txt_feat[:min_len], strict=False)
+        ]
         return {"fused_features": fused}
 
 
@@ -80,8 +82,6 @@ classifier = model("classifier", ToyClassifier, backend="pytorch", device="cpu")
 
 
 def multimodal_classify(request: object) -> object:
-    assert isinstance(request, dict)
-
     # Parallel: run both encoders concurrently
     img_feat, txt_feat = nerva.parallel(
         lambda: image_encoder({"image_bytes": request["image"]}),
@@ -96,8 +96,6 @@ def multimodal_classify(request: object) -> object:
 
 
 def adaptive_classify(request: object) -> object:
-    assert isinstance(request, dict)
-
     features = nerva.cond(
         request.get("media_type") == "image_only",
         # True branch: image encoder only
@@ -116,7 +114,7 @@ def adaptive_classify(request: object) -> object:
 # --- Apply transforms and serve ---
 
 graph = trace(multimodal_classify)
-app = serve(graph, route="/rpc/multimodal_classify")
+app = build_nerva_app({"multimodal_classify": graph})
 
 
 # --- Expected usage ---

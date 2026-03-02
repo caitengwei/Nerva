@@ -2,13 +2,14 @@
 """Tests for nerva.server.serve — serve() internals."""
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from nerva.core.graph import Graph, Node
 from nerva.core.model import Model, model
-from nerva.server.serve import _build_pipelines, _collect_model_names
+from nerva.core.proxy import trace
+from nerva.server.serve import _build_pipelines, _collect_model_names, _NervaASGIApp
 
 
 class DummyModel(Model):
@@ -129,3 +130,220 @@ class TestBuildPipelines:
 
         with pytest.raises(KeyError, match="nonexistent"):
             await _build_pipelines({"pipe": g}, mock_manager)
+
+
+class TestNervaASGIAppLifecycle:
+    async def test_manual_shutdown_after_http_request(self) -> None:
+        """无 lifespan 场景下可通过 app.shutdown() 回收资源。"""
+        import httpx
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def _ok(_request: Any) -> JSONResponse:
+            return JSONResponse({"ok": True})
+
+        on_startup = AsyncMock()
+        on_shutdown = AsyncMock()
+        app = _NervaASGIApp(
+            starlette_app=Starlette(routes=[Route("/ok", _ok, methods=["GET"])]),
+            on_startup=on_startup,
+            on_shutdown=on_shutdown,
+        )
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/ok")
+
+        assert resp.status_code == 200
+        on_startup.assert_awaited_once()
+        on_shutdown.assert_not_awaited()
+
+        await app.shutdown()
+        await app.shutdown()
+        on_shutdown.assert_awaited_once()
+
+    async def test_auto_shutdown_on_gc(self) -> None:
+        """无 lifespan 场景下, GC 回收 app 时会自动触发 shutdown。"""
+        import asyncio
+        import gc
+
+        import httpx
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def _ok(_request: Any) -> JSONResponse:
+            return JSONResponse({"ok": True})
+
+        on_startup = AsyncMock()
+        on_shutdown = AsyncMock()
+        app = _NervaASGIApp(
+            starlette_app=Starlette(routes=[Route("/ok", _ok, methods=["GET"])]),
+            on_startup=on_startup,
+            on_shutdown=on_shutdown,
+        )
+
+        async def _invoke_once(target: _NervaASGIApp) -> int:
+            transport = httpx.ASGITransport(app=target)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get("/ok")
+            return resp.status_code
+
+        assert await _invoke_once(app) == 200
+        on_startup.assert_awaited_once()
+        on_shutdown.assert_not_awaited()
+
+        del app
+        gc.collect()
+
+        for _ in range(20):
+            if on_shutdown.await_count >= 1:
+                break
+            await asyncio.sleep(0.01)
+        on_shutdown.assert_awaited_once()
+
+    async def test_parent_exit_watchdog_sends_sigterm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """父进程退出时, watchdog 应主动向自身发送 SIGTERM。"""
+        import asyncio
+        import os
+        import signal
+
+        import httpx
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        from nerva.server import serve as serve_module
+
+        async def _ok(_request: Any) -> JSONResponse:
+            return JSONResponse({"ok": True})
+
+        fake_parent_pid = {"value": 4242}
+        monkeypatch.setattr(serve_module.os, "getppid", lambda: fake_parent_pid["value"])
+        kill_mock = Mock()
+        monkeypatch.setattr(serve_module.os, "kill", kill_mock)
+
+        app = _NervaASGIApp(
+            starlette_app=Starlette(routes=[Route("/ok", _ok, methods=["GET"])]),
+            on_startup=AsyncMock(),
+            on_shutdown=AsyncMock(),
+            watch_parent=True,
+            parent_watch_interval_s=0.01,
+        )
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/ok")
+        assert resp.status_code == 200
+
+        fake_parent_pid["value"] = 1
+        for _ in range(50):
+            if kill_mock.called:
+                break
+            await asyncio.sleep(0.01)
+
+        assert kill_mock.call_count >= 1
+        kill_mock.assert_called_with(os.getpid(), signal.SIGTERM)
+        await app.shutdown()
+
+    async def test_startup_failure_triggers_rollback(self) -> None:
+        """startup 失败时应触发回滚清理, 防止资源泄漏。"""
+        import httpx
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def _ok(_request: Any) -> JSONResponse:
+            return JSONResponse({"ok": True})
+
+        on_startup = AsyncMock(side_effect=RuntimeError("boom"))
+        on_shutdown = AsyncMock()
+        app = _NervaASGIApp(
+            starlette_app=Starlette(routes=[Route("/ok", _ok, methods=["GET"])]),
+            on_startup=on_startup,
+            on_shutdown=on_shutdown,
+            watch_parent=False,
+        )
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            with pytest.raises(RuntimeError, match="boom"):
+                await client.get("/ok")
+
+        on_startup.assert_awaited_once()
+        on_shutdown.assert_awaited_once()
+        assert app._started is False
+        assert app._lifecycle_loop is None
+
+
+class TestBuildNervaApp:
+    async def test_health_endpoint(self) -> None:
+        """build_nerva_app() 启动后 /v1/health 返回 ok。"""
+        import httpx
+
+        from nerva.server.serve import build_nerva_app
+        from tests.helpers import EchoModel
+
+        handle = model("echo_app_health", EchoModel, backend="pytorch", device="cpu")
+        graph = trace(lambda inp: handle(inp))
+        app = build_nerva_app({"echo": graph})
+
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get("/v1/health")
+        finally:
+            await app.shutdown()
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+    async def test_rpc_echo_end_to_end(self) -> None:
+        """build_nerva_app() 能跑通真实 Worker 进程的推理请求。"""
+        import time
+
+        import httpx
+        import msgpack
+
+        from nerva import trace
+        from nerva.server.protocol import Frame, FrameType, decode_frame, encode_frame
+        from nerva.server.serve import build_nerva_app
+        from tests.helpers import EchoModel
+
+        handle = model("echo_app_rpc", EchoModel, backend="pytorch", device="cpu")
+        graph = trace(lambda inp: handle(inp))
+        app = build_nerva_app({"echo": graph})
+
+        def _make_body() -> bytes:
+            return (
+                encode_frame(Frame(FrameType.OPEN, 1, 0, msgpack.packb({"pipeline": "echo"})))
+                + encode_frame(Frame(FrameType.DATA, 1, 0, msgpack.packb({"value": "world"})))
+                + encode_frame(Frame(FrameType.END, 1, 0, b""))
+            )
+
+        deadline = int(time.time() * 1000) + 30000
+        headers = {
+            "content-type": "application/x-nerva-rpc",
+            "x-nerva-deadline-ms": str(deadline),
+            "x-nerva-stream": "0",
+        }
+
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.post("/rpc/echo", content=_make_body(), headers=headers)
+        finally:
+            await app.shutdown()
+
+        assert resp.status_code == 200
+        frames = []
+        offset = 0
+        while offset < len(resp.content):
+            frame, consumed = decode_frame(resp.content[offset:])
+            frames.append(frame)
+            offset += consumed
+        data_frame = next(f for f in frames if f.frame_type == FrameType.DATA)
+        result = msgpack.unpackb(data_frame.payload, raw=False)
+        assert result == {"echo": "world"}

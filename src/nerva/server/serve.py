@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
+import signal
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import uvicorn
 
@@ -16,10 +19,22 @@ from nerva.server.app import build_app
 from nerva.worker.manager import WorkerManager
 
 if TYPE_CHECKING:
+    from starlette.applications import Starlette
+
     from nerva.core.graph import Graph
     from nerva.engine.executor import InferableProxy
 
 logger = logging.getLogger(__name__)
+
+
+class NervaASGIApp(Protocol):
+    """Public protocol for Nerva ASGI apps with explicit cleanup."""
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        ...
+
+    async def shutdown(self) -> None:
+        ...
 
 
 def _collect_model_names(pipelines: dict[str, Graph]) -> set[str]:
@@ -108,6 +123,191 @@ class _PipelineExecutor:
         return await executor.execute(inputs)
 
 
+class _NervaASGIApp:
+    """ASGI application wrapper that lazily starts workers on first HTTP request.
+
+    This design ensures workers are initialised regardless of whether the ASGI
+    host sends a lifespan scope (uvicorn does; httpx ASGITransport does not).
+    Workers are shut down when the lifespan scope ends (production servers) or
+    when the GC collects the object.
+    """
+
+    def __init__(
+        self,
+        starlette_app: Starlette,
+        on_startup: Any,
+        on_shutdown: Any,
+        *,
+        watch_parent: bool = True,
+        parent_watch_interval_s: float = 1.0,
+    ) -> None:
+        self._app = starlette_app
+        self._on_startup = on_startup
+        self._on_shutdown = on_shutdown
+        self._started = False
+        self._lock: asyncio.Lock | None = None
+        self._lifecycle_loop: asyncio.AbstractEventLoop | None = None
+        self._watch_parent = watch_parent
+        self._parent_watch_interval_s = parent_watch_interval_s
+        self._parent_pid = os.getppid()
+        self._parent_watchdog_task: asyncio.Task[None] | None = None
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            # Lazily create the lock in the current running loop.
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    async def _ensure_started(self) -> None:
+        """Idempotent: run startup exactly once."""
+        if self._started:
+            return
+        async with self._get_lock():
+            if not self._started:
+                self._lifecycle_loop = asyncio.get_running_loop()
+                try:
+                    await self._on_startup()
+                except Exception:
+                    # Best-effort rollback on startup failure to avoid worker leaks.
+                    with contextlib.suppress(Exception):
+                        await self._on_shutdown()
+                    self._lifecycle_loop = None
+                    raise
+                self._started = True
+                self._start_parent_watchdog()
+
+    def _start_parent_watchdog(self) -> None:
+        if not self._watch_parent:
+            return
+        if self._parent_watchdog_task is not None and not self._parent_watchdog_task.done():
+            return
+        parent_pid = self._parent_pid
+        interval = self._parent_watch_interval_s
+
+        async def _watch_parent_lifecycle() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                if os.getppid() != parent_pid:
+                    with contextlib.suppress(Exception):
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    return
+
+        self._parent_watchdog_task = asyncio.create_task(_watch_parent_lifecycle())
+
+    async def _cancel_parent_watchdog(self) -> None:
+        task = self._parent_watchdog_task
+        self._parent_watchdog_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def shutdown(self) -> None:
+        """Idempotent shutdown hook for non-lifespan ASGI hosts."""
+        if not self._started:
+            await self._cancel_parent_watchdog()
+            return
+        async with self._get_lock():
+            if not self._started:
+                await self._cancel_parent_watchdog()
+                return
+            try:
+                await self._cancel_parent_watchdog()
+                await self._on_shutdown()
+            finally:
+                self._started = False
+                self._lifecycle_loop = None
+
+    def __del__(self) -> None:
+        """Best-effort auto cleanup for hosts that never send lifespan events."""
+        if not self._started:
+            return
+        loop = self._lifecycle_loop
+        if loop is None or loop.is_closed():
+            return
+        shutdown_hook = self._on_shutdown
+        parent_watchdog_task = self._parent_watchdog_task
+
+        def _schedule_shutdown() -> None:
+            if parent_watchdog_task is not None and not parent_watchdog_task.done():
+                parent_watchdog_task.cancel()
+            task = loop.create_task(shutdown_hook())
+
+            def _swallow_result(done: asyncio.Task[Any]) -> None:
+                with contextlib.suppress(BaseException):
+                    done.result()
+
+            task.add_done_callback(_swallow_result)
+
+        with contextlib.suppress(Exception):
+            loop.call_soon_threadsafe(_schedule_shutdown)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            # Handle lifespan events here to drive startup/shutdown hooks.
+            await self._handle_lifespan(scope, receive, send)
+        else:
+            # For http/websocket scopes, ensure workers are up before dispatch.
+            await self._ensure_started()
+            await self._app(scope, receive, send)
+
+    async def _handle_lifespan(self, scope: Any, receive: Any, send: Any) -> None:
+        """Handle lifespan scope: startup → yield → shutdown."""
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                try:
+                    await self._ensure_started()
+                    await send({"type": "lifespan.startup.complete"})
+                except Exception as exc:
+                    await send({"type": "lifespan.startup.failed", "message": str(exc)})
+                    return
+            elif message["type"] == "lifespan.shutdown":
+                with contextlib.suppress(Exception):
+                    await self.shutdown()
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+
+
+def build_nerva_app(pipelines: dict[str, Graph]) -> NervaASGIApp:
+    """Return an ASGI app with worker lifecycle managed automatically.
+
+    Workers are started lazily on the first HTTP request (when running under
+    httpx in tests) or on the ASGI lifespan startup event (when running under
+    uvicorn in production). Workers are shut down on the lifespan shutdown
+    event (production) or when the GC collects the object.
+
+    Use this when you want to control the server yourself:
+
+        app = build_nerva_app({"classify": graph})
+        # uvicorn mymodule:app --port 8080
+
+    Args:
+        pipelines: Mapping from pipeline name to traced Graph.
+
+    Returns:
+        An ASGI application (compatible with Starlette/uvicorn).
+    """
+    manager = WorkerManager()
+    live_executors: dict[str, Any] = {}
+    live_model_info: list[dict[str, Any]] = []
+
+    async def _on_startup() -> None:
+        execs, info = await _build_pipelines(pipelines, manager)
+        live_executors.update(execs)
+        live_model_info.extend(info)
+
+    async def _on_shutdown() -> None:
+        await manager.shutdown_all()
+        live_executors.clear()
+        live_model_info.clear()
+
+    starlette_app = build_app(pipelines=live_executors, model_info=live_model_info)
+
+    return _NervaASGIApp(starlette_app, _on_startup, _on_shutdown)
+
+
 def serve(
     pipelines: dict[str, Graph],
     *,
@@ -124,16 +324,5 @@ def serve(
         host: Bind address.
         port: Bind port.
     """
-
-    async def _run() -> None:
-        manager = WorkerManager()
-        try:
-            executors, model_info = await _build_pipelines(pipelines, manager)
-            app = build_app(pipelines=executors, model_info=model_info)
-            config = uvicorn.Config(app, host=host, port=port, log_level="info")
-            server = uvicorn.Server(config)
-            await server.serve()
-        finally:
-            await manager.shutdown_all()
-
-    asyncio.run(_run())
+    app = build_nerva_app(pipelines)
+    uvicorn.run(app, host=host, port=port, log_level="info")
