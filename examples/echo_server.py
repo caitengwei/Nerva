@@ -52,4 +52,4 @@ app = build_nerva_app({"echo": graph})
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("examples.echo_server:app", host="0.0.0.0", port=8080, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=8080, reload=False)

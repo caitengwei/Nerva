@@ -249,6 +249,35 @@ class TestNervaASGIAppLifecycle:
         kill_mock.assert_called_with(os.getpid(), signal.SIGTERM)
         await app.shutdown()
 
+    async def test_startup_failure_triggers_rollback(self) -> None:
+        """startup 失败时应触发回滚清理, 防止资源泄漏。"""
+        import httpx
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def _ok(_request: Any) -> JSONResponse:
+            return JSONResponse({"ok": True})
+
+        on_startup = AsyncMock(side_effect=RuntimeError("boom"))
+        on_shutdown = AsyncMock()
+        app = _NervaASGIApp(
+            starlette_app=Starlette(routes=[Route("/ok", _ok, methods=["GET"])]),
+            on_startup=on_startup,
+            on_shutdown=on_shutdown,
+            watch_parent=False,
+        )
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            with pytest.raises(RuntimeError, match="boom"):
+                await client.get("/ok")
+
+        on_startup.assert_awaited_once()
+        on_shutdown.assert_awaited_once()
+        assert app._started is False
+        assert app._lifecycle_loop is None
+
 
 class TestBuildNervaApp:
     async def test_health_endpoint(self) -> None:
