@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+from scripts.bench.infra.start_triton_server import build_triton_command
+from scripts.bench.infra.start_vllm_server import build_vllm_command
+from scripts.bench.infra.wait_service_ready import wait_service_ready
+
+
+def test_start_vllm_server_dry_run_command() -> None:
+    cmd = build_vllm_command(
+        model="Qwen/Qwen2.5-0.5B-Instruct",
+        host="127.0.0.1",
+        port=8001,
+        dtype="float16",
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.9,
+    )
+    joined = " ".join(cmd)
+    assert "vllm" in joined
+    assert "serve" in joined
+    assert "--host" in joined
+    assert "--port" in joined
+
+
+def test_start_triton_server_dry_run_command() -> None:
+    cmd = build_triton_command(
+        model_repo="/tmp/phase7-triton-repo",
+        http_port=8002,
+        grpc_port=8003,
+        metrics_port=8004,
+    )
+    joined = " ".join(cmd)
+    assert "tritonserver" in joined
+    assert "--model-repository" in joined
+
+
+async def test_wait_service_ready_retries_for_vllm() -> None:
+    attempts = {"n": 0}
+
+    async def getter(url: str) -> int:
+        del url
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            return 503
+        return 200
+
+    ok = await wait_service_ready(
+        kind="vllm",
+        url="http://127.0.0.1:8001/health",
+        timeout_seconds=1.0,
+        interval_seconds=0.01,
+        getter=getter,
+    )
+    assert ok is True
+
+
+async def test_wait_service_ready_retries_for_triton() -> None:
+    attempts = {"n": 0}
+
+    async def getter(url: str) -> int:
+        del url
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            return 503
+        return 200
+
+    ok = await wait_service_ready(
+        kind="triton",
+        url="http://127.0.0.1:8002/v2/health/ready",
+        timeout_seconds=1.0,
+        interval_seconds=0.01,
+        getter=getter,
+    )
+    assert ok is True
