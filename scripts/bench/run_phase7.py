@@ -141,9 +141,9 @@ def _payload_for_target(target: str, *, seq: int, workload: str) -> dict[str, An
         raise ValueError(f"unsupported workload: {workload}")
 
     text = f"phase7 benchmark sample #{seq}"
-    prompt = f"[image_bytes=16]\\n{text}"
+    prompt = f"[image_bytes=16]\n{text}"
     if target == "nerva":
-        return {"text": text, "image_bytes": b"\\x00" * 16}
+        return {"text": text, "image_bytes": b"\x00" * 16}
     return {"prompt": prompt}
 
 

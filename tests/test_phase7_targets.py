@@ -76,6 +76,38 @@ async def test_nerva_binary_rpc_parses_data_and_error_frames() -> None:
     assert "boom" in err_resp.error
 
 
+async def test_nerva_binary_rpc_rejects_data_without_text_field() -> None:
+    data_bytes = (
+        encode_frame(
+            Frame(
+                frame_type=FrameType.DATA,
+                request_id=1,
+                flags=0,
+                payload=msgpack.packb({"foo": "bar"}, use_bin_type=True),
+            )
+        )
+        + encode_frame(Frame(frame_type=FrameType.END, request_id=1, flags=0, payload=b""))
+    )
+
+    async def sender(
+        url: str,
+        body: bytes,
+        headers: dict[str, str],
+        timeout_ms: int,
+    ) -> bytes:
+        del url, body, headers, timeout_ms
+        return data_bytes
+
+    target = NervaBinaryRPCTarget(
+        base_url="http://localhost:8080",
+        pipeline_name="phase7_mm_vllm",
+        sender=sender,
+    )
+    resp = await target.infer({"prompt": "hi"}, deadline_ms=1000)
+    assert resp.ok is False
+    assert "no text field found" in resp.error
+
+
 async def test_vllm_openai_api_parses_text_field() -> None:
     async def sender(
         url: str,

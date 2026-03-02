@@ -129,7 +129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     if launch_mode == "mock":
-        return _run_mock_server(host="0.0.0.0", port=args.http_port, model_repo=args.model_repo)
+        return _run_mock_server(host="127.0.0.1", port=args.http_port, model_repo=args.model_repo)
 
     completed = subprocess.run(cmd, check=False)
     return completed.returncode

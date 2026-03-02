@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from scripts.bench.run_phase7 import (
     BenchmarkRun,
+    _payload_for_target,
     build_artifact_dir,
     build_matrix,
     execute_benchmark_run,
@@ -78,3 +79,13 @@ async def test_execute_benchmark_run_generates_non_zero_metrics() -> None:
     assert summary["p50_ms"] > 0
     assert summary["total_requests"] == len(latencies)
     assert meta["deadline_ms"] == 100
+
+
+def test_payload_for_targets_uses_real_newline_and_binary_bytes() -> None:
+    nerva_payload = _payload_for_target("nerva", seq=7, workload="phase7_mm_vllm")
+    assert nerva_payload["text"] == "phase7 benchmark sample #7"
+    assert nerva_payload["image_bytes"] == b"\x00" * 16
+    assert len(nerva_payload["image_bytes"]) == 16
+
+    vllm_payload = _payload_for_target("vllm", seq=7, workload="phase7_mm_vllm")
+    assert vllm_payload["prompt"] == "[image_bytes=16]\nphase7 benchmark sample #7"

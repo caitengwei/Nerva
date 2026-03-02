@@ -111,6 +111,8 @@ def _parse_response_frames(raw: bytes) -> tuple[bool, str | None, dict[str, Any]
         return False, None, None, "no DATA frame in response"
 
     output_text = _extract_text(first_data)
+    if output_text is None:
+        return False, None, first_data, "no text field found in DATA frame"
     return True, output_text, first_data, ""
 
 

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 import pytest
 from scripts.bench.config import load_bench_config
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def test_default_concurrency_contains_1000(tmp_path: pytest.TempPathFactory) -> None:
+
+def test_default_concurrency_contains_1000(tmp_path: Path) -> None:
     cfg = {
         "concurrency_levels": [1, 32, 128, 512, 1000],
         "warmup_seconds": 60,
@@ -19,7 +23,7 @@ def test_default_concurrency_contains_1000(tmp_path: pytest.TempPathFactory) -> 
     assert 1000 in loaded.concurrency_levels
 
 
-def test_rejects_empty_concurrency_levels(tmp_path: pytest.TempPathFactory) -> None:
+def test_rejects_empty_concurrency_levels(tmp_path: Path) -> None:
     cfg = {
         "concurrency_levels": [],
         "warmup_seconds": 60,
@@ -32,7 +36,20 @@ def test_rejects_empty_concurrency_levels(tmp_path: pytest.TempPathFactory) -> N
         load_bench_config(p)
 
 
-def test_rejects_non_positive_durations(tmp_path: pytest.TempPathFactory) -> None:
+def test_rejects_non_list_concurrency_levels(tmp_path: Path) -> None:
+    cfg = {
+        "concurrency_levels": 1000,
+        "warmup_seconds": 60,
+        "sample_seconds": 300,
+    }
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps(cfg))
+
+    with pytest.raises(ValueError, match="concurrency_levels must be a JSON array"):
+        load_bench_config(p)
+
+
+def test_rejects_non_positive_durations(tmp_path: Path) -> None:
     cfg = {
         "concurrency_levels": [1, 1000],
         "warmup_seconds": 0,

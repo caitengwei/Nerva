@@ -45,7 +45,8 @@ async def run_closed_loop(
         raise ValueError("deadline_ms must be > 0")
 
     semaphore = asyncio.Semaphore(concurrency)
-    stop_at = time.perf_counter() + duration_s
+    started_at = time.perf_counter()
+    stop_at = started_at + duration_s
 
     latencies_ms: list[float] = []
     total_requests = 0
@@ -53,7 +54,6 @@ async def run_closed_loop(
     in_flight = 0
     max_in_flight = 0
     payload_counter = 0
-    state_lock = asyncio.Lock()
 
     async def one_request(seq: int) -> None:
         nonlocal total_requests
@@ -63,9 +63,8 @@ async def run_closed_loop(
 
         async with semaphore:
             start_ns = time.perf_counter_ns()
-            async with state_lock:
-                in_flight += 1
-                max_in_flight = max(max_in_flight, in_flight)
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
 
             ok = False
             try:
@@ -74,12 +73,11 @@ async def run_closed_loop(
                 ok = False
             finally:
                 latency = (time.perf_counter_ns() - start_ns) / 1_000_000.0
-                async with state_lock:
-                    latencies_ms.append(latency)
-                    total_requests += 1
-                    if not ok:
-                        error_count += 1
-                    in_flight -= 1
+                latencies_ms.append(latency)
+                total_requests += 1
+                if not ok:
+                    error_count += 1
+                in_flight -= 1
 
     workers: set[asyncio.Task[None]] = set()
     try:
@@ -103,7 +101,7 @@ async def run_closed_loop(
             if not task.done():
                 task.cancel()
 
-    elapsed_s = max(duration_s, 1e-9)
+    elapsed_s = max(time.perf_counter() - started_at, 1e-9)
     sorted_lat = sorted(latencies_ms)
     p50 = _percentile(sorted_lat, 0.50)
     p95 = _percentile(sorted_lat, 0.95)

@@ -39,3 +39,19 @@ async def test_stats_order_and_error_rate() -> None:
 
     assert result.p50_ms <= result.p95_ms <= result.p99_ms
     assert 0.20 <= result.error_rate <= 0.30
+
+
+async def test_qps_uses_wall_clock_elapsed_after_drain() -> None:
+    async def target(payload: dict[str, int], deadline_ms: int) -> tuple[bool, str]:
+        del payload, deadline_ms
+        await asyncio.sleep(0.05)
+        return True, ""
+
+    result = await run_closed_loop(
+        target,
+        concurrency=1,
+        duration_s=0.01,
+        deadline_ms=500,
+    )
+    assert result.total_requests >= 1
+    assert result.qps < 80.0

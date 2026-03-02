@@ -39,8 +39,12 @@ def load_bench_config(path: Path) -> BenchConfig:
     if not isinstance(raw, dict):
         raise ValueError("config root must be an object")
 
+    raw_concurrency_levels = raw.get("concurrency_levels", [])
+    if not isinstance(raw_concurrency_levels, list):
+        raise ValueError("concurrency_levels must be a JSON array")
+
     concurrency_levels = _validate_positive_int_list(
-        list(raw.get("concurrency_levels", [])),
+        raw_concurrency_levels,
         field_name="concurrency_levels",
     )
     if 1000 not in concurrency_levels:

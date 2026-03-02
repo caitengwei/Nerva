@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import argparse
+
 import pytest
 from scripts.bench.infra.start_triton_server import build_triton_command
+from scripts.bench.infra.start_triton_server import main as triton_main
 from scripts.bench.infra.start_triton_server import resolve_launch_mode as resolve_triton_mode
 from scripts.bench.infra.start_vllm_server import build_vllm_command
 from scripts.bench.infra.start_vllm_server import resolve_launch_mode as resolve_vllm_mode
@@ -88,3 +91,36 @@ async def test_wait_service_ready_retries_for_triton() -> None:
         getter=getter,
     )
     assert ok is True
+
+
+def test_triton_mock_mode_uses_loopback_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    args = argparse.Namespace(
+        model_repo="/tmp/model-repo",
+        http_port=8002,
+        grpc_port=8003,
+        metrics_port=8004,
+        allow_mock=True,
+        dry_run=False,
+    )
+
+    called: dict[str, object] = {}
+
+    def fake_cli(argv: list[str] | None = None) -> argparse.Namespace:
+        del argv
+        return args
+
+    def fake_run_mock_server(*, host: str, port: int, model_repo: str) -> int:
+        called["host"] = host
+        called["port"] = port
+        called["model_repo"] = model_repo
+        return 0
+
+    monkeypatch.setattr("scripts.bench.infra.start_triton_server._cli", fake_cli)
+    monkeypatch.setattr("scripts.bench.infra.start_triton_server.shutil.which", lambda _binary: None)
+    monkeypatch.setattr(
+        "scripts.bench.infra.start_triton_server._run_mock_server",
+        fake_run_mock_server,
+    )
+
+    assert triton_main([]) == 0
+    assert called["host"] == "127.0.0.1"
