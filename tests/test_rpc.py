@@ -316,3 +316,58 @@ class TestRpcHandler:
         frames = _decode_response_frames(resp.content)
         error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.DEADLINE_EXCEEDED
+
+
+from prometheus_client import CollectorRegistry  # noqa: E402
+
+from nerva.observability.metrics import NervaMetrics  # noqa: E402
+from nerva.server.rpc import RpcHandler  # noqa: E402
+
+
+class TestRpcHandlerMetrics:
+    def _make_app_with_metrics(
+        self,
+        executor_result: dict[str, Any] | None = None,
+        executor_side_effect: Exception | None = None,
+    ) -> tuple[TestClient, NervaMetrics]:
+        mock_executor = AsyncMock()
+        if executor_side_effect:
+            mock_executor.execute.side_effect = executor_side_effect
+        else:
+            mock_executor.execute.return_value = executor_result or {"out": 1}
+
+        reg = CollectorRegistry()
+        m = NervaMetrics(registry=reg)
+        handler = RpcHandler({"classify": mock_executor}, metrics=m)
+        from starlette.applications import Starlette
+        from starlette.routing import Route
+        app = Starlette(routes=[Route("/rpc/{pipeline_name}", handler.handle, methods=["POST"])])
+        return TestClient(app), m
+
+    def _rpc_headers(self, deadline_offset_ms: int = 30000) -> dict[str, str]:
+        deadline = int(time.time() * 1000) + deadline_offset_ms
+        return {
+            "content-type": "application/x-nerva-rpc",
+            "x-nerva-deadline-ms": str(deadline),
+            "x-nerva-stream": "0",
+        }
+
+    def test_request_total_incremented_on_success(self) -> None:
+        client, m = self._make_app_with_metrics()
+        body = _make_request_frames("classify", {"x": 1})
+        client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        assert m.request_total.labels(pipeline="classify", status="ok")._value.get() == 1.0
+
+    def test_request_in_flight_returns_to_zero(self) -> None:
+        client, m = self._make_app_with_metrics()
+        body = _make_request_frames("classify", {"x": 1})
+        client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        assert m.request_in_flight.labels(pipeline="classify")._value.get() == 0.0
+
+    def test_request_total_incremented_on_error(self) -> None:
+        client, m = self._make_app_with_metrics(
+            executor_side_effect=RuntimeError("something went wrong")
+        )
+        body = _make_request_frames("classify", {"x": 1})
+        client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        assert m.request_total.labels(pipeline="classify", status="internal")._value.get() == 1.0

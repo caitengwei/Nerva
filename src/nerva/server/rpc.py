@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 import time
 import uuid
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
 
 import msgpack
+import structlog
 from starlette.applications import Starlette
 from starlette.responses import Response
 from starlette.routing import Route
@@ -16,9 +16,10 @@ from starlette.routing import Route
 if TYPE_CHECKING:
     from starlette.requests import Request
 
+from nerva.observability.metrics import NervaMetrics, get_metrics
 from nerva.server.protocol import Frame, FrameType, ProtocolError, decode_frame, encode_frame
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 CONTENT_TYPE = "application/x-nerva-rpc"
 
@@ -69,8 +70,13 @@ class RpcHandler:
     (typically an Executor instance).
     """
 
-    def __init__(self, pipelines: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        pipelines: dict[str, Any],
+        metrics: NervaMetrics | None = None,
+    ) -> None:
         self._pipelines = pipelines
+        self._metrics: NervaMetrics = metrics if metrics is not None else get_metrics()
 
     async def handle(self, request: Request) -> Response:
         """Process a single unary RPC request."""
@@ -234,6 +240,11 @@ class RpcHandler:
 
         # Execute pipeline.
         executor = self._pipelines[pipeline_name]
+        structlog.contextvars.bind_contextvars(
+            request_id=str(request_id), pipeline=pipeline_name
+        )
+        t0 = time.monotonic()
+        self._metrics.request_in_flight.labels(pipeline=pipeline_name).inc()
         try:
             result = await executor.execute(
                 inputs,
@@ -242,10 +253,20 @@ class RpcHandler:
             )
         except Exception as exc:
             code, message = _map_exception(exc)
+            self._metrics.request_total.labels(
+                pipeline=pipeline_name, status=code.name.lower()
+            ).inc()
             return Response(
                 content=_error_frame(request_id, code, message),
                 media_type=CONTENT_TYPE,
             )
+        finally:
+            elapsed = time.monotonic() - t0
+            self._metrics.request_duration_seconds.labels(pipeline=pipeline_name).observe(elapsed)
+            self._metrics.request_in_flight.labels(pipeline=pipeline_name).dec()
+            structlog.contextvars.clear_contextvars()
+
+        self._metrics.request_total.labels(pipeline=pipeline_name, status="ok").inc()
 
         # Build response: DATA + END.
         resp_data = encode_frame(
