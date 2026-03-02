@@ -10,9 +10,7 @@ once Phase 0 + Phase 4 are complete.
 import torch
 import torch.nn as nn
 
-import nerva
-from nerva import Model, model, serve, trace
-
+from nerva import Model, build_nerva_app, model, trace
 
 # --- Step 1: Define model implementation ---
 
@@ -67,19 +65,19 @@ def classify(text_embedding: object) -> object:
 # --- Step 4: Apply transforms and serve ---
 
 graph = trace(classify)
-app = serve(graph, route="/rpc/classify")
+app = build_nerva_app({"classify": graph})
 
 
 # --- Expected usage ---
 #
 # Start server:
-#   nerva run examples/01_single_model.py
+#   uvicorn examples.01_single_model:app --port 8080
 #
-# or programmatically:
-#   uvicorn examples.01_single_model:app
+# or blocking:
+#   python -c "from nerva import serve; from examples.01_single_model import graph; serve({'classify': graph})"
 #
 # Client call (pseudo-code, using future client SDK):
 #   import nerva.client
-#   client = nerva.client.connect("http://localhost:8000")
+#   client = nerva.client.connect("http://localhost:8080")
 #   result = client.call("classify", {"embedding": tensor})
 #   print(result["label"])  # "positive" or "negative"
