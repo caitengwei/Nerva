@@ -2,7 +2,7 @@
 """Tests for nerva.server.serve — serve() internals."""
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -202,6 +202,52 @@ class TestNervaASGIAppLifecycle:
                 break
             await asyncio.sleep(0.01)
         on_shutdown.assert_awaited_once()
+
+    async def test_parent_exit_watchdog_sends_sigterm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """父进程退出时, watchdog 应主动向自身发送 SIGTERM。"""
+        import asyncio
+        import os
+        import signal
+
+        import httpx
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        from nerva.server import serve as serve_module
+
+        async def _ok(_request: Any) -> JSONResponse:
+            return JSONResponse({"ok": True})
+
+        fake_parent_pid = {"value": 4242}
+        monkeypatch.setattr(serve_module.os, "getppid", lambda: fake_parent_pid["value"])
+        kill_mock = Mock()
+        monkeypatch.setattr(serve_module.os, "kill", kill_mock)
+
+        app = _NervaASGIApp(
+            starlette_app=Starlette(routes=[Route("/ok", _ok, methods=["GET"])]),
+            on_startup=AsyncMock(),
+            on_shutdown=AsyncMock(),
+            watch_parent=True,
+            parent_watch_interval_s=0.01,
+        )
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/ok")
+        assert resp.status_code == 200
+
+        fake_parent_pid["value"] = 1
+        for _ in range(50):
+            if kill_mock.called:
+                break
+            await asyncio.sleep(0.01)
+
+        assert kill_mock.call_count >= 1
+        kill_mock.assert_called_with(os.getpid(), signal.SIGTERM)
+        await app.shutdown()
 
 
 class TestBuildNervaApp:

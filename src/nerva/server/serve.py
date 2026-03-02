@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import signal
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -123,6 +125,9 @@ class _NervaASGIApp:
         starlette_app: Starlette,
         on_startup: Any,
         on_shutdown: Any,
+        *,
+        watch_parent: bool = True,
+        parent_watch_interval_s: float = 1.0,
     ) -> None:
         self._app = starlette_app
         self._on_startup = on_startup
@@ -130,6 +135,10 @@ class _NervaASGIApp:
         self._started = False
         self._lock: asyncio.Lock | None = None
         self._lifecycle_loop: asyncio.AbstractEventLoop | None = None
+        self._watch_parent = watch_parent
+        self._parent_watch_interval_s = parent_watch_interval_s
+        self._parent_pid = os.getppid()
+        self._parent_watchdog_task: asyncio.Task[None] | None = None
 
     def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:
@@ -146,15 +155,46 @@ class _NervaASGIApp:
                 self._lifecycle_loop = asyncio.get_running_loop()
                 await self._on_startup()
                 self._started = True
+                self._start_parent_watchdog()
+
+    def _start_parent_watchdog(self) -> None:
+        if not self._watch_parent:
+            return
+        if self._parent_watchdog_task is not None and not self._parent_watchdog_task.done():
+            return
+        parent_pid = self._parent_pid
+        interval = self._parent_watch_interval_s
+
+        async def _watch_parent_lifecycle() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                if os.getppid() != parent_pid:
+                    with contextlib.suppress(Exception):
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    return
+
+        self._parent_watchdog_task = asyncio.create_task(_watch_parent_lifecycle())
+
+    async def _cancel_parent_watchdog(self) -> None:
+        task = self._parent_watchdog_task
+        self._parent_watchdog_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     async def shutdown(self) -> None:
         """Idempotent shutdown hook for non-lifespan ASGI hosts."""
         if not self._started:
+            await self._cancel_parent_watchdog()
             return
         async with self._get_lock():
             if not self._started:
+                await self._cancel_parent_watchdog()
                 return
             try:
+                await self._cancel_parent_watchdog()
                 await self._on_shutdown()
             finally:
                 self._started = False
@@ -168,8 +208,11 @@ class _NervaASGIApp:
         if loop is None or loop.is_closed():
             return
         shutdown_hook = self._on_shutdown
+        parent_watchdog_task = self._parent_watchdog_task
 
         def _schedule_shutdown() -> None:
+            if parent_watchdog_task is not None and not parent_watchdog_task.done():
+                parent_watchdog_task.cancel()
             task = loop.create_task(shutdown_hook())
 
             def _swallow_result(done: asyncio.Task[Any]) -> None:
