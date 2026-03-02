@@ -1,105 +1,73 @@
-"""Example 2: Multi-model streaming pipeline.
+"""Example: Tokenizer → LLM → Detokenizer pipeline.
 
-Demonstrates Nerva's core value proposition — orchestrating multiple
-models in a DAG with dynamic batching and streaming output.
+Demonstrates a text generation pipeline using Nerva's DAG execution.
+Uses a toy LLM stub — replace with VLLMBackend for production use.
 
-Pipeline: Tokenizer → LLM → Detokenizer
-           (CPU)     (GPU)     (CPU)
+Run (CPU, no GPU):
+    uv run python examples/02_multi_model_pipeline.py
 
-This is the target API for the full MVP.
+Production usage with vLLM:
+    llm = model(LLMModel, name="llm", backend="vllm", device="cuda:0",
+                backend_options={"model_path": "/path/to/model"})
 """
 
-import nerva
-from nerva import Model, batch, model, serve, stream, trace
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+from nerva import model, trace
+from nerva.core.model import Model
+from nerva.observability.logging import configure_logging
+
+configure_logging(dev=True)
 
 
-# --- Step 1: Define model implementations ---
-
-
-class ToyTokenizer(Model):
-    """Converts text string to token IDs."""
-
+class TokenizerModel(Model):
     def load(self) -> None:
-        # In real usage, load a tokenizer (e.g., sentencepiece, tiktoken)
-        self.vocab = {chr(i): i for i in range(256)}
+        pass
 
-    async def infer(self, inputs: dict[str, object]) -> dict[str, object]:
-        text = inputs["text"]
-        assert isinstance(text, str)
-        token_ids = [self.vocab.get(c, 0) for c in text]
-        return {"token_ids": token_ids}
+    async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        text: str = inputs["text"]
+        return {"tokens": text.split(), "prompt": text}
 
 
-class ToyLLM(Model):
-    """Toy autoregressive generator — echoes input tokens with offset.
-
-    In real usage, this would be backed by vLLM's AsyncLLMEngine.
-    """
-
-    def load(self) -> None:
-        self.max_new_tokens = 32
-
-    async def infer(self, inputs: dict[str, object]) -> dict[str, object]:
-        token_ids = inputs["token_ids"]
-        assert isinstance(token_ids, list)
-        # Toy: generate by shifting each token by +1
-        generated = [(t + 1) % 256 for t in token_ids[: self.max_new_tokens]]
-        return {"generated_ids": generated}
-
-    # Streaming variant — yield tokens one by one
-    async def infer_stream(self, inputs: dict[str, object]):  # type: ignore[override]
-        token_ids = inputs["token_ids"]
-        assert isinstance(token_ids, list)
-        for t in token_ids[: self.max_new_tokens]:
-            yield {"token_id": (t + 1) % 256}
-
-
-class ToyDetokenizer(Model):
-    """Converts token IDs back to text."""
+class LLMModel(Model):
+    """Toy LLM stub. Replace with VLLMBackend in production."""
 
     def load(self) -> None:
         pass
 
-    async def infer(self, inputs: dict[str, object]) -> dict[str, object]:
-        token_ids = inputs["generated_ids"]
-        assert isinstance(token_ids, list)
-        text = "".join(chr(t) for t in token_ids)
-        return {"text": text}
+    async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        prompt: str = inputs["prompt"]
+        return {"raw_output": f"[LLM response to: {prompt[:40]}]"}
 
 
-# --- Step 2: Declare models ---
+class DetokenizerModel(Model):
+    def load(self) -> None:
+        pass
 
-tokenizer = model("tokenizer", ToyTokenizer, backend="pytorch", device="cpu")
-llm = model("llm", ToyLLM, backend="pytorch", device="cpu")  # use vllm + cuda in prod
-detokenizer = model("detokenizer", ToyDetokenizer, backend="pytorch", device="cpu")
-
-
-# --- Step 3: Define pipeline function ---
+    async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        return {"text": inputs["raw_output"].strip()}
 
 
-def text_generation(text: object) -> object:
-    tokens = tokenizer(text)
-    output = llm(tokens)
-    return detokenizer(output)
+tokenizer_h = model("tokenizer", TokenizerModel, device="cpu")
+llm_h = model("llm", LLMModel, device="cpu")
+detokenizer_h = model("detokenizer", DetokenizerModel, device="cpu")
 
 
-# --- Step 4: Apply transforms ---
-
-graph = trace(text_generation)
-graph = batch(graph, targets=["llm"], max_size=32, max_delay_ms=10)
-graph = stream(graph)
-app = serve(graph, route="/rpc/text_generation")
+def pipeline(text_input: Any) -> Any:
+    tok_out = tokenizer_h(text_input)
+    llm_out = llm_h(tok_out)
+    return detokenizer_h(llm_out)
 
 
-# --- Expected usage ---
-#
-# Start server:
-#   nerva run examples/02_multi_model_pipeline.py
-#
-# Unary call:
-#   result = client.call("text_generation", {"text": "Hello world"})
-#   print(result["text"])
-#
-# Streaming call:
-#   for chunk in client.stream("text_generation", {"text": "Hello world"}):
-#       print(chunk["token_id"], end="", flush=True)
+if __name__ == "__main__":
+    async def main() -> None:
+        graph = trace(pipeline)
+        print(f"Pipeline graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
+        # To serve:
+        # import nerva
+        # nerva.serve({"text_gen": graph}, host="0.0.0.0", port=8080)
+
+    asyncio.run(main())
