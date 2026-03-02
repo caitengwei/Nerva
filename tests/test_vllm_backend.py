@@ -7,9 +7,8 @@ VLLMBackend uses conditional import in load_model() only.
 from __future__ import annotations
 
 import asyncio
-import sys
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -34,7 +33,7 @@ def _make_vllm_mock(text_chunks: list[str] | None = None) -> Any:
     chunks = text_chunks or ["Hello", " world!"]
 
     async def _generate(prompt: str, sampling_params: Any, request_id: str):  # type: ignore[no-untyped-def]
-        for i, text in enumerate(chunks):
+        for i, _text in enumerate(chunks):
             output = MagicMock()
             output.outputs = [MagicMock()]
             output.outputs[0].text = "".join(chunks[: i + 1])
@@ -154,6 +153,6 @@ class TestVLLMBackendInfer:
 
 class TestVLLMBackendRegistered:
     def test_registered_as_vllm(self) -> None:
-        from nerva.backends.registry import list_backends
         import nerva.backends.vllm  # noqa: F401 — triggers @register_backend
+        from nerva.backends.registry import list_backends
         assert "vllm" in list_backends()

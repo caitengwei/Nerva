@@ -319,7 +319,18 @@ tests/test_model.py                # 13 tests (含 4 个新增 registry tests)
 
 **验证标准：** 使用 vLLM 跑通 text generation pipeline，Prometheus 指标可观测，日志包含完整 request_id 链路。
 
-**状态：** ⬜ 待设计
+**状态：** ✅ 已完成 (2026-03-02)
+
+**产出：**
+- `src/nerva/observability/metrics.py` — NervaMetrics (8 个 Prometheus 指标)
+- `src/nerva/observability/logging.py` — configure_logging (structlog)
+- `src/nerva/backends/vllm.py` — VLLMBackend (optional vllm dep)
+- `src/nerva/server/app.py` — /metrics 路由
+- `src/nerva/server/rpc.py` — RpcHandler metrics + structlog
+- `src/nerva/worker/process.py` — infer hot path structlog
+- `src/nerva/worker/manager.py` — worker_status metrics
+- `tests/test_observability.py` (16 tests), `tests/test_vllm_backend.py` (13 tests), `tests/test_phase5_e2e.py` (10 tests)
+- **278 tests passing, 0 ruff errors, 0 mypy errors**
 
 ---
 
@@ -336,7 +347,7 @@ W4 (spikes) ──────────→ W5 (interface contracts)
                                     ✅                                     ✅
 
 Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 ──→ Phase 5
-  ✅           ✅           ✅           ✅           ✅        待设计
+  ✅           ✅           ✅           ✅           ✅           ✅
 ```
 
 ---

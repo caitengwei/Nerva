@@ -95,6 +95,7 @@ class TestVLLMBackendE2E:
 class TestMetricsEndpointE2E:
     def test_metrics_endpoint_returns_200(self) -> None:
         from starlette.testclient import TestClient
+
         from nerva.server.app import build_app
         app = build_app(pipelines={}, model_info=[])
         resp = TestClient(app).get("/metrics")
@@ -104,6 +105,7 @@ class TestMetricsEndpointE2E:
         from starlette.applications import Starlette
         from starlette.routing import Route
         from starlette.testclient import TestClient
+
         from nerva.server.protocol import Frame, FrameType, encode_frame
         from nerva.server.rpc import RpcHandler
 
