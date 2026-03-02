@@ -184,6 +184,7 @@ class TestWorkerManagerShutdownProcessDead:
 
 async def test_worker_manager_accepts_custom_metrics() -> None:
     from prometheus_client import CollectorRegistry
+
     from nerva.observability.metrics import NervaMetrics
     from nerva.worker.manager import WorkerManager
 
