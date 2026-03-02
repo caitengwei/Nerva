@@ -15,7 +15,6 @@ With conditional routing:
 import nerva
 from nerva import Model, model, serve, trace
 
-
 # --- Model implementations ---
 
 
@@ -52,7 +51,10 @@ class ToyFusionModel(Model):
         assert isinstance(img_feat, list) and isinstance(txt_feat, list)
         # Toy fusion: element-wise average
         min_len = min(len(img_feat), len(txt_feat))
-        fused = [(a + b) / 2.0 for a, b in zip(img_feat[:min_len], txt_feat[:min_len])]
+        fused = [
+            (a + b) / 2.0
+            for a, b in zip(img_feat[:min_len], txt_feat[:min_len], strict=False)
+        ]
         return {"fused_features": fused}
 
 
