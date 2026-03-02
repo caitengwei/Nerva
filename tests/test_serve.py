@@ -9,7 +9,7 @@ import pytest
 from nerva.core.graph import Graph, Node
 from nerva.core.model import Model, model
 from nerva.core.proxy import trace
-from nerva.server.serve import _build_pipelines, _collect_model_names
+from nerva.server.serve import _build_pipelines, _collect_model_names, _NervaASGIApp
 
 
 class DummyModel(Model):
@@ -132,6 +132,38 @@ class TestBuildPipelines:
             await _build_pipelines({"pipe": g}, mock_manager)
 
 
+class TestNervaASGIAppLifecycle:
+    async def test_manual_shutdown_after_http_request(self) -> None:
+        """无 lifespan 场景下可通过 app.shutdown() 回收资源。"""
+        import httpx
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def _ok(_request: Any) -> JSONResponse:
+            return JSONResponse({"ok": True})
+
+        on_startup = AsyncMock()
+        on_shutdown = AsyncMock()
+        app = _NervaASGIApp(
+            starlette_app=Starlette(routes=[Route("/ok", _ok, methods=["GET"])]),
+            on_startup=on_startup,
+            on_shutdown=on_shutdown,
+        )
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/ok")
+
+        assert resp.status_code == 200
+        on_startup.assert_awaited_once()
+        on_shutdown.assert_not_awaited()
+
+        await app.shutdown()
+        await app.shutdown()
+        on_shutdown.assert_awaited_once()
+
+
 class TestBuildNervaApp:
     async def test_health_endpoint(self) -> None:
         """build_nerva_app() 启动后 /v1/health 返回 ok。"""
@@ -145,8 +177,11 @@ class TestBuildNervaApp:
         app = build_nerva_app({"echo": graph})
 
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/v1/health")
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get("/v1/health")
+        finally:
+            await app.shutdown()
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
 
@@ -181,8 +216,11 @@ class TestBuildNervaApp:
         }
 
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post("/rpc/echo", content=_make_body(), headers=headers)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.post("/rpc/echo", content=_make_body(), headers=headers)
+        finally:
+            await app.shutdown()
 
         assert resp.status_code == 200
         frames = []

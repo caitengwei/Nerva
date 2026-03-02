@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -129,17 +130,32 @@ class _NervaASGIApp:
         self._started = False
         self._lock: asyncio.Lock | None = None
 
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            # Lazily create the lock in the current running loop.
+            self._lock = asyncio.Lock()
+        return self._lock
+
     async def _ensure_started(self) -> None:
         """Idempotent: run startup exactly once."""
         if self._started:
             return
-        # Lazily create the lock inside the running event loop.
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        async with self._lock:
+        async with self._get_lock():
             if not self._started:
                 await self._on_startup()
                 self._started = True
+
+    async def shutdown(self) -> None:
+        """Idempotent shutdown hook for non-lifespan ASGI hosts."""
+        if not self._started:
+            return
+        async with self._get_lock():
+            if not self._started:
+                return
+            try:
+                await self._on_shutdown()
+            finally:
+                self._started = False
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] == "lifespan":
@@ -163,11 +179,8 @@ class _NervaASGIApp:
                     await send({"type": "lifespan.startup.failed", "message": str(exc)})
                     return
             elif message["type"] == "lifespan.shutdown":
-                try:
-                    await self._on_shutdown()
-                    self._started = False
-                except Exception:
-                    pass
+                with contextlib.suppress(Exception):
+                    await self.shutdown()
                 await send({"type": "lifespan.shutdown.complete"})
                 return
 
@@ -208,6 +221,8 @@ def build_nerva_app(pipelines: dict[str, Graph]) -> _NervaASGIApp:
 
     async def _on_shutdown() -> None:
         await manager.shutdown_all()
+        live_executors.clear()
+        live_model_info.clear()
 
     rpc_handler = RpcHandler(live_executors)
 
