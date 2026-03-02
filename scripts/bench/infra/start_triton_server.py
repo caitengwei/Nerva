@@ -45,8 +45,23 @@ def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--http-port", type=int, default=8002)
     parser.add_argument("--grpc-port", type=int, default=8003)
     parser.add_argument("--metrics-port", type=int, default=8004)
+    parser.add_argument(
+        "--allow-mock",
+        action="store_true",
+        help="fallback to a mock Triton-compatible HTTP server when tritonserver is unavailable",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
+
+
+def resolve_launch_mode(*, binary_exists: bool, allow_mock: bool) -> str:
+    if binary_exists:
+        return "real"
+    if allow_mock:
+        return "mock"
+    raise RuntimeError(
+        "tritonserver executable not found; install Triton or rerun with --allow-mock for local smoke only"
+    )
 
 
 def _run_mock_server(*, host: str, port: int, model_repo: str) -> int:
@@ -104,7 +119,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(shlex.join(cmd))
         return 0
 
-    if shutil.which("tritonserver") is None:
+    try:
+        launch_mode = resolve_launch_mode(
+            binary_exists=shutil.which("tritonserver") is not None,
+            allow_mock=args.allow_mock,
+        )
+    except RuntimeError as exc:
+        print(exc)
+        return 2
+
+    if launch_mode == "mock":
         return _run_mock_server(host="0.0.0.0", port=args.http_port, model_repo=args.model_repo)
 
     completed = subprocess.run(cmd, check=False)

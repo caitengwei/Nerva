@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib import request
+from urllib.error import HTTPError, URLError
 
-import httpx
 import msgpack
 from scripts.bench.targets.base import TargetResponse
 
@@ -65,10 +67,16 @@ class NervaBinaryRPCTarget:
         timeout_ms: int,
     ) -> bytes:
         timeout_s = max(timeout_ms / 1000.0, 0.001)
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, content=body, headers=headers, timeout=timeout_s)
-            resp.raise_for_status()
-            return resp.content
+
+        def _send() -> bytes:
+            req = request.Request(url, data=body, headers=headers, method="POST")
+            with request.urlopen(req, timeout=timeout_s) as resp:
+                return resp.read()
+
+        try:
+            return await asyncio.to_thread(_send)
+        except (HTTPError, URLError) as exc:
+            raise RuntimeError(str(exc)) from exc
 
 
 def _build_request_body(pipeline_name: str, payload: dict[str, Any], request_id: int) -> bytes:

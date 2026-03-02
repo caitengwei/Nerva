@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib import request
+from urllib.error import HTTPError, URLError
 
-import httpx
 from scripts.bench.targets.base import TargetResponse
 
 JSONSender = Callable[[str, dict[str, Any], int], Awaitable[dict[str, Any]]]
@@ -71,13 +74,25 @@ class TritonInferTarget:
         timeout_ms: int,
     ) -> dict[str, Any]:
         timeout_s = max(timeout_ms / 1000.0, 0.001)
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json=payload, timeout=timeout_s)
-            resp.raise_for_status()
-            data = resp.json()
-            if not isinstance(data, dict):
-                raise ValueError("Triton response must be a JSON object")
-            return data
+
+        def _send() -> dict[str, Any]:
+            body = json.dumps(payload).encode("utf-8")
+            req = request.Request(
+                url,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(req, timeout=timeout_s) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("Triton response must be a JSON object")
+                return data
+
+        try:
+            return await asyncio.to_thread(_send)
+        except (HTTPError, URLError) as exc:
+            raise RuntimeError(str(exc)) from exc
 
 
 def _extract_triton_text(data: dict[str, Any]) -> str | None:

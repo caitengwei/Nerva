@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
 from scripts.bench.infra.start_triton_server import build_triton_command
+from scripts.bench.infra.start_triton_server import resolve_launch_mode as resolve_triton_mode
 from scripts.bench.infra.start_vllm_server import build_vllm_command
+from scripts.bench.infra.start_vllm_server import resolve_launch_mode as resolve_vllm_mode
 from scripts.bench.infra.wait_service_ready import wait_service_ready
 
 
@@ -31,6 +34,20 @@ def test_start_triton_server_dry_run_command() -> None:
     joined = " ".join(cmd)
     assert "tritonserver" in joined
     assert "--model-repository" in joined
+
+
+def test_vllm_launch_mode_requires_explicit_mock_opt_in() -> None:
+    assert resolve_vllm_mode(binary_exists=True, allow_mock=False) == "real"
+    assert resolve_vllm_mode(binary_exists=False, allow_mock=True) == "mock"
+    with pytest.raises(RuntimeError, match="vllm executable not found"):
+        resolve_vllm_mode(binary_exists=False, allow_mock=False)
+
+
+def test_triton_launch_mode_requires_explicit_mock_opt_in() -> None:
+    assert resolve_triton_mode(binary_exists=True, allow_mock=False) == "real"
+    assert resolve_triton_mode(binary_exists=False, allow_mock=True) == "mock"
+    with pytest.raises(RuntimeError, match="tritonserver executable not found"):
+        resolve_triton_mode(binary_exists=False, allow_mock=False)
 
 
 async def test_wait_service_ready_retries_for_vllm() -> None:

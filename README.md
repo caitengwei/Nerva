@@ -114,7 +114,28 @@ serve({"echo": graph}, host="0.0.0.0", port=8080)
 - `examples/01_single_model.py`: single-model serving flow.
 - `examples/02_multi_model_pipeline.py`: multi-stage pipeline.
 - `examples/03_parallel_dag.py`: `parallel` / `cond` flow composition.
+- `examples/phase7_multimodal_vllm_server.py`: phase7 multimodal + vLLM benchmark DAG service.
 - `scripts/demo_client.py`: standalone Binary RPC client script.
+
+## Benchmark Quick Start (Phase 7)
+
+- Runbook: `docs/plans/2026-03-02-phase7-e2e-benchmark-runbook.md`
+- 默认口径：真实 vLLM / Triton 二进制。启动脚本在缺失依赖时会 fail-fast。
+- `--allow-mock` 仅用于本地联调，不可用于正式对照数据采集。
+
+```bash
+# Start native vLLM (real backend by default)
+uv run python scripts/bench/infra/start_vllm_server.py --model <MODEL_PATH> --host 127.0.0.1 --port 8001
+uv run python scripts/bench/infra/wait_service_ready.py --kind vllm --url http://127.0.0.1:8001/health --timeout-seconds 120
+
+# Start Triton (real backend by default)
+uv run python scripts/bench/infra/prepare_triton_repo.py --output /tmp/phase7-triton-repo
+uv run python scripts/bench/infra/start_triton_server.py --model-repo /tmp/phase7-triton-repo --http-port 8002 --grpc-port 8003 --metrics-port 8004
+uv run python scripts/bench/infra/wait_service_ready.py --kind triton --url http://127.0.0.1:8002/v2/health/ready --timeout-seconds 120
+
+# Benchmark matrix (includes concurrency 1000)
+uv run python scripts/bench/run_phase7.py --target nerva --target vllm --target triton --concurrency-levels 1,32,128,512,1000 --warmup-seconds 60 --sample-seconds 300
+```
 
 ## Development
 

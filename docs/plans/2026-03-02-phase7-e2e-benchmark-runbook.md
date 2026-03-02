@@ -15,6 +15,10 @@ uv run python scripts/bench/infra/start_vllm_server.py \
   --port 8001
 ```
 
+说明：
+- 默认要求本机可执行 `vllm` 二进制；若缺失会直接报错退出（fail-fast）。
+- 仅本地联调可使用 mock 兜底：追加 `--allow-mock`（不要用于正式对照数据采集）。
+
 就绪检查：
 
 ```bash
@@ -35,6 +39,10 @@ uv run python scripts/bench/infra/start_triton_server.py \
   --grpc-port 8003 \
   --metrics-port 8004
 ```
+
+说明：
+- 默认要求本机可执行 `tritonserver` 二进制；若缺失会直接报错退出（fail-fast）。
+- 仅本地联调可使用 mock 兜底：追加 `--allow-mock`（不要用于正式对照数据采集）。
 
 就绪检查：
 

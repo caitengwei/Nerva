@@ -52,8 +52,23 @@ def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument(
+        "--allow-mock",
+        action="store_true",
+        help="fallback to a mock OpenAI-compatible server when vllm binary is unavailable",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
+
+
+def resolve_launch_mode(*, binary_exists: bool, allow_mock: bool) -> str:
+    if binary_exists:
+        return "real"
+    if allow_mock:
+        return "mock"
+    raise RuntimeError(
+        "vllm executable not found; install vllm or rerun with --allow-mock for local smoke only"
+    )
 
 
 def _run_mock_server(*, host: str, port: int, model: str) -> int:
@@ -98,7 +113,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(shlex.join(cmd))
         return 0
 
-    if shutil.which("vllm") is None:
+    try:
+        launch_mode = resolve_launch_mode(
+            binary_exists=shutil.which("vllm") is not None,
+            allow_mock=args.allow_mock,
+        )
+    except RuntimeError as exc:
+        print(exc)
+        return 2
+
+    if launch_mode == "mock":
         return _run_mock_server(host=args.host, port=args.port, model=args.model)
 
     completed = subprocess.run(cmd, check=False)
