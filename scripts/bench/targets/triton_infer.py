@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-import json
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
-from urllib import request
-from urllib.error import HTTPError, URLError
 
+import httpx
 from scripts.bench.targets.base import TargetResponse
 
 JSONSender = Callable[[str, dict[str, Any], int], Awaitable[dict[str, Any]]]
@@ -23,7 +20,13 @@ class TritonInferTarget:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model_name = model_name
+        self._client: httpx.AsyncClient | None = None
         self._sender = sender or self._default_sender
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def infer(self, payload: dict[str, Any], *, deadline_ms: int) -> TargetResponse:
         start_ns = time.perf_counter_ns()
@@ -74,25 +77,24 @@ class TritonInferTarget:
         timeout_ms: int,
     ) -> dict[str, Any]:
         timeout_s = max(timeout_ms / 1000.0, 0.001)
-
-        def _send() -> dict[str, Any]:
-            body = json.dumps(payload).encode("utf-8")
-            req = request.Request(
-                url,
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with request.urlopen(req, timeout=timeout_s) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                if not isinstance(data, dict):
-                    raise ValueError("Triton response must be a JSON object")
-                return data
+        if self._client is None:
+            self._client = httpx.AsyncClient()
 
         try:
-            return await asyncio.to_thread(_send)
-        except (HTTPError, URLError) as exc:
+            response = await self._client.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=timeout_s,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
             raise RuntimeError(str(exc)) from exc
+
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("Triton response must be a JSON object")
+        return data
 
 
 def _extract_triton_text(data: dict[str, Any]) -> str | None:

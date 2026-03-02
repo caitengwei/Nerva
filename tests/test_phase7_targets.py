@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 import msgpack
+import scripts.bench.targets.nerva_binary_rpc as nerva_binary_rpc
+import scripts.bench.targets.triton_infer as triton_infer
+import scripts.bench.targets.vllm_openai_api as vllm_openai_api
 from scripts.bench.targets.base import TargetResponse
 from scripts.bench.targets.nerva_binary_rpc import NervaBinaryRPCTarget
 from scripts.bench.targets.triton_infer import TritonInferTarget
@@ -125,6 +128,169 @@ async def test_vllm_openai_api_parses_text_field() -> None:
     resp = await target.infer({"prompt": "hi"}, deadline_ms=1000)
     assert resp.ok is True
     assert resp.output_text == "hello from vllm"
+
+
+async def test_vllm_openai_api_default_sender_reuses_async_client(monkeypatch: Any) -> None:
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"choices": [{"text": "ok"}]}
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.post_calls = 0
+            self.closed = False
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict[str, Any],
+            headers: dict[str, str],
+            timeout: float,
+        ) -> _FakeResponse:
+            del url, json, headers, timeout
+            self.post_calls += 1
+            return _FakeResponse()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    created_clients: list[_FakeClient] = []
+
+    def _make_client(*args: Any, **kwargs: Any) -> _FakeClient:
+        del args, kwargs
+        client = _FakeClient()
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(vllm_openai_api.httpx, "AsyncClient", _make_client)
+
+    target = VLLMOpenAIAPITarget(base_url="http://127.0.0.1:8001", model_name="phase7")
+    first = await target.infer({"prompt": "hi-1"}, deadline_ms=1000)
+    second = await target.infer({"prompt": "hi-2"}, deadline_ms=1000)
+    await target.aclose()
+
+    assert first.ok is True
+    assert second.ok is True
+    assert len(created_clients) == 1
+    assert created_clients[0].post_calls == 2
+    assert created_clients[0].closed is True
+
+
+async def test_triton_infer_default_sender_reuses_async_client(monkeypatch: Any) -> None:
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"outputs": [{"name": "text", "data": ["ok"]}]}
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.post_calls = 0
+            self.closed = False
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict[str, Any],
+            headers: dict[str, str],
+            timeout: float,
+        ) -> _FakeResponse:
+            del url, json, headers, timeout
+            self.post_calls += 1
+            return _FakeResponse()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    created_clients: list[_FakeClient] = []
+
+    def _make_client(*args: Any, **kwargs: Any) -> _FakeClient:
+        del args, kwargs
+        client = _FakeClient()
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(triton_infer.httpx, "AsyncClient", _make_client)
+
+    target = TritonInferTarget(base_url="http://127.0.0.1:8002", model_name="phase7_mm_vllm")
+    first = await target.infer({"prompt": "hi-1"}, deadline_ms=1000)
+    second = await target.infer({"prompt": "hi-2"}, deadline_ms=1000)
+    await target.aclose()
+
+    assert first.ok is True
+    assert second.ok is True
+    assert len(created_clients) == 1
+    assert created_clients[0].post_calls == 2
+    assert created_clients[0].closed is True
+
+
+async def test_nerva_binary_rpc_default_sender_reuses_async_client(monkeypatch: Any) -> None:
+    data_bytes = (
+        encode_frame(
+            Frame(
+                frame_type=FrameType.DATA,
+                request_id=1,
+                flags=0,
+                payload=msgpack.packb({"text": "ok"}, use_bin_type=True),
+            )
+        )
+        + encode_frame(Frame(frame_type=FrameType.END, request_id=1, flags=0, payload=b""))
+    )
+
+    class _FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self.content = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.post_calls = 0
+            self.closed = False
+
+        async def post(
+            self,
+            url: str,
+            *,
+            content: bytes,
+            headers: dict[str, str],
+            timeout: float,
+        ) -> _FakeResponse:
+            del url, content, headers, timeout
+            self.post_calls += 1
+            return _FakeResponse(data_bytes)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    created_clients: list[_FakeClient] = []
+
+    def _make_client(*args: Any, **kwargs: Any) -> _FakeClient:
+        del args, kwargs
+        client = _FakeClient()
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(nerva_binary_rpc.httpx, "AsyncClient", _make_client)
+
+    target = NervaBinaryRPCTarget(base_url="http://localhost:8080", pipeline_name="phase7_mm_vllm")
+    first = await target.infer({"prompt": "hi-1"}, deadline_ms=1000)
+    second = await target.infer({"prompt": "hi-2"}, deadline_ms=1000)
+    await target.aclose()
+
+    assert first.ok is True
+    assert first.output_text == "ok"
+    assert second.ok is True
+    assert len(created_clients) == 1
+    assert created_clients[0].post_calls == 2
+    assert created_clients[0].closed is True
 
 
 async def test_triton_infer_parses_json_output() -> None:

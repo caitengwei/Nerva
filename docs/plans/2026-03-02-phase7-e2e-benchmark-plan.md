@@ -1,7 +1,5 @@
 # Phase 7 E2E 压测与对照实验 Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** 构建可复现的端到端压测体系，验证 `client -> server` 在多模态前后处理 + vLLM 场景下达到 `1000` 并发，并完成与开源 vLLM、Triton Inference Server 的同口径对照实验。
 
 **Architecture:** 新建独立的 `Phase 7` 多模态 DAG（不复用 `examples/03_parallel_dag.py`），并实现统一 loadgen + target adapter 架构：`Nerva Binary RPC`、`Native vLLM(OpenAI API)`、`Triton HTTP/gRPC`。三套目标共享同一输入集、并发矩阵、统计口径与产物目录。

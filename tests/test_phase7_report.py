@@ -17,6 +17,7 @@ def _write_summary(
     target: str,
     concurrency: int,
     qps: float,
+    dry_run: bool = False,
 ) -> None:
     path = root / date / commit / target / str(concurrency)
     path.mkdir(parents=True, exist_ok=True)
@@ -28,6 +29,7 @@ def _write_summary(
                 "p95_ms": 2.0,
                 "p99_ms": 3.0,
                 "error_rate": 0.1,
+                "dry_run": dry_run,
             }
         )
     )
@@ -78,3 +80,28 @@ def test_collect_summary_rows_sorted_by_target_and_concurrency(tmp_path: Path) -
     rows = collect_summary_rows(tmp_path, commit="abc123")
     assert [row.target for row in rows] == ["nerva", "triton"]
     assert [row.concurrency for row in rows] == [1, 1000]
+
+
+def test_collect_summary_rows_excludes_dry_run_by_default(tmp_path: Path) -> None:
+    _write_summary(
+        tmp_path,
+        date="2026-03-03",
+        commit="abc123",
+        target="nerva",
+        concurrency=1,
+        qps=0.0,
+        dry_run=True,
+    )
+    _write_summary(
+        tmp_path,
+        date="2026-03-03",
+        commit="abc123",
+        target="vllm",
+        concurrency=1,
+        qps=11.0,
+        dry_run=False,
+    )
+
+    rows = collect_summary_rows(tmp_path, commit="abc123")
+    assert len(rows) == 1
+    assert rows[0].target == "vllm"

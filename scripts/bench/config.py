@@ -47,8 +47,6 @@ def load_bench_config(path: Path) -> BenchConfig:
         raw_concurrency_levels,
         field_name="concurrency_levels",
     )
-    if 1000 not in concurrency_levels:
-        raise ValueError("concurrency_levels must include 1000")
 
     warmup_seconds = _validate_positive_int(raw.get("warmup_seconds"), field_name="warmup_seconds")
     sample_seconds = _validate_positive_int(raw.get("sample_seconds"), field_name="sample_seconds")

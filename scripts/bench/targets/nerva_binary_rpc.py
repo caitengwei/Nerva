@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
-from urllib import request
-from urllib.error import HTTPError, URLError
 
+import httpx
 import msgpack
 from scripts.bench.targets.base import TargetResponse
 
@@ -25,7 +23,13 @@ class NervaBinaryRPCTarget:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._pipeline_name = pipeline_name
+        self._client: httpx.AsyncClient | None = None
         self._sender = sender or self._default_sender
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def infer(self, payload: dict[str, Any], *, deadline_ms: int) -> TargetResponse:
         start_ns = time.perf_counter_ns()
@@ -67,16 +71,20 @@ class NervaBinaryRPCTarget:
         timeout_ms: int,
     ) -> bytes:
         timeout_s = max(timeout_ms / 1000.0, 0.001)
-
-        def _send() -> bytes:
-            req = request.Request(url, data=body, headers=headers, method="POST")
-            with request.urlopen(req, timeout=timeout_s) as resp:
-                return resp.read()
+        if self._client is None:
+            self._client = httpx.AsyncClient()
 
         try:
-            return await asyncio.to_thread(_send)
-        except (HTTPError, URLError) as exc:
+            response = await self._client.post(
+                url,
+                content=body,
+                headers=headers,
+                timeout=timeout_s,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
             raise RuntimeError(str(exc)) from exc
+        return response.content
 
 
 def _build_request_body(pipeline_name: str, payload: dict[str, Any], request_id: int) -> bytes:

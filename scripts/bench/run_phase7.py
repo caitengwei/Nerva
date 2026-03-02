@@ -204,6 +204,7 @@ async def execute_benchmark_run(
             concurrency=run.concurrency,
             duration_s=float(run.warmup_seconds),
             deadline_ms=deadline_ms,
+            record_latencies=False,
         )
 
     result = await run_closed_loop(
@@ -294,11 +295,16 @@ async def _amain(args: argparse.Namespace) -> None:
             }
         else:
             target = _build_target_from_args(args, run.target)
-            summary, latencies, meta = await execute_benchmark_run(
-                run,
-                target=target,
-                deadline_ms=args.deadline_ms,
-            )
+            try:
+                summary, latencies, meta = await execute_benchmark_run(
+                    run,
+                    target=target,
+                    deadline_ms=args.deadline_ms,
+                )
+            finally:
+                close = getattr(target, "aclose", None)
+                if callable(close):
+                    await close()
             meta.update(
                 {
                     "target_endpoint": _target_endpoint(args, run.target),

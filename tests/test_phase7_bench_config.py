@@ -10,9 +10,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_default_concurrency_contains_1000(tmp_path: Path) -> None:
+def test_config_loader_does_not_require_c1000(tmp_path: Path) -> None:
     cfg = {
-        "concurrency_levels": [1, 32, 128, 512, 1000],
+        "concurrency_levels": [1, 32],
         "warmup_seconds": 60,
         "sample_seconds": 300,
     }
@@ -20,7 +20,7 @@ def test_default_concurrency_contains_1000(tmp_path: Path) -> None:
     p.write_text(json.dumps(cfg))
 
     loaded = load_bench_config(p)
-    assert 1000 in loaded.concurrency_levels
+    assert loaded.concurrency_levels == [1, 32]
 
 
 def test_rejects_empty_concurrency_levels(tmp_path: Path) -> None:

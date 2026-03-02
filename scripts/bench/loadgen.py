@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from array import array
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -36,6 +37,7 @@ async def run_closed_loop(
     concurrency: int,
     duration_s: float,
     deadline_ms: int,
+    record_latencies: bool = True,
 ) -> LoadgenResult:
     if concurrency <= 0:
         raise ValueError("concurrency must be > 0")
@@ -44,11 +46,10 @@ async def run_closed_loop(
     if deadline_ms <= 0:
         raise ValueError("deadline_ms must be > 0")
 
-    semaphore = asyncio.Semaphore(concurrency)
     started_at = time.perf_counter()
     stop_at = started_at + duration_s
 
-    latencies_ms: list[float] = []
+    latencies_buf = array("d")
     total_requests = 0
     error_count = 0
     in_flight = 0
@@ -61,48 +62,43 @@ async def run_closed_loop(
         nonlocal in_flight
         nonlocal max_in_flight
 
-        async with semaphore:
-            start_ns = time.perf_counter_ns()
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
+        start_ns = time.perf_counter_ns()
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
 
+        ok = False
+        try:
+            ok, _err = await target({"seq": seq}, deadline_ms)
+        except Exception:
             ok = False
-            try:
-                ok, _err = await target({"seq": seq}, deadline_ms)
-            except Exception:
-                ok = False
-            finally:
-                latency = (time.perf_counter_ns() - start_ns) / 1_000_000.0
-                latencies_ms.append(latency)
-                total_requests += 1
-                if not ok:
-                    error_count += 1
-                in_flight -= 1
+        finally:
+            latency = (time.perf_counter_ns() - start_ns) / 1_000_000.0
+            if record_latencies:
+                latencies_buf.append(latency)
+            total_requests += 1
+            if not ok:
+                error_count += 1
+            in_flight -= 1
+
+    async def worker() -> None:
+        nonlocal payload_counter
+        while time.perf_counter() < stop_at:
+            payload_counter += 1
+            await one_request(payload_counter)
 
     workers: set[asyncio.Task[None]] = set()
     try:
-        while time.perf_counter() < stop_at:
-            if len(workers) >= concurrency:
-                done, pending = await asyncio.wait(workers, return_when=asyncio.FIRST_COMPLETED)
-                workers = set(pending)
-                # Drain finished tasks exceptions.
-                for task in done:
-                    task.result()
-
-            payload_counter += 1
-            workers.add(asyncio.create_task(one_request(payload_counter)))
-
+        for _ in range(concurrency):
+            workers.add(asyncio.create_task(worker()))
         if workers:
-            done, _ = await asyncio.wait(workers)
-            for task in done:
-                task.result()
+            await asyncio.gather(*workers, return_exceptions=True)
     finally:
         for task in workers:
             if not task.done():
                 task.cancel()
 
     elapsed_s = max(time.perf_counter() - started_at, 1e-9)
-    sorted_lat = sorted(latencies_ms)
+    sorted_lat = sorted(latencies_buf)
     p50 = _percentile(sorted_lat, 0.50)
     p95 = _percentile(sorted_lat, 0.95)
     p99 = _percentile(sorted_lat, 0.99)
@@ -118,5 +114,5 @@ async def run_closed_loop(
         max_in_flight=max_in_flight,
         total_requests=total_requests,
         error_count=error_count,
-        latencies_ms=latencies_ms,
+        latencies_ms=list(latencies_buf),
     )

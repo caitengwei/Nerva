@@ -61,6 +61,8 @@ def _parse_summary(path: Path, *, input_root: Path) -> SummaryRow | None:
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
         return None
+    if data.get("dry_run") is True:
+        return None
 
     return SummaryRow(
         date=date,
