@@ -75,3 +75,12 @@ class TestRpcRouteIntegration:
             },
         )
         assert resp.status_code == 200
+
+
+class TestMetricsRoute:
+    def test_metrics_endpoint_exists(self) -> None:
+        app = build_app(pipelines={}, model_info=[])
+        client = TestClient(app)
+        resp = client.get("/metrics")
+        assert resp.status_code == 200
+        assert "text/plain" in resp.headers["content-type"]

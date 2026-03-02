@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import prometheus_client
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from nerva.server.rpc import RpcHandler
@@ -35,10 +36,15 @@ def build_app(
     async def models(request: Request) -> JSONResponse:
         return JSONResponse({"models": model_info})
 
+    async def metrics_endpoint(request: Request) -> Response:
+        data = prometheus_client.generate_latest()
+        return Response(content=data, media_type=prometheus_client.CONTENT_TYPE_LATEST)
+
     return Starlette(
         routes=[
             Route("/rpc/{pipeline_name}", rpc_handler.handle, methods=["POST"]),
             Route("/v1/health", health, methods=["GET"]),
             Route("/v1/models", models, methods=["GET"]),
+            Route("/metrics", metrics_endpoint, methods=["GET"]),
         ],
     )

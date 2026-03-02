@@ -21,6 +21,8 @@ def register_backend(name: str) -> Any:
 
     def decorator(cls: type[Backend]) -> type[Backend]:
         if name in _REGISTRY:
+            if _REGISTRY[name] is cls:
+                return cls  # idempotent: same class, same name — allow re-registration
             raise ValueError(f"Backend '{name}' is already registered")
         _REGISTRY[name] = cls
         return cls

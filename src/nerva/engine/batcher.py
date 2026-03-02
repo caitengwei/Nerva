@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from nerva.backends.base import InferContext
     from nerva.engine.executor import InferableProxy
+    from nerva.observability.metrics import NervaMetrics
 
 
 @dataclass
@@ -50,9 +51,18 @@ class DynamicBatcher:
     inner proxy, applying deadline-aware admission and backpressure.
     """
 
-    def __init__(self, inner: InferableProxy, config: BatchConfig) -> None:
+    def __init__(
+        self,
+        inner: InferableProxy,
+        config: BatchConfig,
+        *,
+        model_name: str = "unknown",
+        metrics: NervaMetrics | None = None,
+    ) -> None:
         self._inner = inner
         self._config = config
+        self._model_name = model_name
+        self._metrics = metrics
         self._queue: asyncio.Queue[_PendingRequest] = asyncio.Queue(
             maxsize=config.queue_capacity
         )
@@ -128,6 +138,9 @@ class DynamicBatcher:
                 raise RuntimeError("DEADLINE_EXCEEDED") from err
             raise RuntimeError("RESOURCE_EXHAUSTED") from err
 
+        if self._metrics:
+            self._metrics.queue_depth.labels(model=self._model_name).inc()
+
         # 3. Wait for batch loop to resolve this request.
         return await future
 
@@ -136,6 +149,8 @@ class DynamicBatcher:
         while True:
             # Wait for the first request (blocking).
             first = await self._queue.get()
+            if self._metrics:
+                self._metrics.queue_depth.labels(model=self._model_name).dec()
             # Register immediately so stop() can drain this future even if
             # CancelledError is raised during the aggregation window below.
             self._in_flight_futures.append(first.future)
@@ -151,6 +166,8 @@ class DynamicBatcher:
                     item = await asyncio.wait_for(
                         self._queue.get(), timeout=remaining
                     )
+                    if self._metrics:
+                        self._metrics.queue_depth.labels(model=self._model_name).dec()
                     # Register immediately after dequeue for the same reason.
                     self._in_flight_futures.append(item.future)
                     batch.append(item)
@@ -174,6 +191,14 @@ class DynamicBatcher:
 
             if not valid:
                 continue
+
+            # Record metrics for this batch.
+            if self._metrics:
+                self._metrics.batch_size.labels(model=self._model_name).observe(len(valid))
+                dispatch_time = time.monotonic()
+                for req in valid:
+                    wait_s = dispatch_time - req.enqueue_time
+                    self._metrics.batch_wait_seconds.labels(model=self._model_name).observe(wait_s)
 
             # Dispatch valid requests concurrently (already registered as in-flight above).
             results = await asyncio.gather(

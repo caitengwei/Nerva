@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 import multiprocessing
 import os
 import tempfile
@@ -15,14 +14,17 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+import structlog
+
 from nerva.worker.ipc import class_to_import_path
 from nerva.worker.process import worker_entry
 from nerva.worker.proxy import WorkerProxy
 
 if TYPE_CHECKING:
     from nerva.core.model import ModelHandle
+    from nerva.observability.metrics import NervaMetrics
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 MAX_RESTARTS = 5
 
@@ -56,10 +58,11 @@ class WorkerManager:
     and handles restart and shutdown.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, metrics: NervaMetrics | None = None) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="nerva-mgr-")
         self._pid = os.getpid()
         self._workers: dict[str, _WorkerEntry] = {}
+        self._metrics = metrics
 
     # ------------------------------------------------------------------
     # Public API
@@ -119,10 +122,14 @@ class WorkerManager:
 
             entry.state = WorkerState.READY
             self._workers[worker_id] = entry
-            logger.info("Worker '%s' is READY", worker_id)
+            if self._metrics:
+                self._metrics.worker_status.labels(
+                    model=handle.name, device=handle.device
+                ).set(1)
+            logger.info("worker_ready", worker_id=worker_id)
             return proxy
         except Exception:
-            logger.exception("Failed to start worker '%s'", worker_id)
+            logger.exception("worker_start_failed", worker_id=worker_id)
             if process_started:
                 with contextlib.suppress(Exception):
                     await self._close_worker(entry)
@@ -166,9 +173,7 @@ class WorkerManager:
         new_entry = self._workers[worker_id]
         new_entry.restart_count = old_restart_count + 1
 
-        logger.info(
-            "Worker '%s' restarted (count=%d)", worker_id, new_entry.restart_count
-        )
+        logger.info("worker_restarted", worker_id=worker_id, restart_count=new_entry.restart_count)
         return proxy
 
     async def shutdown_all(self) -> None:
@@ -179,7 +184,7 @@ class WorkerManager:
             try:
                 await self._close_worker(entry)
             except Exception:
-                logger.exception("Error shutting down worker '%s'", worker_id)
+                logger.exception("worker_shutdown_error", worker_id=worker_id)
 
         self._workers.clear()
 
@@ -191,7 +196,7 @@ class WorkerManager:
                     os.unlink(fpath)
             os.rmdir(self._tmpdir)
         except OSError:
-            logger.debug("Failed to cleanup tmpdir %s", self._tmpdir)
+            logger.debug("tmpdir_cleanup_failed", tmpdir=self._tmpdir)
 
     # ------------------------------------------------------------------
     # Internal
@@ -200,12 +205,16 @@ class WorkerManager:
     async def _close_worker(self, entry: _WorkerEntry) -> None:
         """Send SHUTDOWN, join process, close proxy."""
         entry.state = WorkerState.STOPPING
+        if self._metrics:
+            self._metrics.worker_status.labels(
+                model=entry.handle.name, device=entry.handle.device
+            ).set(0)
 
         # Best-effort SHUTDOWN with timeout — peer may already be dead.
         try:
             await asyncio.wait_for(entry.proxy.shutdown(), timeout=3.0)
         except (TimeoutError, Exception):
-            logger.debug("Failed to send SHUTDOWN to worker '%s'", entry.handle.name)
+            logger.debug("worker_shutdown_send_failed", worker=entry.handle.name)
 
         entry.process.join(timeout=5)
         if entry.process.is_alive():

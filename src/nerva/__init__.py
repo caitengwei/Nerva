@@ -12,6 +12,8 @@ from nerva.core.primitives import cond, parallel
 from nerva.core.proxy import Proxy, trace
 from nerva.engine.batcher import BatchConfig, DynamicBatcher
 from nerva.engine.executor import Executor
+from nerva.observability.logging import configure_logging
+from nerva.observability.metrics import NervaMetrics, get_metrics
 from nerva.server.serve import serve
 from nerva.worker.manager import WorkerManager
 from nerva.worker.proxy import WorkerProxy
@@ -28,12 +30,15 @@ __all__ = [
     "Model",
     "ModelConfig",
     "ModelHandle",
+    "NervaMetrics",
     "Node",
     "Proxy",
     "WorkerManager",
     "WorkerProxy",
     "cond",
+    "configure_logging",
     "get_backend",
+    "get_metrics",
     "get_model_handle",
     "list_backends",
     "list_model_handles",
