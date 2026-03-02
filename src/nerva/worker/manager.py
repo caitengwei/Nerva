@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 import multiprocessing
 import os
 import tempfile
@@ -15,14 +14,17 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+import structlog
+
 from nerva.worker.ipc import class_to_import_path
 from nerva.worker.process import worker_entry
 from nerva.worker.proxy import WorkerProxy
 
 if TYPE_CHECKING:
     from nerva.core.model import ModelHandle
+    from nerva.observability.metrics import NervaMetrics
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 MAX_RESTARTS = 5
 
@@ -56,10 +58,11 @@ class WorkerManager:
     and handles restart and shutdown.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, metrics: NervaMetrics | None = None) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="nerva-mgr-")
         self._pid = os.getpid()
         self._workers: dict[str, _WorkerEntry] = {}
+        self._metrics = metrics
 
     # ------------------------------------------------------------------
     # Public API
@@ -119,6 +122,10 @@ class WorkerManager:
 
             entry.state = WorkerState.READY
             self._workers[worker_id] = entry
+            if self._metrics:
+                self._metrics.worker_status.labels(
+                    model=handle.name, device=handle.device
+                ).set(1)
             logger.info("Worker '%s' is READY", worker_id)
             return proxy
         except Exception:
@@ -200,6 +207,10 @@ class WorkerManager:
     async def _close_worker(self, entry: _WorkerEntry) -> None:
         """Send SHUTDOWN, join process, close proxy."""
         entry.state = WorkerState.STOPPING
+        if self._metrics:
+            self._metrics.worker_status.labels(
+                model=entry.handle.name, device=entry.handle.device
+            ).set(0)
 
         # Best-effort SHUTDOWN with timeout — peer may already be dead.
         try:

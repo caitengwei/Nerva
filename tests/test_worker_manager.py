@@ -180,3 +180,15 @@ class TestWorkerManagerShutdownProcessDead:
 
         await mgr.shutdown_all()
         assert not proc.is_alive()
+
+
+async def test_worker_manager_accepts_custom_metrics() -> None:
+    from prometheus_client import CollectorRegistry
+    from nerva.observability.metrics import NervaMetrics
+    from nerva.worker.manager import WorkerManager
+
+    reg = CollectorRegistry()
+    m = NervaMetrics(registry=reg)
+    manager = WorkerManager(metrics=m)
+    assert manager._metrics is m
+    await manager.shutdown_all()  # no-op, no workers started

@@ -6,12 +6,12 @@ Entry point: ``worker_entry(socket_path)`` is passed to ``multiprocessing.Proces
 from __future__ import annotations
 
 import asyncio
-import logging
 import uuid
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any
 
 import msgpack
+import structlog
 import zmq
 import zmq.asyncio
 
@@ -27,7 +27,7 @@ from nerva.worker.ipc import (
     import_path_to_class,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 DEFAULT_SHM_ALLOC_TIMEOUT_S = 3.0
 
 
@@ -165,6 +165,7 @@ class _WorkerLoop:
         """Deserialize inputs, run inference, send INFER_ACK."""
         request_id: str = msg.get("request_id", "")
         context: InferContext | None = None
+        structlog.contextvars.bind_contextvars(request_id=request_id)
         try:
             if self._backend is None:
                 raise RuntimeError("No model loaded")
@@ -244,6 +245,7 @@ class _WorkerLoop:
             })
         finally:
             self._contexts.pop(request_id, None)
+            structlog.contextvars.clear_contextvars()
 
     def _run_infer_sync(self, inputs: dict[str, Any], context: InferContext) -> dict[str, Any]:
         """Blocking wrapper for thread execution of async backend inference.
