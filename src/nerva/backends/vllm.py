@@ -132,17 +132,28 @@ class VLLMBackend(Backend):
         context: InferContext,
         batch_meta: BatchMeta | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Streaming inference: yield chunks as they arrive."""
+        """Streaming inference: yield chunks as they arrive.
+
+        Deadline is enforced: if total elapsed time exceeds context.deadline_ms,
+        a RuntimeError("DEADLINE_EXCEEDED") is raised.
+        """
         engine = self._ensure_loaded()
         prompt: str = inputs.get("prompt", "")
         sampling_params = self._build_sampling_params(inputs)
+        deadline_s = context.deadline_ms / 1000.0
 
-        async for output in engine.generate(prompt, sampling_params, context.request_id):
-            if output.outputs:
-                yield {
-                    "text": output.outputs[0].text,
-                    "finished": output.finished,
-                }
+        try:
+            async with asyncio.timeout(deadline_s):
+                async for output in engine.generate(
+                    prompt, sampling_params, context.request_id
+                ):
+                    if output.outputs:
+                        yield {
+                            "text": output.outputs[0].text,
+                            "finished": output.finished,
+                        }
+        except TimeoutError as exc:
+            raise RuntimeError("DEADLINE_EXCEEDED") from exc
 
     def _ensure_loaded(self) -> Any:
         if self._engine is None:

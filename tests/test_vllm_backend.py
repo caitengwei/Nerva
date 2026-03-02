@@ -96,6 +96,14 @@ class TestVLLMBackendLifecycle:
             await backend.unload_model()
             assert not backend.is_loaded
 
+    async def test_load_model_twice_raises_runtime_error(self) -> None:
+        from nerva.backends.vllm import VLLMBackend
+        with patch.dict("sys.modules", {"vllm": _make_vllm_mock()}):
+            backend = VLLMBackend()
+            await backend.load_model(_config())
+            with pytest.raises(RuntimeError, match="already loaded"):
+                await backend.load_model(_config())
+
     async def test_load_model_missing_model_path_raises(self) -> None:
         from nerva.backends.vllm import VLLMBackend
         with patch.dict("sys.modules", {"vllm": _make_vllm_mock()}):
@@ -149,6 +157,24 @@ class TestVLLMBackendInfer:
             assert len(chunks) == 3
             assert all("text" in c for c in chunks)
             assert chunks[-1].get("finished") is True
+
+    async def test_infer_stream_deadline_exceeded(self) -> None:
+        from nerva.backends.vllm import VLLMBackend
+
+        async def _slow_generate(prompt: str, params: Any, req_id: str):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(10)
+            yield MagicMock()
+
+        vllm_mock = _make_vllm_mock()
+        vllm_mock.AsyncLLMEngine.from_engine_args.return_value.generate = _slow_generate
+        with patch.dict("sys.modules", {"vllm": vllm_mock}):
+            backend = VLLMBackend()
+            await backend.load_model(_config())
+            with pytest.raises((RuntimeError, asyncio.TimeoutError, TimeoutError)):
+                async for _chunk in backend.infer_stream(
+                    {"prompt": "test"}, _ctx(deadline_ms=50)
+                ):
+                    pass  # pragma: no cover
 
 
 class TestVLLMBackendRegistered:

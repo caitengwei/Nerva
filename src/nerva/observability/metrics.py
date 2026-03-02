@@ -42,7 +42,7 @@ class NervaMetrics:
             registry=reg,
         )
         self.batch_size = Histogram(
-            "nerva_batch_size_total",
+            "nerva_batch_size",
             "Batch size distribution per model.",
             ["model"],
             buckets=_BATCH_SIZE_BUCKETS,
