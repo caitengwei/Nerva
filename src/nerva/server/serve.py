@@ -8,7 +8,7 @@ import logging
 import os
 import signal
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import uvicorn
 
@@ -20,12 +20,21 @@ from nerva.worker.manager import WorkerManager
 
 if TYPE_CHECKING:
     from starlette.applications import Starlette
-    from starlette.types import ASGIApp
 
     from nerva.core.graph import Graph
     from nerva.engine.executor import InferableProxy
 
 logger = logging.getLogger(__name__)
+
+
+class NervaASGIApp(Protocol):
+    """Public protocol for Nerva ASGI apps with explicit cleanup."""
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        ...
+
+    async def shutdown(self) -> None:
+        ...
 
 
 def _collect_model_names(pipelines: dict[str, Graph]) -> set[str]:
@@ -261,7 +270,7 @@ class _NervaASGIApp:
                 return
 
 
-def build_nerva_app(pipelines: dict[str, Graph]) -> ASGIApp:
+def build_nerva_app(pipelines: dict[str, Graph]) -> NervaASGIApp:
     """Return an ASGI app with worker lifecycle managed automatically.
 
     Workers are started lazily on the first HTTP request (when running under

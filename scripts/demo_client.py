@@ -53,14 +53,29 @@ def _encode_frame(frame_type: int, request_id: int, payload: bytes) -> bytes:
 def _decode_frames(data: bytes) -> list[dict[str, Any]]:
     frames: list[dict[str, Any]] = []
     offset = 0
-    while offset < len(data):
-        if len(data) - offset < _HEADER_SIZE:
-            break
+    data_len = len(data)
+    while offset < data_len:
+        if data_len - offset < _HEADER_SIZE:
+            raise ValueError("Incomplete frame header in response")
         fields = struct.unpack_from(_HEADER_FMT, data, offset)
-        _magic, _ver, frame_type, _flags, req_id, _sid, payload_len, _crc, _ext = fields
-        payload = data[offset + _HEADER_SIZE : offset + _HEADER_SIZE + payload_len]
+        magic, version, frame_type, _flags, req_id, _sid, payload_len, _crc, _ext = fields
+        if magic != _MAGIC:
+            raise ValueError(
+                f"Invalid frame magic: expected 0x{_MAGIC:04X}, got 0x{magic:04X}"
+            )
+        if version != _VERSION:
+            raise ValueError(
+                f"Unsupported frame version: expected {_VERSION}, got {version}"
+            )
+
+        payload_start = offset + _HEADER_SIZE
+        payload_end = payload_start + payload_len
+        if payload_end > data_len:
+            raise ValueError("Incomplete frame payload in response")
+
+        payload = data[payload_start:payload_end]
         frames.append({"type": frame_type, "request_id": req_id, "payload": payload})
-        offset += _HEADER_SIZE + payload_len
+        offset = payload_end
     return frames
 
 
