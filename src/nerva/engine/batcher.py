@@ -126,8 +126,6 @@ class DynamicBatcher:
             inputs=inputs, context=context, future=future, kwargs=dict(kwargs)
         )
         effective_timeout_ms = min(self._config.queue_timeout_ms, context.deadline_ms)
-        if self._metrics:
-            self._metrics.queue_depth.labels(model=self._model_name).set(self._queue.qsize())
         try:
             await asyncio.wait_for(
                 self._queue.put(pending),
@@ -140,6 +138,9 @@ class DynamicBatcher:
                 raise RuntimeError("DEADLINE_EXCEEDED") from err
             raise RuntimeError("RESOURCE_EXHAUSTED") from err
 
+        if self._metrics:
+            self._metrics.queue_depth.labels(model=self._model_name).inc()
+
         # 3. Wait for batch loop to resolve this request.
         return await future
 
@@ -148,6 +149,8 @@ class DynamicBatcher:
         while True:
             # Wait for the first request (blocking).
             first = await self._queue.get()
+            if self._metrics:
+                self._metrics.queue_depth.labels(model=self._model_name).dec()
             # Register immediately so stop() can drain this future even if
             # CancelledError is raised during the aggregation window below.
             self._in_flight_futures.append(first.future)
@@ -163,6 +166,8 @@ class DynamicBatcher:
                     item = await asyncio.wait_for(
                         self._queue.get(), timeout=remaining
                     )
+                    if self._metrics:
+                        self._metrics.queue_depth.labels(model=self._model_name).dec()
                     # Register immediately after dequeue for the same reason.
                     self._in_flight_futures.append(item.future)
                     batch.append(item)

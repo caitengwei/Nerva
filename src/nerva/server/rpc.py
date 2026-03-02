@@ -89,13 +89,10 @@ class RpcHandler:
                 request_id = int(request_id_str)
             except ValueError:
                 request_id = uuid.uuid4().int & ((1 << 64) - 1)
-                logger.warning("invalid x-nerva-request-id %r, using generated id", request_id_str)
+                logger.warning("invalid_request_id_header", value=request_id_str)
             else:
                 if request_id < 0 or request_id >= (1 << 64):
-                    logger.warning(
-                        "out-of-range x-nerva-request-id %r, using generated id",
-                        request_id_str,
-                    )
+                    logger.warning("out_of_range_request_id_header", value=request_id_str)
                     request_id = uuid.uuid4().int & ((1 << 64) - 1)
         else:
             request_id = uuid.uuid4().int & ((1 << 64) - 1)

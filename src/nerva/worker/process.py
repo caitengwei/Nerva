@@ -110,7 +110,7 @@ class _WorkerLoop:
                     logger.info("Received SHUTDOWN, exiting worker loop")
                     self._running = False
                 else:
-                    logger.warning("Unknown message type: %s", msg_type)
+                    logger.warning("unknown_message_type", msg_type=msg_type)
         finally:
             await self._cleanup()
 
@@ -151,9 +151,9 @@ class _WorkerLoop:
                 "model_name": model_name,
                 "status": AckStatus.OK.value,
             })
-            logger.info("Model '%s' loaded successfully", model_name)
+            logger.info("model_loaded", model=model_name)
         except Exception as exc:
-            logger.exception("Failed to load model '%s'", model_name)
+            logger.exception("load_model_failed", model=model_name)
             await self._send({
                 "type": MessageType.LOAD_MODEL_ACK.value,
                 "model_name": model_name,
@@ -227,7 +227,7 @@ class _WorkerLoop:
             })
             return
         except _OutputShmAllocationError as exc:
-            logger.exception("Output SHM allocation failed for request '%s'", request_id)
+            logger.exception("shm_alloc_failed", request_id=request_id)
             await self._send({
                 "type": MessageType.INFER_ACK.value,
                 "request_id": request_id,
@@ -236,7 +236,7 @@ class _WorkerLoop:
             })
             return
         except Exception as exc:
-            logger.exception("Inference failed for request '%s'", request_id)
+            logger.exception("infer_failed", request_id=request_id)
             await self._send({
                 "type": MessageType.INFER_ACK.value,
                 "request_id": request_id,
@@ -320,9 +320,9 @@ class _WorkerLoop:
         task = self._inflight.get(request_id)
         if task is not None and not task.done():
             task.cancel()
-            logger.info("Cancelled request '%s'", request_id)
+            logger.info("request_cancelled", request_id=request_id)
         else:
-            logger.warning("No inflight request '%s' to cancel", request_id)
+            logger.warning("no_inflight_request", request_id=request_id)
 
     def _handle_shm_alloc_response(self, msg: dict[str, Any]) -> None:
         """Resolve pending SHM allocation request future."""
@@ -331,7 +331,7 @@ class _WorkerLoop:
         if fut is not None and not fut.done():
             fut.set_result(msg)
         else:
-            logger.warning("No pending SHM allocation future for request '%s'", request_id)
+            logger.warning("no_pending_shm_future", request_id=request_id)
 
     # -- helpers ------------------------------------------------------------
 
@@ -365,9 +365,9 @@ class _WorkerLoop:
                 # proxy.infer() without a shm_pool).  Fall back to inline so the
                 # request still succeeds; performance is degraded but not broken.
                 logger.debug(
-                    "No shm_pool for '%s', falling back to inline output (%d B)",
-                    request_id,
-                    len(output_bytes),
+                    "no_shm_pool_fallback",
+                    request_id=request_id,
+                    output_bytes=len(output_bytes),
                 )
                 return Descriptor(
                     request_id=request_id,

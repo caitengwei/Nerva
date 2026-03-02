@@ -126,10 +126,10 @@ class WorkerManager:
                 self._metrics.worker_status.labels(
                     model=handle.name, device=handle.device
                 ).set(1)
-            logger.info("Worker '%s' is READY", worker_id)
+            logger.info("worker_ready", worker_id=worker_id)
             return proxy
         except Exception:
-            logger.exception("Failed to start worker '%s'", worker_id)
+            logger.exception("worker_start_failed", worker_id=worker_id)
             if process_started:
                 with contextlib.suppress(Exception):
                     await self._close_worker(entry)
@@ -173,9 +173,7 @@ class WorkerManager:
         new_entry = self._workers[worker_id]
         new_entry.restart_count = old_restart_count + 1
 
-        logger.info(
-            "Worker '%s' restarted (count=%d)", worker_id, new_entry.restart_count
-        )
+        logger.info("worker_restarted", worker_id=worker_id, restart_count=new_entry.restart_count)
         return proxy
 
     async def shutdown_all(self) -> None:
@@ -186,7 +184,7 @@ class WorkerManager:
             try:
                 await self._close_worker(entry)
             except Exception:
-                logger.exception("Error shutting down worker '%s'", worker_id)
+                logger.exception("worker_shutdown_error", worker_id=worker_id)
 
         self._workers.clear()
 
@@ -198,7 +196,7 @@ class WorkerManager:
                     os.unlink(fpath)
             os.rmdir(self._tmpdir)
         except OSError:
-            logger.debug("Failed to cleanup tmpdir %s", self._tmpdir)
+            logger.debug("tmpdir_cleanup_failed", tmpdir=self._tmpdir)
 
     # ------------------------------------------------------------------
     # Internal
@@ -216,7 +214,7 @@ class WorkerManager:
         try:
             await asyncio.wait_for(entry.proxy.shutdown(), timeout=3.0)
         except (TimeoutError, Exception):
-            logger.debug("Failed to send SHUTDOWN to worker '%s'", entry.handle.name)
+            logger.debug("worker_shutdown_send_failed", worker=entry.handle.name)
 
         entry.process.join(timeout=5)
         if entry.process.is_alive():
