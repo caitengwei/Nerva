@@ -150,6 +150,7 @@ uv run pytest tests/ -v
 
 ## Documentation
 
+- Collaboration-friendly Chinese design/test docs: `docs/design/`
 - Implementation plans and design notes: `docs/plans/`
 - Spikes and benchmark reports: `docs/spikes/`
 
