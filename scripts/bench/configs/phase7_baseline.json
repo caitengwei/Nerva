@@ -1,0 +1,5 @@
+{
+  "concurrency_levels": [1, 32, 128, 512, 1000],
+  "warmup_seconds": 60,
+  "sample_seconds": 300
+}
