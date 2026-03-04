@@ -18,6 +18,12 @@ def test_runbook_mentions_c1000() -> None:
     assert "1000" in text
 
 
+def test_runbook_mentions_full_e2e_contract() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert "full-e2e" in text
+    assert "不再区分 infer-only" in text
+
+
 def test_runbook_mentions_nerdctl_gpu_commands() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     assert text.count("nerdctl run --rm --gpus all") >= 2

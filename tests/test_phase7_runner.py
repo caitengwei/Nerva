@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from scripts.bench.run_phase7 import (
     BenchmarkRun,
     _payload_for_target,
+    _phase7_postprocess,
     build_artifact_dir,
     build_matrix,
     execute_benchmark_run,
@@ -89,3 +90,33 @@ def test_payload_for_targets_uses_real_newline_and_binary_bytes() -> None:
 
     vllm_payload = _payload_for_target("vllm", seq=7, workload="phase7_mm_vllm")
     assert vllm_payload["prompt"] == "[image_bytes=16]\nphase7 benchmark sample #7"
+
+
+def test_phase7_postprocess_matches_server_schema() -> None:
+    normalized = _phase7_postprocess("  hello world  ")
+    assert normalized == {"output_text": "hello world", "raw": "hello world"}
+
+
+async def test_execute_benchmark_run_counts_postprocess_missing_output_as_error() -> None:
+    class _DummyTarget:
+        async def infer(self, payload: dict[str, Any], *, deadline_ms: int) -> TargetResponse:
+            assert deadline_ms == 100
+            assert "prompt" in payload
+            return TargetResponse(ok=True, latency_ms=1.0, ttft_ms=None, error="", output_text=None)
+
+    run = BenchmarkRun(
+        target="vllm",
+        concurrency=2,
+        workload="phase7_mm_vllm",
+        warmup_seconds=0,
+        sample_seconds=1,
+    )
+    summary, _latencies, _meta = await execute_benchmark_run(
+        run,
+        target=_DummyTarget(),
+        deadline_ms=100,
+    )
+
+    assert summary["total_requests"] > 0
+    assert summary["error_count"] == summary["total_requests"]
+    assert summary["error_rate"] == 1.0

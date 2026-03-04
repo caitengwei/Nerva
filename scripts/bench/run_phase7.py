@@ -28,6 +28,7 @@ DEFAULT_CONCURRENCY_LEVELS = [1, 32, 128, 512, 1000]
 DEFAULT_WARMUP_SECONDS = 60
 DEFAULT_SAMPLE_SECONDS = 300
 DEFAULT_DEADLINE_MS = 30_000
+FULL_E2E_CONTRACT = "full-e2e"
 
 
 @dataclass(frozen=True)
@@ -137,14 +138,31 @@ def write_artifacts(
 
 
 def _payload_for_target(target: str, *, seq: int, workload: str) -> dict[str, Any]:
+    source_input = _phase7_source_input(seq=seq, workload=workload)
+    if target == "nerva":
+        return source_input
+    return _phase7_preprocess(source_input)
+
+
+def _phase7_source_input(*, seq: int, workload: str) -> dict[str, Any]:
     if workload != "phase7_mm_vllm":
         raise ValueError(f"unsupported workload: {workload}")
 
     text = f"phase7 benchmark sample #{seq}"
-    prompt = f"[image_bytes=16]\n{text}"
-    if target == "nerva":
-        return {"text": text, "image_bytes": b"\x00" * 16}
+    return {"text": text, "image_bytes": b"\x00" * 16}
+
+
+def _phase7_preprocess(inputs: dict[str, Any]) -> dict[str, Any]:
+    text = str(inputs.get("text", ""))
+    image_bytes = inputs.get("image_bytes", b"")
+    image_size = len(image_bytes) if isinstance(image_bytes, bytes) else 0
+    prompt = f"[image_bytes={image_size}]\n{text}".strip()
     return {"prompt": prompt}
+
+
+def _phase7_postprocess(output_text: str) -> dict[str, str]:
+    text = output_text.strip()
+    return {"output_text": text, "raw": text}
 
 
 def _build_target_from_args(args: argparse.Namespace, target_name: str) -> BenchTarget:
@@ -196,7 +214,15 @@ async def execute_benchmark_run(
         seq = request_meta.get("seq", 0)
         payload = _payload_for_target(run.target, seq=seq, workload=run.workload)
         response = await target.infer(payload, deadline_ms=min(deadline_ms, per_request_deadline_ms))
-        return response.ok, response.error
+        if not response.ok:
+            return False, response.error
+
+        if run.target in {"vllm", "triton"}:
+            if response.output_text is None:
+                return False, "full-e2e postprocess missing output_text"
+            _phase7_postprocess(response.output_text)
+
+        return True, ""
 
     if run.warmup_seconds > 0:
         await run_closed_loop(
@@ -219,6 +245,7 @@ async def execute_benchmark_run(
         "target": run.target,
         "concurrency": run.concurrency,
         "workload": run.workload,
+        "contract": FULL_E2E_CONTRACT,
         "warmup_seconds": run.warmup_seconds,
         "sample_seconds": run.sample_seconds,
         "deadline_ms": deadline_ms,

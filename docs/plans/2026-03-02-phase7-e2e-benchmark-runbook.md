@@ -1,5 +1,7 @@
 # Phase 7 E2E Benchmark Runbook
 
+口径说明：本 runbook 只保留一套口径 `full-e2e`（不再区分 infer-only）。
+
 ## 1. 启动 Nerva Phase 7 服务
 
 ```bash
@@ -80,6 +82,10 @@ uv run python scripts/bench/infra/wait_service_ready.py \
 ```
 
 ## 4. 统一压测命令
+
+`full-e2e` 口径定义：
+- `nerva`：前后处理在服务端 DAG（`mm_preprocess -> mm_vllm -> mm_postprocess`）内执行。
+- `vllm/triton`：bench runner 使用与 Nerva 同语义的 pre/post 逻辑，连同推理一起计入端到端延迟。
 
 小流量冒烟（C=1,32）：
 
