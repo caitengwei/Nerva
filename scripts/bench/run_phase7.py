@@ -139,7 +139,7 @@ def write_artifacts(
 
 def _payload_for_target(target: str, *, seq: int, workload: str) -> dict[str, Any]:
     source_input = _phase7_source_input(seq=seq, workload=workload)
-    if target == "nerva":
+    if target in {"nerva", "triton"}:
         return source_input
     return _phase7_preprocess(source_input)
 
@@ -217,7 +217,7 @@ async def execute_benchmark_run(
         if not response.ok:
             return False, response.error
 
-        if run.target in {"vllm", "triton"}:
+        if run.target == "vllm":
             if response.output_text is None:
                 return False, "full-e2e postprocess missing output_text"
             _phase7_postprocess(response.output_text)

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import argparse
+from typing import TYPE_CHECKING
 
 import pytest
+from scripts.bench.infra.prepare_triton_repo import prepare_triton_repo
 from scripts.bench.infra.start_triton_server import build_triton_command
 from scripts.bench.infra.start_triton_server import main as triton_main
 from scripts.bench.infra.start_triton_server import resolve_launch_mode as resolve_triton_mode
 from scripts.bench.infra.start_vllm_server import build_vllm_command
 from scripts.bench.infra.start_vllm_server import resolve_launch_mode as resolve_vllm_mode
 from scripts.bench.infra.wait_service_ready import wait_service_ready
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_start_vllm_server_dry_run_command() -> None:
@@ -37,6 +42,23 @@ def test_start_triton_server_dry_run_command() -> None:
     joined = " ".join(cmd)
     assert "tritonserver" in joined
     assert "--model-repository" in joined
+
+
+def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
+    repo = prepare_triton_repo(tmp_path, model_name="phase7_mm_vllm")
+
+    assert (repo / "phase7_preprocess" / "config.pbtxt").exists()
+    assert (repo / "phase7_preprocess" / "1" / "model.py").exists()
+    assert (repo / "phase7_infer" / "config.pbtxt").exists()
+    assert (repo / "phase7_infer" / "1" / "model.py").exists()
+    assert (repo / "phase7_postprocess" / "config.pbtxt").exists()
+    assert (repo / "phase7_postprocess" / "1" / "model.py").exists()
+
+    ensemble_cfg = (repo / "phase7_mm_vllm" / "config.pbtxt").read_text()
+    assert 'platform: "ensemble"' in ensemble_cfg
+    assert 'model_name: "phase7_preprocess"' in ensemble_cfg
+    assert 'model_name: "phase7_infer"' in ensemble_cfg
+    assert 'model_name: "phase7_postprocess"' in ensemble_cfg
 
 
 def test_vllm_launch_mode_requires_explicit_mock_opt_in() -> None:

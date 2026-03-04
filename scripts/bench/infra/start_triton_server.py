@@ -65,12 +65,7 @@ def resolve_launch_mode(*, binary_exists: bool, allow_mock: bool) -> str:
 
 
 def _run_mock_server(*, host: str, port: int, model_repo: str) -> int:
-    model_name = "phase7_mm_vllm"
-    with os.scandir(model_repo) as entries:
-        for entry in entries:
-            if entry.is_dir():
-                model_name = entry.name
-                break
+    model_name = _resolve_model_name(model_repo)
 
     async def ready(_request: Request) -> JSONResponse:
         return JSONResponse({"ready": True, "backend": "mock_triton"})
@@ -104,6 +99,19 @@ def _run_mock_server(*, host: str, port: int, model_repo: str) -> int:
     )
     uvicorn.run(app, host=host, port=port, log_level="info")
     return 0
+
+
+def _resolve_model_name(model_repo: str) -> str:
+    preferred = "phase7_mm_vllm"
+    if os.path.isdir(os.path.join(model_repo, preferred)):
+        return preferred
+
+    with os.scandir(model_repo) as entries:
+        for entry in entries:
+            if entry.is_dir():
+                return entry.name
+
+    return preferred
 
 
 def main(argv: Sequence[str] | None = None) -> int:

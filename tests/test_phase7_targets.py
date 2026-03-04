@@ -310,3 +310,30 @@ async def test_triton_infer_parses_json_output() -> None:
     resp = await target.infer({"prompt": "hi"}, deadline_ms=1000)
     assert resp.ok is True
     assert resp.output_text == "hello from triton"
+
+
+async def test_triton_infer_builds_full_e2e_inputs_for_ensemble() -> None:
+    captured: dict[str, Any] = {}
+
+    async def sender(
+        url: str,
+        payload: dict[str, Any],
+        timeout_ms: int,
+    ) -> dict[str, Any]:
+        del url, timeout_ms
+        captured.update(payload)
+        return {"outputs": [{"name": "OUTPUT_TEXT", "data": ["hello from triton"]}]}
+
+    target = TritonInferTarget(
+        base_url="http://127.0.0.1:8002",
+        model_name="phase7_mm_vllm",
+        sender=sender,
+    )
+    resp = await target.infer({"text": "hi", "image_bytes": b"\x00" * 16}, deadline_ms=1000)
+
+    assert resp.ok is True
+    assert resp.output_text == "hello from triton"
+    assert isinstance(captured.get("inputs"), list)
+    inputs = captured["inputs"]
+    names = {item["name"] for item in inputs}
+    assert names == {"TEXT", "IMAGE_SIZE"}

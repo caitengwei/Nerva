@@ -91,6 +91,10 @@ def test_payload_for_targets_uses_real_newline_and_binary_bytes() -> None:
     vllm_payload = _payload_for_target("vllm", seq=7, workload="phase7_mm_vllm")
     assert vllm_payload["prompt"] == "[image_bytes=16]\nphase7 benchmark sample #7"
 
+    triton_payload = _payload_for_target("triton", seq=7, workload="phase7_mm_vllm")
+    assert triton_payload["text"] == "phase7 benchmark sample #7"
+    assert triton_payload["image_bytes"] == b"\x00" * 16
+
 
 def test_phase7_postprocess_matches_server_schema() -> None:
     normalized = _phase7_postprocess("  hello world  ")
