@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -178,3 +179,44 @@ class _FakeTarget:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+@pytest.mark.gpu
+async def test_phase7_perf_compare_real_services_smoke(tmp_path: Path) -> None:
+    if os.getenv("NERVA_PHASE7_E2E_COMPARE") != "1":
+        pytest.skip(
+            "set NERVA_PHASE7_E2E_COMPARE=1 and start nerva/vllm/triton services before running"
+        )
+
+    args = _cli(
+        [
+            "--target",
+            "nerva",
+            "--target",
+            "vllm",
+            "--target",
+            "triton",
+            "--workload",
+            "phase7_mm_vllm",
+            "--vllm-model",
+            os.getenv("NERVA_PHASE7_VLLM_MODEL", "phase7_mm_vllm"),
+            "--concurrency-levels",
+            "1",
+            "--warmup-seconds",
+            "1",
+            "--sample-seconds",
+            "1",
+            "--nerva-url",
+            os.getenv("NERVA_PHASE7_NERVA_URL", "http://127.0.0.1:8080"),
+            "--vllm-url",
+            os.getenv("NERVA_PHASE7_VLLM_URL", "http://127.0.0.1:8001"),
+            "--triton-url",
+            os.getenv("NERVA_PHASE7_TRITON_URL", "http://127.0.0.1:8002"),
+            "--output-root",
+            str(tmp_path),
+        ]
+    )
+
+    await _amain(args)
+    summary_files = sorted(tmp_path.glob("phase7/*/*/*/*/summary.json"))
+    assert len(summary_files) == 3
