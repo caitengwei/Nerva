@@ -15,6 +15,17 @@ uv run python scripts/bench/infra/start_vllm_server.py \
   --port 8001
 ```
 
+Linux + GPU（容器，`nerdctl`）：
+
+```bash
+nerdctl run --rm --gpus all --network host --ipc host \
+  -v <MODEL_PATH>:/models:ro \
+  vllm/vllm-openai:latest \
+  --model /models \
+  --host 0.0.0.0 \
+  --port 8001
+```
+
 说明：
 - 默认要求本机可执行 `vllm` 二进制；若缺失会直接报错退出（fail-fast）。
 - 仅本地联调可使用 mock 兜底：追加 `--allow-mock`（不要用于正式对照数据采集）。
@@ -38,6 +49,21 @@ uv run python scripts/bench/infra/start_triton_server.py \
   --http-port 8002 \
   --grpc-port 8003 \
   --metrics-port 8004
+```
+
+Linux + GPU（容器，`nerdctl`）：
+
+```bash
+uv run python scripts/bench/infra/prepare_triton_repo.py --output /tmp/phase7-triton-repo
+
+nerdctl run --rm --gpus all --network host --ipc host \
+  -v /tmp/phase7-triton-repo:/models \
+  nvcr.io/nvidia/tritonserver:24.08-py3 \
+  tritonserver \
+  --model-repository=/models \
+  --http-port=8002 \
+  --grpc-port=8003 \
+  --metrics-port=8004
 ```
 
 说明：

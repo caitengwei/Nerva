@@ -18,6 +18,11 @@ def test_runbook_mentions_c1000() -> None:
     assert "1000" in text
 
 
+def test_runbook_mentions_nerdctl_gpu_commands() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert "nerdctl run --rm --gpus all" in text
+
+
 def test_phase7_plan_has_no_agent_specific_instructions() -> None:
     text = PLAN.read_text(encoding="utf-8")
     assert "For Claude" not in text
