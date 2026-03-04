@@ -30,9 +30,10 @@ class VLLMOpenAIAPITarget:
 
     async def infer(self, payload: dict[str, Any], *, deadline_ms: int) -> TargetResponse:
         start_ns = time.perf_counter_ns()
+        prompt = _prompt_from_payload(payload)
         request_body = {
             "model": self._model_name,
-            "prompt": str(payload.get("prompt", "")),
+            "prompt": prompt,
             "max_tokens": int(payload.get("max_tokens", 64)),
             "temperature": float(payload.get("temperature", 0.0)),
         }
@@ -54,7 +55,7 @@ class VLLMOpenAIAPITarget:
                 latency_ms=_latency_ms(start_ns),
                 ttft_ms=None,
                 error="",
-                output_text=output_text,
+                output_text=_phase7_postprocess_text(output_text),
                 raw=data,
             )
         except Exception as exc:  # pragma: no cover - network/transport failures
@@ -116,3 +117,30 @@ def _extract_openai_text(data: dict[str, Any]) -> str | None:
 
 def _latency_ms(start_ns: int) -> float:
     return (time.perf_counter_ns() - start_ns) / 1_000_000.0
+
+
+def _prompt_from_payload(payload: dict[str, Any]) -> str:
+    prompt = payload.get("prompt")
+    if prompt is not None:
+        return str(prompt)
+
+    text = str(payload.get("text", ""))
+    image_size = _image_size_from_payload(payload)
+    return f"[image_bytes={image_size}]\n{text}".strip()
+
+
+def _image_size_from_payload(payload: dict[str, Any]) -> int:
+    image_bytes = payload.get("image_bytes")
+    if isinstance(image_bytes, bytes | bytearray | memoryview):
+        return len(image_bytes)
+
+    image_size = payload.get("image_size", 0)
+    try:
+        parsed = int(image_size)
+    except Exception:
+        return 0
+    return max(parsed, 0)
+
+
+def _phase7_postprocess_text(output_text: str) -> str:
+    return output_text.strip()

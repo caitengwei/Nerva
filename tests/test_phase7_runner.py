@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 from scripts.bench.run_phase7 import (
     BenchmarkRun,
     _payload_for_target,
-    _phase7_postprocess,
     build_artifact_dir,
     build_matrix,
     execute_benchmark_run,
@@ -57,7 +56,8 @@ async def test_execute_benchmark_run_generates_non_zero_metrics() -> None:
 
         async def infer(self, payload: dict[str, Any], *, deadline_ms: int) -> TargetResponse:
             assert deadline_ms == 100
-            assert "prompt" in payload
+            assert "text" in payload
+            assert "image_bytes" in payload
             self.calls += 1
             return TargetResponse(ok=True, latency_ms=1.0, ttft_ms=None, error="", output_text="ok")
 
@@ -89,24 +89,20 @@ def test_payload_for_targets_uses_real_newline_and_binary_bytes() -> None:
     assert len(nerva_payload["image_bytes"]) == 16
 
     vllm_payload = _payload_for_target("vllm", seq=7, workload="phase7_mm_vllm")
-    assert vllm_payload["prompt"] == "[image_bytes=16]\nphase7 benchmark sample #7"
+    assert vllm_payload["text"] == "phase7 benchmark sample #7"
+    assert vllm_payload["image_bytes"] == b"\x00" * 16
 
     triton_payload = _payload_for_target("triton", seq=7, workload="phase7_mm_vllm")
     assert triton_payload["text"] == "phase7 benchmark sample #7"
     assert triton_payload["image_bytes"] == b"\x00" * 16
 
 
-def test_phase7_postprocess_matches_server_schema() -> None:
-    normalized = _phase7_postprocess("  hello world  ")
-    assert normalized == {"output_text": "hello world", "raw": "hello world"}
-
-
-async def test_execute_benchmark_run_counts_postprocess_missing_output_as_error() -> None:
+async def test_execute_benchmark_run_counts_target_errors() -> None:
     class _DummyTarget:
         async def infer(self, payload: dict[str, Any], *, deadline_ms: int) -> TargetResponse:
             assert deadline_ms == 100
-            assert "prompt" in payload
-            return TargetResponse(ok=True, latency_ms=1.0, ttft_ms=None, error="", output_text=None)
+            assert "text" in payload
+            return TargetResponse(ok=False, latency_ms=1.0, ttft_ms=None, error="boom", output_text=None)
 
     run = BenchmarkRun(
         target="vllm",

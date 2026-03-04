@@ -138,10 +138,8 @@ def write_artifacts(
 
 
 def _payload_for_target(target: str, *, seq: int, workload: str) -> dict[str, Any]:
-    source_input = _phase7_source_input(seq=seq, workload=workload)
-    if target in {"nerva", "triton"}:
-        return source_input
-    return _phase7_preprocess(source_input)
+    del target
+    return _phase7_source_input(seq=seq, workload=workload)
 
 
 def _phase7_source_input(*, seq: int, workload: str) -> dict[str, Any]:
@@ -150,19 +148,6 @@ def _phase7_source_input(*, seq: int, workload: str) -> dict[str, Any]:
 
     text = f"phase7 benchmark sample #{seq}"
     return {"text": text, "image_bytes": b"\x00" * 16}
-
-
-def _phase7_preprocess(inputs: dict[str, Any]) -> dict[str, Any]:
-    text = str(inputs.get("text", ""))
-    image_bytes = inputs.get("image_bytes", b"")
-    image_size = len(image_bytes) if isinstance(image_bytes, bytes) else 0
-    prompt = f"[image_bytes={image_size}]\n{text}".strip()
-    return {"prompt": prompt}
-
-
-def _phase7_postprocess(output_text: str) -> dict[str, str]:
-    text = output_text.strip()
-    return {"output_text": text, "raw": text}
 
 
 def _build_target_from_args(args: argparse.Namespace, target_name: str) -> BenchTarget:
@@ -214,15 +199,7 @@ async def execute_benchmark_run(
         seq = request_meta.get("seq", 0)
         payload = _payload_for_target(run.target, seq=seq, workload=run.workload)
         response = await target.infer(payload, deadline_ms=min(deadline_ms, per_request_deadline_ms))
-        if not response.ok:
-            return False, response.error
-
-        if run.target == "vllm":
-            if response.output_text is None:
-                return False, "full-e2e postprocess missing output_text"
-            _phase7_postprocess(response.output_text)
-
-        return True, ""
+        return response.ok, response.error
 
     if run.warmup_seconds > 0:
         await run_closed_loop(

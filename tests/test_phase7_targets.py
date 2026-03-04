@@ -112,12 +112,15 @@ async def test_nerva_binary_rpc_rejects_data_without_text_field() -> None:
 
 
 async def test_vllm_openai_api_parses_text_field() -> None:
+    captured: dict[str, Any] = {}
+
     async def sender(
         url: str,
         payload: dict[str, Any],
         timeout_ms: int,
     ) -> dict[str, Any]:
-        del url, payload, timeout_ms
+        del url, timeout_ms
+        captured.update(payload)
         return {"choices": [{"text": "hello from vllm"}]}
 
     target = VLLMOpenAIAPITarget(
@@ -125,7 +128,27 @@ async def test_vllm_openai_api_parses_text_field() -> None:
         model_name="phase7",
         sender=sender,
     )
-    resp = await target.infer({"prompt": "hi"}, deadline_ms=1000)
+    resp = await target.infer({"text": "hi", "image_bytes": b"\x00" * 16}, deadline_ms=1000)
+    assert resp.ok is True
+    assert resp.output_text == "hello from vllm"
+    assert captured["prompt"] == "[image_bytes=16]\nhi"
+
+
+async def test_vllm_openai_api_postprocess_normalizes_output_text() -> None:
+    async def sender(
+        url: str,
+        payload: dict[str, Any],
+        timeout_ms: int,
+    ) -> dict[str, Any]:
+        del url, payload, timeout_ms
+        return {"choices": [{"text": "  hello from vllm  "}]}
+
+    target = VLLMOpenAIAPITarget(
+        base_url="http://127.0.0.1:8001",
+        model_name="phase7",
+        sender=sender,
+    )
+    resp = await target.infer({"text": "hi", "image_bytes": b"\x00" * 16}, deadline_ms=1000)
     assert resp.ok is True
     assert resp.output_text == "hello from vllm"
 

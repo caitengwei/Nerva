@@ -85,7 +85,7 @@ uv run python scripts/bench/infra/wait_service_ready.py \
 
 `full-e2e` 口径定义：
 - `nerva`：前后处理在服务端 DAG（`mm_preprocess -> mm_vllm -> mm_postprocess`）内执行。
-- `vllm`：bench runner 使用与 Nerva 同语义的 pre/post 逻辑，连同推理一起计入端到端延迟。
+- `vllm`：target adapter 使用与 Nerva 同语义的 pre/post 逻辑，连同推理一起计入端到端延迟。
 - `triton`：在 Triton model repository 内通过 ensemble 串联 `phase7_preprocess -> phase7_infer -> phase7_postprocess`，统一计入端到端延迟。
 
 小流量冒烟（C=1,32）：
