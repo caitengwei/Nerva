@@ -20,7 +20,7 @@ Linux + GPU（容器，`nerdctl`）：
 ```bash
 nerdctl run --rm --gpus all --network host --ipc host \
   -v <MODEL_PATH>:/models:ro \
-  vllm/vllm-openai:latest \
+  vllm/vllm-openai:v0.6.0 \
   --model /models \
   --host 0.0.0.0 \
   --port 8001
@@ -97,6 +97,18 @@ uv run python scripts/bench/run_phase7.py \
 ```bash
 uv run python scripts/bench/run_phase7.py \
   --target nerva --target vllm --target triton \
+  --workload phase7_mm_vllm \
+  --concurrency-levels 1,32,128,512,1000 \
+  --warmup-seconds 60 \
+  --sample-seconds 300
+```
+
+容器模式（若 vLLM 用 `--model /models` 启动）请追加模型名参数：
+
+```bash
+uv run python scripts/bench/run_phase7.py \
+  --target nerva --target vllm --target triton \
+  --vllm-model /models \
   --workload phase7_mm_vllm \
   --concurrency-levels 1,32,128,512,1000 \
   --warmup-seconds 60 \

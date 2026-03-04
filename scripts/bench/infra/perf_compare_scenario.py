@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 DEFAULT_CONCURRENCY_LEVELS = [1, 32, 128, 512, 1000]
-DEFAULT_VLLM_IMAGE = "vllm/vllm-openai:latest"
+DEFAULT_VLLM_IMAGE = "vllm/vllm-openai:v0.6.0"
 DEFAULT_TRITON_IMAGE = "nvcr.io/nvidia/tritonserver:24.08-py3"
+DEFAULT_VLLM_MODEL_NAME = "/models"
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ def build_linux_gpu_perf_compare_scenario(
     triton_repo: str,
     container_cli: str = "nerdctl",
     vllm_image: str = DEFAULT_VLLM_IMAGE,
+    vllm_model_name: str = DEFAULT_VLLM_MODEL_NAME,
     triton_image: str = DEFAULT_TRITON_IMAGE,
     workload: str = "phase7_mm_vllm",
     concurrency_levels: list[int] | None = None,
@@ -41,12 +43,17 @@ def build_linux_gpu_perf_compare_scenario(
         raise ValueError("triton_repo must not be empty")
     if not container_cli:
         raise ValueError("container_cli must not be empty")
+    if not vllm_model_name:
+        raise ValueError("vllm_model_name must not be empty")
     if warmup_seconds <= 0:
         raise ValueError("warmup_seconds must be > 0")
     if sample_seconds <= 0:
         raise ValueError("sample_seconds must be > 0")
 
-    levels = list(concurrency_levels or DEFAULT_CONCURRENCY_LEVELS)
+    if concurrency_levels is None:
+        levels = list(DEFAULT_CONCURRENCY_LEVELS)
+    else:
+        levels = list(concurrency_levels)
     _validate_positive_levels(levels)
 
     level_arg = ",".join(str(level) for level in levels)
@@ -121,6 +128,8 @@ def build_linux_gpu_perf_compare_scenario(
         "vllm",
         "--target",
         "triton",
+        "--vllm-model",
+        vllm_model_name,
         "--workload",
         workload,
         "--concurrency-levels",

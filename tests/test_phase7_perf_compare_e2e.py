@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import pytest
+import scripts.bench.run_phase7 as run_phase7
 from scripts.bench.infra.perf_compare_scenario import build_linux_gpu_perf_compare_scenario
 from scripts.bench.run_phase7 import _amain, _cli
 
@@ -63,3 +65,116 @@ def test_linux_gpu_perf_compare_scenario_uses_nerdctl() -> None:
     assert "--target nerva" in bench_cmd
     assert "--target vllm" in bench_cmd
     assert "--target triton" in bench_cmd
+    assert "--vllm-model /models" in bench_cmd
+    assert "vllm/vllm-openai:v0.6.0" in " ".join(scenario.vllm_container_cmd)
+
+
+def test_linux_gpu_perf_compare_scenario_rejects_empty_concurrency_levels() -> None:
+    with pytest.raises(ValueError, match="must not be empty"):
+        build_linux_gpu_perf_compare_scenario(
+            model_path="/models/Qwen/Qwen2.5-7B-Instruct",
+            triton_repo="/tmp/phase7-triton-repo",
+            concurrency_levels=[],
+        )
+
+
+async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    built_targets: dict[str, _FakeTarget] = {}
+    called_targets: list[str] = []
+
+    def fake_build_target(_args: object, target_name: str) -> _FakeTarget:
+        target = _FakeTarget(target_name)
+        built_targets[target_name] = target
+        return target
+
+    async def fake_execute(
+        run: run_phase7.BenchmarkRun,
+        *,
+        target: _FakeTarget,
+        deadline_ms: int,
+    ) -> tuple[dict[str, object], list[float], dict[str, object]]:
+        called_targets.append(run.target)
+        assert target.name == run.target
+        return (
+            {
+                "target": run.target,
+                "concurrency": run.concurrency,
+                "workload": run.workload,
+                "qps": 1.0,
+                "p50_ms": 1.0,
+                "p95_ms": 1.0,
+                "p99_ms": 1.0,
+                "error_rate": 0.0,
+                "max_in_flight": 1,
+                "total_requests": 1,
+                "error_count": 0,
+            },
+            [1.0],
+            {
+                "target": run.target,
+                "concurrency": run.concurrency,
+                "workload": run.workload,
+                "warmup_seconds": run.warmup_seconds,
+                "sample_seconds": run.sample_seconds,
+                "deadline_ms": deadline_ms,
+            },
+        )
+
+    monkeypatch.setattr(run_phase7, "_build_target_from_args", fake_build_target)
+    monkeypatch.setattr(run_phase7, "execute_benchmark_run", fake_execute)
+
+    args = _cli(
+        [
+            "--target",
+            "nerva",
+            "--target",
+            "vllm",
+            "--target",
+            "triton",
+            "--workload",
+            "phase7_mm_vllm",
+            "--concurrency-levels",
+            "1",
+            "--warmup-seconds",
+            "1",
+            "--sample-seconds",
+            "1",
+            "--deadline-ms",
+            "99",
+            "--output-root",
+            str(tmp_path),
+        ]
+    )
+    await _amain(args)
+
+    assert called_targets == ["nerva", "vllm", "triton"]
+    assert set(built_targets.keys()) == {"nerva", "vllm", "triton"}
+    assert all(target.closed for target in built_targets.values())
+
+    for target_name in ("nerva", "vllm", "triton"):
+        summaries = list(tmp_path.glob(f"phase7/*/*/{target_name}/1/summary.json"))
+        metas = list(tmp_path.glob(f"phase7/*/*/{target_name}/1/run-meta.json"))
+        assert len(summaries) == 1
+        assert len(metas) == 1
+
+        summary = json.loads(summaries[0].read_text())
+        assert summary["target"] == target_name
+        assert summary["qps"] == 1.0
+        assert "dry_run" not in summary
+
+        meta = json.loads(metas[0].read_text())
+        assert meta["target"] == target_name
+        assert meta["dry_run"] is False
+        assert meta["deadline_ms"] == 99
+
+
+class _FakeTarget:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True

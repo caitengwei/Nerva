@@ -20,7 +20,11 @@ def test_runbook_mentions_c1000() -> None:
 
 def test_runbook_mentions_nerdctl_gpu_commands() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
-    assert "nerdctl run --rm --gpus all" in text
+    assert text.count("nerdctl run --rm --gpus all") >= 2
+    assert "--network host --ipc host" in text
+    assert "vllm/vllm-openai:v0.6.0" in text
+    assert "nvcr.io/nvidia/tritonserver:24.08-py3" in text
+    assert "--vllm-model /models" in text
 
 
 def test_phase7_plan_has_no_agent_specific_instructions() -> None:
