@@ -66,6 +66,10 @@ def test_linux_gpu_perf_compare_scenario_uses_nerdctl() -> None:
     assert "--target nerva" in bench_cmd
     assert "--target vllm" in bench_cmd
     assert "--target triton" in bench_cmd
+    assert "--require-real-backend" in bench_cmd
+    assert "--max-tokens 256" in bench_cmd
+    assert "--temperature 1.0" in bench_cmd
+    assert "--top-p 1.0" in bench_cmd
     assert "--vllm-model /models" in bench_cmd
     assert "vllm/vllm-openai:v0.6.0" in " ".join(scenario.vllm_container_cmd)
 
@@ -96,9 +100,15 @@ async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
         *,
         target: _FakeTarget,
         deadline_ms: int,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
     ) -> tuple[dict[str, object], list[float], dict[str, object]]:
         called_targets.append(run.target)
         assert target.name == run.target
+        assert max_tokens == 256
+        assert temperature == 1.0
+        assert top_p == 1.0
         return (
             {
                 "target": run.target,
@@ -126,6 +136,11 @@ async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
 
     monkeypatch.setattr(run_phase7, "_build_target_from_args", fake_build_target)
     monkeypatch.setattr(run_phase7, "execute_benchmark_run", fake_execute)
+
+    async def fake_backend_mode(*_args: object, **_kwargs: object) -> str:
+        return "real"
+
+    monkeypatch.setattr(run_phase7, "_detect_backend_mode", fake_backend_mode)
 
     args = _cli(
         [
@@ -169,7 +184,34 @@ async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
         meta = json.loads(metas[0].read_text())
         assert meta["target"] == target_name
         assert meta["dry_run"] is False
+        assert meta["backend_mode"] == "real"
         assert meta["deadline_ms"] == 99
+
+
+async def test_phase7_perf_compare_requires_real_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def fake_backend_mode(*_args: object, **_kwargs: object) -> str:
+        return "mock"
+
+    monkeypatch.setattr(run_phase7, "_detect_backend_mode", fake_backend_mode)
+    args = _cli(
+        [
+            "--target",
+            "vllm",
+            "--workload",
+            "phase7_mm_vllm",
+            "--concurrency-levels",
+            "1",
+            "--warmup-seconds",
+            "1",
+            "--sample-seconds",
+            "1",
+            "--output-root",
+            str(tmp_path),
+            "--require-real-backend",
+        ]
+    )
+    with pytest.raises(RuntimeError, match="not running in real mode"):
+        await _amain(args)
 
 
 class _FakeTarget:

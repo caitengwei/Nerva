@@ -130,6 +130,9 @@ def _build_triton_inputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if "text" in payload or "image_bytes" in payload or "image_size" in payload:
         text = str(payload.get("text", ""))
         image_size = _image_size_from_payload(payload)
+        max_tokens = _int_payload(payload.get("max_tokens"), default=256, minimum=1)
+        temperature = _float_payload(payload.get("temperature"), default=1.0, minimum=0.0)
+        top_p = _float_payload(payload.get("top_p"), default=1.0, minimum=1e-6)
         return [
             {
                 "name": "TEXT",
@@ -142,6 +145,24 @@ def _build_triton_inputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "shape": [1],
                 "datatype": "INT32",
                 "data": [image_size],
+            },
+            {
+                "name": "MAX_TOKENS",
+                "shape": [1],
+                "datatype": "INT32",
+                "data": [max_tokens],
+            },
+            {
+                "name": "TEMPERATURE",
+                "shape": [1],
+                "datatype": "FP32",
+                "data": [temperature],
+            },
+            {
+                "name": "TOP_P",
+                "shape": [1],
+                "datatype": "FP32",
+                "data": [top_p],
             },
         ]
 
@@ -167,3 +188,19 @@ def _image_size_from_payload(payload: dict[str, Any]) -> int:
     except Exception:
         return 0
     return max(parsed, 0)
+
+
+def _int_payload(value: object, *, default: int, minimum: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return default
+    return max(parsed, minimum)
+
+
+def _float_payload(value: object, *, default: float, minimum: float) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        return default
+    return max(parsed, minimum)

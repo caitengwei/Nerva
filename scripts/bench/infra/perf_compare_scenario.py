@@ -6,6 +6,9 @@ DEFAULT_CONCURRENCY_LEVELS = [1, 32, 128, 512, 1000]
 DEFAULT_VLLM_IMAGE = "vllm/vllm-openai:v0.6.0"
 DEFAULT_TRITON_IMAGE = "nvcr.io/nvidia/tritonserver:24.08-py3"
 DEFAULT_VLLM_MODEL_NAME = "/models"
+DEFAULT_MAX_TOKENS = 256
+DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TOP_P = 1.0
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,10 @@ def build_linux_gpu_perf_compare_scenario(
     concurrency_levels: list[int] | None = None,
     warmup_seconds: int = 60,
     sample_seconds: int = 300,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P,
+    require_real_backend: bool = True,
 ) -> PerfCompareScenario:
     if not model_path:
         raise ValueError("model_path must not be empty")
@@ -49,6 +56,12 @@ def build_linux_gpu_perf_compare_scenario(
         raise ValueError("warmup_seconds must be > 0")
     if sample_seconds <= 0:
         raise ValueError("sample_seconds must be > 0")
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be > 0")
+    if temperature < 0:
+        raise ValueError("temperature must be >= 0")
+    if top_p <= 0:
+        raise ValueError("top_p must be > 0")
 
     if concurrency_levels is None:
         levels = list(DEFAULT_CONCURRENCY_LEVELS)
@@ -128,6 +141,12 @@ def build_linux_gpu_perf_compare_scenario(
         "vllm",
         "--target",
         "triton",
+        "--max-tokens",
+        str(max_tokens),
+        "--temperature",
+        str(temperature),
+        "--top-p",
+        str(top_p),
         "--vllm-model",
         vllm_model_name,
         "--workload",
@@ -139,6 +158,8 @@ def build_linux_gpu_perf_compare_scenario(
         "--sample-seconds",
         str(sample_seconds),
     ]
+    if require_real_backend:
+        benchmark_cmd.append("--require-real-backend")
     return PerfCompareScenario(
         nerva_server_cmd=nerva_server_cmd,
         vllm_container_cmd=vllm_container_cmd,

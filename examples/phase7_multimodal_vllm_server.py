@@ -21,8 +21,16 @@ class MMPreprocessModel(Model):
         text = str(inputs.get("text", ""))
         image_bytes = inputs.get("image_bytes", b"")
         image_size = len(image_bytes) if isinstance(image_bytes, bytes) else 0
+        max_tokens = max(int(inputs.get("max_tokens", 256)), 1)
+        temperature = max(float(inputs.get("temperature", 1.0)), 0.0)
+        top_p = max(float(inputs.get("top_p", 1.0)), 1e-6)
         prompt = f"[image_bytes={image_size}]\n{text}".strip()
-        return {"prompt": prompt}
+        return {
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
 
 
 class MMVLLMPlaceholderModel(Model):
@@ -72,7 +80,14 @@ mm_postprocess = model(
 
 def _phase7_pipeline(request: Any) -> Any:
     pre_out = mm_preprocess(request)
-    llm_out = mm_vllm({"prompt": pre_out["prompt"]})
+    llm_out = mm_vllm(
+        {
+            "prompt": pre_out["prompt"],
+            "max_tokens": pre_out["max_tokens"],
+            "temperature": pre_out["temperature"],
+            "top_p": pre_out["top_p"],
+        }
+    )
     return mm_postprocess({"text": llm_out["text"]})
 
 

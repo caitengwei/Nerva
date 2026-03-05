@@ -54,6 +54,17 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert (repo / "phase7_postprocess" / "config.pbtxt").exists()
     assert (repo / "phase7_postprocess" / "1" / "model.py").exists()
 
+    preprocess_cfg = (repo / "phase7_preprocess" / "config.pbtxt").read_text()
+    assert 'name: "MAX_TOKENS"' in preprocess_cfg
+    assert 'name: "TEMPERATURE"' in preprocess_cfg
+    assert 'name: "TOP_P"' in preprocess_cfg
+
+    infer_cfg = (repo / "phase7_infer" / "config.pbtxt").read_text()
+    assert 'name: "PROMPT"' in infer_cfg
+    assert 'name: "MAX_TOKENS"' in infer_cfg
+    assert 'name: "TEMPERATURE"' in infer_cfg
+    assert 'name: "TOP_P"' in infer_cfg
+
     ensemble_cfg = (repo / "phase7_mm_vllm" / "config.pbtxt").read_text()
     assert 'platform: "ensemble"' in ensemble_cfg
     assert 'model_name: "phase7_preprocess"' in ensemble_cfg

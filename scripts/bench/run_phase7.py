@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 if __package__ in {None, ""}:
     import sys
 
@@ -28,6 +30,9 @@ DEFAULT_CONCURRENCY_LEVELS = [1, 32, 128, 512, 1000]
 DEFAULT_WARMUP_SECONDS = 60
 DEFAULT_SAMPLE_SECONDS = 300
 DEFAULT_DEADLINE_MS = 30_000
+DEFAULT_MAX_TOKENS = 256
+DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TOP_P = 1.0
 FULL_E2E_CONTRACT = "full-e2e"
 
 
@@ -137,17 +142,99 @@ def write_artifacts(
     (artifact_dir / "run-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
 
 
-def _payload_for_target(target: str, *, seq: int, workload: str) -> dict[str, Any]:
+def _payload_for_target(
+    target: str,
+    *,
+    seq: int,
+    workload: str,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P,
+) -> dict[str, Any]:
     del target
-    return _phase7_source_input(seq=seq, workload=workload)
+    return _phase7_source_input(
+        seq=seq,
+        workload=workload,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+    )
 
 
-def _phase7_source_input(*, seq: int, workload: str) -> dict[str, Any]:
+def _phase7_source_input(
+    *,
+    seq: int,
+    workload: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+) -> dict[str, Any]:
     if workload != "phase7_mm_vllm":
         raise ValueError(f"unsupported workload: {workload}")
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be > 0")
+    if top_p <= 0:
+        raise ValueError("top_p must be > 0")
+    if temperature < 0:
+        raise ValueError("temperature must be >= 0")
 
     text = f"phase7 benchmark sample #{seq}"
-    return {"text": text, "image_bytes": b"\x00" * 16}
+    return {
+        "text": text,
+        "image_bytes": b"\x00" * 16,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+    }
+
+
+async def _default_health_getter(
+    url: str,
+    timeout_ms: int,
+) -> tuple[int, dict[str, Any] | None]:
+    timeout_s = max(timeout_ms / 1000.0, 0.001)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, timeout=timeout_s)
+    payload: dict[str, Any] | None = None
+    try:
+        body = response.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict):
+        payload = body
+    return response.status_code, payload
+
+
+async def _detect_backend_mode(
+    args: argparse.Namespace,
+    target_name: str,
+    *,
+    health_getter: Any = _default_health_getter,
+) -> str:
+    if target_name == "nerva":
+        return "real"
+
+    if target_name == "vllm":
+        url = f"{args.vllm_url.rstrip('/')}/health"
+    elif target_name == "triton":
+        url = f"{args.triton_url.rstrip('/')}/v2/health/ready"
+    else:
+        raise ValueError(f"unknown target for backend detection: {target_name}")
+
+    try:
+        status_code, payload = await health_getter(url, args.deadline_ms)
+    except Exception:
+        return "unknown"
+
+    if status_code != 200:
+        return "unknown"
+
+    if isinstance(payload, dict):
+        backend = str(payload.get("backend", "")).strip().lower()
+        if backend in {"mock_vllm", "mock_triton"}:
+            return "mock"
+
+    return "real"
 
 
 def _build_target_from_args(args: argparse.Namespace, target_name: str) -> BenchTarget:
@@ -191,13 +278,23 @@ async def execute_benchmark_run(
     *,
     target: BenchTarget,
     deadline_ms: int,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P,
 ) -> tuple[dict[str, Any], list[float], dict[str, Any]]:
     if deadline_ms <= 0:
         raise ValueError("deadline_ms must be > 0")
 
     async def _invoke(request_meta: dict[str, int], per_request_deadline_ms: int) -> tuple[bool, str]:
         seq = request_meta.get("seq", 0)
-        payload = _payload_for_target(run.target, seq=seq, workload=run.workload)
+        payload = _payload_for_target(
+            run.target,
+            seq=seq,
+            workload=run.workload,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
         response = await target.infer(payload, deadline_ms=min(deadline_ms, per_request_deadline_ms))
         return response.ok, response.error
 
@@ -226,6 +323,9 @@ async def execute_benchmark_run(
         "warmup_seconds": run.warmup_seconds,
         "sample_seconds": run.sample_seconds,
         "deadline_ms": deadline_ms,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
     }
     return summary, result.latencies_ms, meta
 
@@ -239,6 +339,14 @@ def _cli(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--warmup-seconds", type=int)
     parser.add_argument("--sample-seconds", type=int)
     parser.add_argument("--deadline-ms", type=int, default=DEFAULT_DEADLINE_MS)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
+    parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P)
+    parser.add_argument(
+        "--require-real-backend",
+        action="store_true",
+        help="fail if vllm/triton health endpoints report mock backend mode",
+    )
 
     parser.add_argument("--nerva-url", default="http://127.0.0.1:8080")
     parser.add_argument("--nerva-pipeline", default="phase7_mm_vllm")
@@ -293,17 +401,29 @@ async def _amain(args: argparse.Namespace) -> None:
                 "warmup_seconds": run.warmup_seconds,
                 "sample_seconds": run.sample_seconds,
                 "deadline_ms": args.deadline_ms,
+                "max_tokens": args.max_tokens,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
                 "date": today.isoformat(),
                 "commit": commit,
                 "dry_run": True,
             }
         else:
+            backend_mode = await _detect_backend_mode(args, run.target)
+            if args.require_real_backend and backend_mode != "real":
+                raise RuntimeError(
+                    f"target '{run.target}' is not running in real mode: {backend_mode}"
+                )
+
             target = _build_target_from_args(args, run.target)
             try:
                 summary, latencies, meta = await execute_benchmark_run(
                     run,
                     target=target,
                     deadline_ms=args.deadline_ms,
+                    max_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
                 )
             finally:
                 close = getattr(target, "aclose", None)
@@ -314,6 +434,7 @@ async def _amain(args: argparse.Namespace) -> None:
                     "target_endpoint": _target_endpoint(args, run.target),
                     "date": today.isoformat(),
                     "commit": commit,
+                    "backend_mode": backend_mode,
                     "dry_run": False,
                 }
             )

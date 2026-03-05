@@ -47,6 +47,9 @@ def _ensemble_config(model_name: str) -> str:
         'input [\n'
         '  { name: "TEXT" data_type: TYPE_STRING dims: [ 1 ] }\n'
         '  { name: "IMAGE_SIZE" data_type: TYPE_INT32 dims: [ 1 ] }\n'
+        '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] }\n'
+        '  { name: "TEMPERATURE" data_type: TYPE_FP32 dims: [ 1 ] }\n'
+        '  { name: "TOP_P" data_type: TYPE_FP32 dims: [ 1 ] }\n'
         ']\n'
         'output [\n'
         '  { name: "OUTPUT_TEXT" data_type: TYPE_STRING dims: [ 1 ] }\n'
@@ -59,12 +62,21 @@ def _ensemble_config(model_name: str) -> str:
         "      model_version: -1\n"
         '      input_map { key: "TEXT" value: "TEXT" }\n'
         '      input_map { key: "IMAGE_SIZE" value: "IMAGE_SIZE" }\n'
+        '      input_map { key: "MAX_TOKENS" value: "MAX_TOKENS" }\n'
+        '      input_map { key: "TEMPERATURE" value: "TEMPERATURE" }\n'
+        '      input_map { key: "TOP_P" value: "TOP_P" }\n'
         '      output_map { key: "PROMPT" value: "PHASE7_PROMPT" }\n'
+        '      output_map { key: "MAX_TOKENS" value: "PHASE7_MAX_TOKENS" }\n'
+        '      output_map { key: "TEMPERATURE" value: "PHASE7_TEMPERATURE" }\n'
+        '      output_map { key: "TOP_P" value: "PHASE7_TOP_P" }\n'
         "    },\n"
         "    {\n"
         f'      model_name: "{INFER_MODEL}"\n'
         "      model_version: -1\n"
         '      input_map { key: "PROMPT" value: "PHASE7_PROMPT" }\n'
+        '      input_map { key: "MAX_TOKENS" value: "PHASE7_MAX_TOKENS" }\n'
+        '      input_map { key: "TEMPERATURE" value: "PHASE7_TEMPERATURE" }\n'
+        '      input_map { key: "TOP_P" value: "PHASE7_TOP_P" }\n'
         '      output_map { key: "TEXT" value: "PHASE7_TEXT" }\n'
         "    },\n"
         "    {\n"
@@ -108,13 +120,29 @@ def _preprocess_model_py() -> str:
         "        for request in requests:\n"
         "            text_in = pb_utils.get_input_tensor_by_name(request, 'TEXT')\n"
         "            size_in = pb_utils.get_input_tensor_by_name(request, 'IMAGE_SIZE')\n"
+        "            max_tokens_in = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
+        "            temperature_in = pb_utils.get_input_tensor_by_name(request, 'TEMPERATURE')\n"
+        "            top_p_in = pb_utils.get_input_tensor_by_name(request, 'TOP_P')\n"
         "            text_raw = text_in.as_numpy().reshape(-1)[0]\n"
         "            size_raw = size_in.as_numpy().reshape(-1)[0]\n"
+        "            max_tokens_raw = max_tokens_in.as_numpy().reshape(-1)[0]\n"
+        "            temperature_raw = temperature_in.as_numpy().reshape(-1)[0]\n"
+        "            top_p_raw = top_p_in.as_numpy().reshape(-1)[0]\n"
         "            text = _to_str(text_raw)\n"
         "            image_size = int(size_raw)\n"
+        "            max_tokens = int(max_tokens_raw)\n"
+        "            temperature = float(temperature_raw)\n"
+        "            top_p = float(top_p_raw)\n"
         "            prompt = f'[image_bytes={image_size}]\\n{text}'.strip()\n"
-        "            out = pb_utils.Tensor('PROMPT', np.array([prompt], dtype=object))\n"
-        "            responses.append(pb_utils.InferenceResponse(output_tensors=[out]))\n"
+        "            out_prompt = pb_utils.Tensor('PROMPT', np.array([prompt], dtype=object))\n"
+        "            out_max_tokens = pb_utils.Tensor('MAX_TOKENS', np.array([max_tokens], dtype=np.int32))\n"
+        "            out_temperature = pb_utils.Tensor('TEMPERATURE', np.array([temperature], dtype=np.float32))\n"
+        "            out_top_p = pb_utils.Tensor('TOP_P', np.array([top_p], dtype=np.float32))\n"
+        "            responses.append(\n"
+        "                pb_utils.InferenceResponse(\n"
+        "                    output_tensors=[out_prompt, out_max_tokens, out_temperature, out_top_p]\n"
+        "                )\n"
+        "            )\n"
         "        return responses\n"
     )
 
@@ -141,8 +169,18 @@ def _infer_model_py() -> str:
         "        responses = []\n"
         "        for request in requests:\n"
         "            prompt_in = pb_utils.get_input_tensor_by_name(request, 'PROMPT')\n"
+        "            max_tokens_in = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
+        "            temperature_in = pb_utils.get_input_tensor_by_name(request, 'TEMPERATURE')\n"
+        "            top_p_in = pb_utils.get_input_tensor_by_name(request, 'TOP_P')\n"
         "            prompt_raw = prompt_in.as_numpy().reshape(-1)[0]\n"
+        "            max_tokens_raw = max_tokens_in.as_numpy().reshape(-1)[0]\n"
+        "            temperature_raw = temperature_in.as_numpy().reshape(-1)[0]\n"
+        "            top_p_raw = top_p_in.as_numpy().reshape(-1)[0]\n"
+        "            max_tokens = int(max_tokens_raw)\n"
+        "            temperature = float(temperature_raw)\n"
+        "            top_p = float(top_p_raw)\n"
         "            text = _to_str(prompt_raw)\n"
+        "            del max_tokens, temperature, top_p\n"
         "            out = pb_utils.Tensor('TEXT', np.array([text], dtype=object))\n"
         "            responses.append(pb_utils.InferenceResponse(output_tensors=[out]))\n"
         "        return responses\n"
@@ -199,8 +237,19 @@ def prepare_triton_repo(output: Path, *, model_name: str = "phase7_mm_vllm") -> 
     (preprocess_root / "config.pbtxt").write_text(
         _python_backend_config(
             PREPROCESS_MODEL,
-            inputs=[("TEXT", "TYPE_STRING"), ("IMAGE_SIZE", "TYPE_INT32")],
-            outputs=[("PROMPT", "TYPE_STRING")],
+            inputs=[
+                ("TEXT", "TYPE_STRING"),
+                ("IMAGE_SIZE", "TYPE_INT32"),
+                ("MAX_TOKENS", "TYPE_INT32"),
+                ("TEMPERATURE", "TYPE_FP32"),
+                ("TOP_P", "TYPE_FP32"),
+            ],
+            outputs=[
+                ("PROMPT", "TYPE_STRING"),
+                ("MAX_TOKENS", "TYPE_INT32"),
+                ("TEMPERATURE", "TYPE_FP32"),
+                ("TOP_P", "TYPE_FP32"),
+            ],
         )
     )
     _write_python_model(preprocess_root, source=_preprocess_model_py())
@@ -208,7 +257,12 @@ def prepare_triton_repo(output: Path, *, model_name: str = "phase7_mm_vllm") -> 
     (infer_root / "config.pbtxt").write_text(
         _python_backend_config(
             INFER_MODEL,
-            inputs=[("PROMPT", "TYPE_STRING")],
+            inputs=[
+                ("PROMPT", "TYPE_STRING"),
+                ("MAX_TOKENS", "TYPE_INT32"),
+                ("TEMPERATURE", "TYPE_FP32"),
+                ("TOP_P", "TYPE_FP32"),
+            ],
             outputs=[("TEXT", "TYPE_STRING")],
         )
     )

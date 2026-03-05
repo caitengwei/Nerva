@@ -87,12 +87,18 @@ uv run python scripts/bench/infra/wait_service_ready.py \
 - `nerva`：前后处理在服务端 DAG（`mm_preprocess -> mm_vllm -> mm_postprocess`）内执行。
 - `vllm`：target adapter 使用与 Nerva 同语义的 pre/post 逻辑，连同推理一起计入端到端延迟。
 - `triton`：在 Triton model repository 内通过 ensemble 串联 `phase7_preprocess -> phase7_infer -> phase7_postprocess`，统一计入端到端延迟。
+- 三目标统一采样参数：`--max-tokens` / `--temperature` / `--top-p`。
+- 建议压测命令启用 `--require-real-backend`，避免 mock 结果混入对照数据。
 
 小流量冒烟（C=1,32）：
 
 ```bash
 uv run python scripts/bench/run_phase7.py \
   --target nerva --target vllm --target triton \
+  --max-tokens 256 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --require-real-backend \
   --workload phase7_mm_vllm \
   --concurrency-levels 1,32 \
   --warmup-seconds 10 \
@@ -104,6 +110,10 @@ uv run python scripts/bench/run_phase7.py \
 ```bash
 uv run python scripts/bench/run_phase7.py \
   --target nerva --target vllm --target triton \
+  --max-tokens 256 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --require-real-backend \
   --workload phase7_mm_vllm \
   --concurrency-levels 1,32,128,512,1000 \
   --warmup-seconds 60 \
@@ -115,6 +125,10 @@ uv run python scripts/bench/run_phase7.py \
 ```bash
 uv run python scripts/bench/run_phase7.py \
   --target nerva --target vllm --target triton \
+  --max-tokens 256 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --require-real-backend \
   --vllm-model /models \
   --workload phase7_mm_vllm \
   --concurrency-levels 1,32,128,512,1000 \

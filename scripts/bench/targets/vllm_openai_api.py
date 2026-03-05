@@ -36,6 +36,7 @@ class VLLMOpenAIAPITarget:
             "prompt": prompt,
             "max_tokens": int(payload.get("max_tokens", 64)),
             "temperature": float(payload.get("temperature", 0.0)),
+            "top_p": float(payload.get("top_p", 1.0)),
         }
         url = f"{self._base_url}/v1/completions"
 

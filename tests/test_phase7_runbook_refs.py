@@ -23,6 +23,9 @@ def test_runbook_mentions_full_e2e_contract() -> None:
     assert "full-e2e" in text
     assert "不再区分 infer-only" in text
     assert "ensemble" in text
+    assert "--max-tokens" in text
+    assert "--temperature" in text
+    assert "--top-p" in text
 
 
 def test_runbook_mentions_nerdctl_gpu_commands() -> None:
@@ -32,6 +35,7 @@ def test_runbook_mentions_nerdctl_gpu_commands() -> None:
     assert "vllm/vllm-openai:v0.6.0" in text
     assert "nvcr.io/nvidia/tritonserver:24.08-py3" in text
     assert "--vllm-model /models" in text
+    assert "--require-real-backend" in text
 
 
 def test_phase7_plan_has_no_agent_specific_instructions() -> None:

@@ -132,6 +132,8 @@ async def test_vllm_openai_api_parses_text_field() -> None:
     assert resp.ok is True
     assert resp.output_text == "hello from vllm"
     assert captured["prompt"] == "[image_bytes=16]\nhi"
+    assert captured["max_tokens"] == 64
+    assert captured["temperature"] == 0.0
 
 
 async def test_vllm_openai_api_postprocess_normalizes_output_text() -> None:
@@ -151,6 +153,39 @@ async def test_vllm_openai_api_postprocess_normalizes_output_text() -> None:
     resp = await target.infer({"text": "hi", "image_bytes": b"\x00" * 16}, deadline_ms=1000)
     assert resp.ok is True
     assert resp.output_text == "hello from vllm"
+
+
+async def test_vllm_openai_api_accepts_custom_sampling_params() -> None:
+    captured: dict[str, Any] = {}
+
+    async def sender(
+        url: str,
+        payload: dict[str, Any],
+        timeout_ms: int,
+    ) -> dict[str, Any]:
+        del url, timeout_ms
+        captured.update(payload)
+        return {"choices": [{"text": "ok"}]}
+
+    target = VLLMOpenAIAPITarget(
+        base_url="http://127.0.0.1:8001",
+        model_name="phase7",
+        sender=sender,
+    )
+    resp = await target.infer(
+        {
+            "text": "hi",
+            "image_bytes": b"\x00" * 16,
+            "max_tokens": 128,
+            "temperature": 0.2,
+            "top_p": 0.9,
+        },
+        deadline_ms=1000,
+    )
+    assert resp.ok is True
+    assert captured["max_tokens"] == 128
+    assert captured["temperature"] == 0.2
+    assert captured["top_p"] == 0.9
 
 
 async def test_vllm_openai_api_default_sender_reuses_async_client(monkeypatch: Any) -> None:
@@ -352,11 +387,20 @@ async def test_triton_infer_builds_full_e2e_inputs_for_ensemble() -> None:
         model_name="phase7_mm_vllm",
         sender=sender,
     )
-    resp = await target.infer({"text": "hi", "image_bytes": b"\x00" * 16}, deadline_ms=1000)
+    resp = await target.infer(
+        {
+            "text": "hi",
+            "image_bytes": b"\x00" * 16,
+            "max_tokens": 128,
+            "temperature": 0.2,
+            "top_p": 0.9,
+        },
+        deadline_ms=1000,
+    )
 
     assert resp.ok is True
     assert resp.output_text == "hello from triton"
     assert isinstance(captured.get("inputs"), list)
     inputs = captured["inputs"]
     names = {item["name"] for item in inputs}
-    assert names == {"TEXT", "IMAGE_SIZE"}
+    assert names == {"TEXT", "IMAGE_SIZE", "MAX_TOKENS", "TEMPERATURE", "TOP_P"}
