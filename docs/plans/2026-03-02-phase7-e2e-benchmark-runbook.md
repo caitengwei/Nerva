@@ -44,7 +44,10 @@ uv run python scripts/bench/infra/wait_service_ready.py \
 ## 3. 启动 Triton
 
 ```bash
-uv run python scripts/bench/infra/prepare_triton_repo.py --output /tmp/phase7-triton-repo
+uv run python scripts/bench/infra/prepare_triton_repo.py \
+  --output /tmp/phase7-triton-repo \
+  --vllm-url http://127.0.0.1:8001 \
+  --vllm-model /models
 
 uv run python scripts/bench/infra/start_triton_server.py \
   --model-repo /tmp/phase7-triton-repo \
@@ -56,7 +59,10 @@ uv run python scripts/bench/infra/start_triton_server.py \
 Linux + GPU（容器，`nerdctl`）：
 
 ```bash
-uv run python scripts/bench/infra/prepare_triton_repo.py --output /tmp/phase7-triton-repo
+uv run python scripts/bench/infra/prepare_triton_repo.py \
+  --output /tmp/phase7-triton-repo \
+  --vllm-url http://127.0.0.1:8001 \
+  --vllm-model /models
 
 nerdctl run --rm --gpus all --network host --ipc host \
   -v /tmp/phase7-triton-repo:/models \
@@ -86,7 +92,7 @@ uv run python scripts/bench/infra/wait_service_ready.py \
 `full-e2e` 口径定义：
 - `nerva`：前后处理在服务端 DAG（`mm_preprocess -> mm_vllm -> mm_postprocess`）内执行。
 - `vllm`：target adapter 使用与 Nerva 同语义的 pre/post 逻辑，连同推理一起计入端到端延迟。
-- `triton`：在 Triton model repository 内通过 ensemble 串联 `phase7_preprocess -> phase7_infer -> phase7_postprocess`，统一计入端到端延迟。
+- `triton`：在 Triton model repository 内通过 ensemble 串联 `phase7_preprocess -> phase7_infer -> phase7_postprocess`，其中 `phase7_infer` 通过 OpenAI-compatible `/v1/completions` 调用 vLLM，统一计入端到端延迟。
 - 三目标统一采样参数：`--max-tokens` / `--temperature` / `--top-p`。
 - 建议压测命令启用 `--require-real-backend`，避免 mock 结果混入对照数据。
 

@@ -147,9 +147,16 @@ def _preprocess_model_py() -> str:
     )
 
 
-def _infer_model_py() -> str:
+def _infer_model_py(*, vllm_base_url: str, vllm_model_name: str) -> str:
+    vllm_url = f"{vllm_base_url.rstrip('/')}/v1/completions"
+    quoted_url = vllm_url.replace("\\", "\\\\").replace("'", "\\'")
+    quoted_model = vllm_model_name.replace("\\", "\\\\").replace("'", "\\'")
     return (
         "from __future__ import annotations\n"
+        "\n"
+        "import json\n"
+        "import urllib.error\n"
+        "import urllib.request\n"
         "\n"
         "import numpy as np\n"
         "import triton_python_backend_utils as pb_utils\n"
@@ -164,6 +171,38 @@ def _infer_model_py() -> str:
         "class TritonPythonModel:\n"
         "    def initialize(self, args):\n"
         "        del args\n"
+        f"        self._vllm_url = '{quoted_url}'\n"
+        f"        self._vllm_model = '{quoted_model}'\n"
+        "\n"
+        "    def _request_vllm(self, *, prompt: str, max_tokens: int, temperature: float, top_p: float) -> str:\n"
+        "        body = {\n"
+        "            'model': self._vllm_model,\n"
+        "            'prompt': prompt,\n"
+        "            'max_tokens': max_tokens,\n"
+        "            'temperature': temperature,\n"
+        "            'top_p': top_p,\n"
+        "            'stream': False,\n"
+        "        }\n"
+        "        encoded = json.dumps(body).encode('utf-8')\n"
+        "        req = urllib.request.Request(\n"
+        "            self._vllm_url,\n"
+        "            data=encoded,\n"
+        "            headers={'Content-Type': 'application/json'},\n"
+        "            method='POST',\n"
+        "        )\n"
+        "        with urllib.request.urlopen(req, timeout=30) as response:\n"
+        "            payload = response.read().decode('utf-8', errors='ignore')\n"
+        "        data = json.loads(payload)\n"
+        "        choices = data.get('choices') if isinstance(data, dict) else None\n"
+        "        if not isinstance(choices, list) or not choices:\n"
+        "            raise RuntimeError('missing choices in vLLM response')\n"
+        "        first = choices[0]\n"
+        "        if not isinstance(first, dict):\n"
+        "            raise RuntimeError('invalid first choice in vLLM response')\n"
+        "        text = first.get('text')\n"
+        "        if not isinstance(text, str):\n"
+        "            raise RuntimeError('missing text in vLLM response')\n"
+        "        return text\n"
         "\n"
         "    def execute(self, requests):\n"
         "        responses = []\n"
@@ -179,8 +218,19 @@ def _infer_model_py() -> str:
         "            max_tokens = int(max_tokens_raw)\n"
         "            temperature = float(temperature_raw)\n"
         "            top_p = float(top_p_raw)\n"
-        "            text = _to_str(prompt_raw)\n"
-        "            del max_tokens, temperature, top_p\n"
+        "            prompt = _to_str(prompt_raw)\n"
+        "            try:\n"
+        "                text = self._request_vllm(\n"
+        "                    prompt=prompt,\n"
+        "                    max_tokens=max_tokens,\n"
+        "                    temperature=temperature,\n"
+        "                    top_p=top_p,\n"
+        "                )\n"
+        "            except Exception as exc:\n"
+        "                responses.append(\n"
+        "                    pb_utils.InferenceResponse(error=pb_utils.TritonError(str(exc)))\n"
+        "                )\n"
+        "                continue\n"
         "            out = pb_utils.Tensor('TEXT', np.array([text], dtype=object))\n"
         "            responses.append(pb_utils.InferenceResponse(output_tensors=[out]))\n"
         "        return responses\n"
@@ -218,9 +268,19 @@ def _postprocess_model_py() -> str:
     )
 
 
-def prepare_triton_repo(output: Path, *, model_name: str = "phase7_mm_vllm") -> Path:
+def prepare_triton_repo(
+    output: Path,
+    *,
+    model_name: str = "phase7_mm_vllm",
+    vllm_base_url: str = "http://127.0.0.1:8001",
+    vllm_model_name: str = "/models",
+) -> Path:
     if model_name in {PREPROCESS_MODEL, INFER_MODEL, POSTPROCESS_MODEL}:
         raise ValueError(f"model_name '{model_name}' conflicts with reserved stage model names")
+    if not vllm_base_url:
+        raise ValueError("vllm_base_url must not be empty")
+    if not vllm_model_name:
+        raise ValueError("vllm_model_name must not be empty")
 
     output.mkdir(parents=True, exist_ok=True)
 
@@ -266,7 +326,10 @@ def prepare_triton_repo(output: Path, *, model_name: str = "phase7_mm_vllm") -> 
             outputs=[("TEXT", "TYPE_STRING")],
         )
     )
-    _write_python_model(infer_root, source=_infer_model_py())
+    _write_python_model(
+        infer_root,
+        source=_infer_model_py(vllm_base_url=vllm_base_url, vllm_model_name=vllm_model_name),
+    )
 
     (postprocess_root / "config.pbtxt").write_text(
         _python_backend_config(
@@ -285,13 +348,20 @@ def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare Triton model repository for Phase 7")
     parser.add_argument("--output", required=True)
     parser.add_argument("--model-name", default="phase7_mm_vllm")
+    parser.add_argument("--vllm-url", default="http://127.0.0.1:8001")
+    parser.add_argument("--vllm-model", default="/models")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _cli(argv)
     output = Path(args.output)
-    repo = prepare_triton_repo(output, model_name=args.model_name)
+    repo = prepare_triton_repo(
+        output,
+        model_name=args.model_name,
+        vllm_base_url=args.vllm_url,
+        vllm_model_name=args.vllm_model,
+    )
     print(repo)
     return 0
 

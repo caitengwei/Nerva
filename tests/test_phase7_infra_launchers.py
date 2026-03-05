@@ -45,7 +45,12 @@ def test_start_triton_server_dry_run_command() -> None:
 
 
 def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
-    repo = prepare_triton_repo(tmp_path, model_name="phase7_mm_vllm")
+    repo = prepare_triton_repo(
+        tmp_path,
+        model_name="phase7_mm_vllm",
+        vllm_base_url="http://127.0.0.1:8001",
+        vllm_model_name="/models",
+    )
 
     assert (repo / "phase7_preprocess" / "config.pbtxt").exists()
     assert (repo / "phase7_preprocess" / "1" / "model.py").exists()
@@ -64,6 +69,10 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert 'name: "MAX_TOKENS"' in infer_cfg
     assert 'name: "TEMPERATURE"' in infer_cfg
     assert 'name: "TOP_P"' in infer_cfg
+    infer_py = (repo / "phase7_infer" / "1" / "model.py").read_text()
+    assert "/v1/completions" in infer_py
+    assert "http://127.0.0.1:8001" in infer_py
+    assert "/models" in infer_py
 
     ensemble_cfg = (repo / "phase7_mm_vllm" / "config.pbtxt").read_text()
     assert 'platform: "ensemble"' in ensemble_cfg

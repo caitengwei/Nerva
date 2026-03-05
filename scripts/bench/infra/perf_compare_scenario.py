@@ -5,6 +5,7 @@ from dataclasses import dataclass
 DEFAULT_CONCURRENCY_LEVELS = [1, 32, 128, 512, 1000]
 DEFAULT_VLLM_IMAGE = "vllm/vllm-openai:v0.6.0"
 DEFAULT_TRITON_IMAGE = "nvcr.io/nvidia/tritonserver:24.08-py3"
+DEFAULT_VLLM_URL = "http://127.0.0.1:8001"
 DEFAULT_VLLM_MODEL_NAME = "/models"
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 1.0
@@ -33,6 +34,7 @@ def build_linux_gpu_perf_compare_scenario(
     triton_repo: str,
     container_cli: str = "nerdctl",
     vllm_image: str = DEFAULT_VLLM_IMAGE,
+    vllm_url: str = DEFAULT_VLLM_URL,
     vllm_model_name: str = DEFAULT_VLLM_MODEL_NAME,
     triton_image: str = DEFAULT_TRITON_IMAGE,
     workload: str = "phase7_mm_vllm",
@@ -50,6 +52,8 @@ def build_linux_gpu_perf_compare_scenario(
         raise ValueError("triton_repo must not be empty")
     if not container_cli:
         raise ValueError("container_cli must not be empty")
+    if not vllm_url:
+        raise ValueError("vllm_url must not be empty")
     if not vllm_model_name:
         raise ValueError("vllm_model_name must not be empty")
     if warmup_seconds <= 0:
@@ -110,6 +114,10 @@ def build_linux_gpu_perf_compare_scenario(
         triton_repo,
         "--model-name",
         workload,
+        "--vllm-url",
+        vllm_url,
+        "--vllm-model",
+        vllm_model_name,
     ]
     triton_container_cmd = [
         container_cli,
@@ -149,6 +157,8 @@ def build_linux_gpu_perf_compare_scenario(
         str(top_p),
         "--vllm-model",
         vllm_model_name,
+        "--vllm-url",
+        vllm_url,
         "--workload",
         workload,
         "--concurrency-levels",
