@@ -50,6 +50,7 @@ def _ensemble_config(model_name: str) -> str:
         '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] }\n'
         '  { name: "TEMPERATURE" data_type: TYPE_FP32 dims: [ 1 ] }\n'
         '  { name: "TOP_P" data_type: TYPE_FP32 dims: [ 1 ] }\n'
+        '  { name: "DEADLINE_MS" data_type: TYPE_INT32 dims: [ 1 ] }\n'
         ']\n'
         'output [\n'
         '  { name: "OUTPUT_TEXT" data_type: TYPE_STRING dims: [ 1 ] }\n'
@@ -65,10 +66,12 @@ def _ensemble_config(model_name: str) -> str:
         '      input_map { key: "MAX_TOKENS" value: "MAX_TOKENS" }\n'
         '      input_map { key: "TEMPERATURE" value: "TEMPERATURE" }\n'
         '      input_map { key: "TOP_P" value: "TOP_P" }\n'
+        '      input_map { key: "DEADLINE_MS" value: "DEADLINE_MS" }\n'
         '      output_map { key: "PROMPT" value: "PHASE7_PROMPT" }\n'
         '      output_map { key: "MAX_TOKENS" value: "PHASE7_MAX_TOKENS" }\n'
         '      output_map { key: "TEMPERATURE" value: "PHASE7_TEMPERATURE" }\n'
         '      output_map { key: "TOP_P" value: "PHASE7_TOP_P" }\n'
+        '      output_map { key: "DEADLINE_MS" value: "PHASE7_DEADLINE_MS" }\n'
         "    },\n"
         "    {\n"
         f'      model_name: "{INFER_MODEL}"\n'
@@ -77,6 +80,7 @@ def _ensemble_config(model_name: str) -> str:
         '      input_map { key: "MAX_TOKENS" value: "PHASE7_MAX_TOKENS" }\n'
         '      input_map { key: "TEMPERATURE" value: "PHASE7_TEMPERATURE" }\n'
         '      input_map { key: "TOP_P" value: "PHASE7_TOP_P" }\n'
+        '      input_map { key: "DEADLINE_MS" value: "PHASE7_DEADLINE_MS" }\n'
         '      output_map { key: "TEXT" value: "PHASE7_TEXT" }\n'
         "    },\n"
         "    {\n"
@@ -123,24 +127,34 @@ def _preprocess_model_py() -> str:
         "            max_tokens_in = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
         "            temperature_in = pb_utils.get_input_tensor_by_name(request, 'TEMPERATURE')\n"
         "            top_p_in = pb_utils.get_input_tensor_by_name(request, 'TOP_P')\n"
+        "            deadline_in = pb_utils.get_input_tensor_by_name(request, 'DEADLINE_MS')\n"
         "            text_raw = text_in.as_numpy().reshape(-1)[0]\n"
         "            size_raw = size_in.as_numpy().reshape(-1)[0]\n"
         "            max_tokens_raw = max_tokens_in.as_numpy().reshape(-1)[0]\n"
         "            temperature_raw = temperature_in.as_numpy().reshape(-1)[0]\n"
         "            top_p_raw = top_p_in.as_numpy().reshape(-1)[0]\n"
+        "            deadline_raw = deadline_in.as_numpy().reshape(-1)[0]\n"
         "            text = _to_str(text_raw)\n"
         "            image_size = int(size_raw)\n"
         "            max_tokens = int(max_tokens_raw)\n"
         "            temperature = float(temperature_raw)\n"
         "            top_p = float(top_p_raw)\n"
+        "            deadline_ms = max(int(deadline_raw), 1)\n"
         "            prompt = f'[image_bytes={image_size}]\\n{text}'.strip()\n"
         "            out_prompt = pb_utils.Tensor('PROMPT', np.array([prompt], dtype=object))\n"
         "            out_max_tokens = pb_utils.Tensor('MAX_TOKENS', np.array([max_tokens], dtype=np.int32))\n"
         "            out_temperature = pb_utils.Tensor('TEMPERATURE', np.array([temperature], dtype=np.float32))\n"
         "            out_top_p = pb_utils.Tensor('TOP_P', np.array([top_p], dtype=np.float32))\n"
+        "            out_deadline_ms = pb_utils.Tensor('DEADLINE_MS', np.array([deadline_ms], dtype=np.int32))\n"
         "            responses.append(\n"
         "                pb_utils.InferenceResponse(\n"
-        "                    output_tensors=[out_prompt, out_max_tokens, out_temperature, out_top_p]\n"
+        "                    output_tensors=[\n"
+        "                        out_prompt,\n"
+        "                        out_max_tokens,\n"
+        "                        out_temperature,\n"
+        "                        out_top_p,\n"
+        "                        out_deadline_ms,\n"
+        "                    ]\n"
         "                )\n"
         "            )\n"
         "        return responses\n"
@@ -174,7 +188,7 @@ def _infer_model_py(*, vllm_base_url: str, vllm_model_name: str) -> str:
         f"        self._vllm_url = '{quoted_url}'\n"
         f"        self._vllm_model = '{quoted_model}'\n"
         "\n"
-        "    def _request_vllm(self, *, prompt: str, max_tokens: int, temperature: float, top_p: float) -> str:\n"
+        "    def _request_vllm(self, *, prompt: str, max_tokens: int, temperature: float, top_p: float, deadline_ms: int) -> str:\n"
         "        body = {\n"
         "            'model': self._vllm_model,\n"
         "            'prompt': prompt,\n"
@@ -190,7 +204,8 @@ def _infer_model_py(*, vllm_base_url: str, vllm_model_name: str) -> str:
         "            headers={'Content-Type': 'application/json'},\n"
         "            method='POST',\n"
         "        )\n"
-        "        with urllib.request.urlopen(req, timeout=30) as response:\n"
+        "        timeout_s = max(float(deadline_ms) / 1000.0, 0.001)\n"
+        "        with urllib.request.urlopen(req, timeout=timeout_s) as response:\n"
         "            payload = response.read().decode('utf-8', errors='ignore')\n"
         "        data = json.loads(payload)\n"
         "        choices = data.get('choices') if isinstance(data, dict) else None\n"
@@ -211,13 +226,16 @@ def _infer_model_py(*, vllm_base_url: str, vllm_model_name: str) -> str:
         "            max_tokens_in = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
         "            temperature_in = pb_utils.get_input_tensor_by_name(request, 'TEMPERATURE')\n"
         "            top_p_in = pb_utils.get_input_tensor_by_name(request, 'TOP_P')\n"
+        "            deadline_in = pb_utils.get_input_tensor_by_name(request, 'DEADLINE_MS')\n"
         "            prompt_raw = prompt_in.as_numpy().reshape(-1)[0]\n"
         "            max_tokens_raw = max_tokens_in.as_numpy().reshape(-1)[0]\n"
         "            temperature_raw = temperature_in.as_numpy().reshape(-1)[0]\n"
         "            top_p_raw = top_p_in.as_numpy().reshape(-1)[0]\n"
+        "            deadline_raw = deadline_in.as_numpy().reshape(-1)[0]\n"
         "            max_tokens = int(max_tokens_raw)\n"
         "            temperature = float(temperature_raw)\n"
         "            top_p = float(top_p_raw)\n"
+        "            deadline_ms = max(int(deadline_raw), 1)\n"
         "            prompt = _to_str(prompt_raw)\n"
         "            try:\n"
         "                text = self._request_vllm(\n"
@@ -225,6 +243,7 @@ def _infer_model_py(*, vllm_base_url: str, vllm_model_name: str) -> str:
         "                    max_tokens=max_tokens,\n"
         "                    temperature=temperature,\n"
         "                    top_p=top_p,\n"
+        "                    deadline_ms=deadline_ms,\n"
         "                )\n"
         "            except Exception as exc:\n"
         "                responses.append(\n"
@@ -303,12 +322,14 @@ def prepare_triton_repo(
                 ("MAX_TOKENS", "TYPE_INT32"),
                 ("TEMPERATURE", "TYPE_FP32"),
                 ("TOP_P", "TYPE_FP32"),
+                ("DEADLINE_MS", "TYPE_INT32"),
             ],
             outputs=[
                 ("PROMPT", "TYPE_STRING"),
                 ("MAX_TOKENS", "TYPE_INT32"),
                 ("TEMPERATURE", "TYPE_FP32"),
                 ("TOP_P", "TYPE_FP32"),
+                ("DEADLINE_MS", "TYPE_INT32"),
             ],
         )
     )
@@ -322,6 +343,7 @@ def prepare_triton_repo(
                 ("MAX_TOKENS", "TYPE_INT32"),
                 ("TEMPERATURE", "TYPE_FP32"),
                 ("TOP_P", "TYPE_FP32"),
+                ("DEADLINE_MS", "TYPE_INT32"),
             ],
             outputs=[("TEXT", "TYPE_STRING")],
         )

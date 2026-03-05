@@ -22,10 +22,12 @@ def test_runbook_mentions_full_e2e_contract() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     assert "full-e2e" in text
     assert "不再区分 infer-only" in text
+    assert "PHASE7_VLLM_MODEL_PATH=<MODEL_PATH>" in text
     assert "ensemble" in text
     assert "--max-tokens" in text
     assert "--temperature" in text
     assert "--top-p" in text
+    assert "按目标分三次执行" in text
 
 
 def test_runbook_mentions_nerdctl_gpu_commands() -> None:

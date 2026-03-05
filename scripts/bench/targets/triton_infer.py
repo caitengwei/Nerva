@@ -31,7 +31,7 @@ class TritonInferTarget:
     async def infer(self, payload: dict[str, Any], *, deadline_ms: int) -> TargetResponse:
         start_ns = time.perf_counter_ns()
         request_body = {
-            "inputs": _build_triton_inputs(payload),
+            "inputs": _build_triton_inputs(payload, deadline_ms=deadline_ms),
         }
         url = f"{self._base_url}/v2/models/{self._model_name}/infer"
 
@@ -126,13 +126,18 @@ def _latency_ms(start_ns: int) -> float:
     return (time.perf_counter_ns() - start_ns) / 1_000_000.0
 
 
-def _build_triton_inputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_triton_inputs(payload: dict[str, Any], *, deadline_ms: int) -> list[dict[str, Any]]:
     if "text" in payload or "image_bytes" in payload or "image_size" in payload:
         text = str(payload.get("text", ""))
         image_size = _image_size_from_payload(payload)
         max_tokens = _int_payload(payload.get("max_tokens"), default=256, minimum=1)
         temperature = _float_payload(payload.get("temperature"), default=1.0, minimum=0.0)
         top_p = _float_payload(payload.get("top_p"), default=1.0, minimum=1e-6)
+        per_request_deadline_ms = _int_payload(
+            payload.get("deadline_ms"),
+            default=deadline_ms,
+            minimum=1,
+        )
         return [
             {
                 "name": "TEXT",
@@ -163,6 +168,12 @@ def _build_triton_inputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "shape": [1],
                 "datatype": "FP32",
                 "data": [top_p],
+            },
+            {
+                "name": "DEADLINE_MS",
+                "shape": [1],
+                "datatype": "INT32",
+                "data": [per_request_deadline_ms],
             },
         ]
 

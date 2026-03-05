@@ -18,7 +18,7 @@ class PerfCompareScenario:
     vllm_container_cmd: list[str]
     triton_prepare_cmd: list[str]
     triton_container_cmd: list[str]
-    benchmark_cmd: list[str]
+    benchmark_cmd_by_target: dict[str, list[str]]
 
 
 def _validate_positive_levels(levels: list[int]) -> None:
@@ -26,6 +26,55 @@ def _validate_positive_levels(levels: list[int]) -> None:
         raise ValueError("concurrency_levels must not be empty")
     if any(level <= 0 for level in levels):
         raise ValueError("concurrency_levels must be positive integers")
+
+
+def _build_benchmark_cmd(
+    *,
+    targets: list[str],
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    vllm_model_name: str,
+    vllm_url: str,
+    workload: str,
+    level_arg: str,
+    warmup_seconds: int,
+    sample_seconds: int,
+    require_real_backend: bool,
+) -> list[str]:
+    cmd: list[str] = [
+        "uv",
+        "run",
+        "python",
+        "scripts/bench/run_phase7.py",
+    ]
+    for target in targets:
+        cmd.extend(["--target", target])
+    cmd.extend(
+        [
+            "--max-tokens",
+            str(max_tokens),
+            "--temperature",
+            str(temperature),
+            "--top-p",
+            str(top_p),
+            "--vllm-model",
+            vllm_model_name,
+            "--vllm-url",
+            vllm_url,
+            "--workload",
+            workload,
+            "--concurrency-levels",
+            level_arg,
+            "--warmup-seconds",
+            str(warmup_seconds),
+            "--sample-seconds",
+            str(sample_seconds),
+        ]
+    )
+    if require_real_backend:
+        cmd.append("--require-real-backend")
+    return cmd
 
 
 def build_linux_gpu_perf_compare_scenario(
@@ -76,6 +125,8 @@ def build_linux_gpu_perf_compare_scenario(
     level_arg = ",".join(str(level) for level in levels)
 
     nerva_server_cmd = [
+        "env",
+        f"PHASE7_VLLM_MODEL_PATH={model_path}",
         "uv",
         "run",
         "uvicorn",
@@ -138,42 +189,51 @@ def build_linux_gpu_perf_compare_scenario(
         "--grpc-port=8003",
         "--metrics-port=8004",
     ]
-    benchmark_cmd = [
-        "uv",
-        "run",
-        "python",
-        "scripts/bench/run_phase7.py",
-        "--target",
-        "nerva",
-        "--target",
-        "vllm",
-        "--target",
-        "triton",
-        "--max-tokens",
-        str(max_tokens),
-        "--temperature",
-        str(temperature),
-        "--top-p",
-        str(top_p),
-        "--vllm-model",
-        vllm_model_name,
-        "--vllm-url",
-        vllm_url,
-        "--workload",
-        workload,
-        "--concurrency-levels",
-        level_arg,
-        "--warmup-seconds",
-        str(warmup_seconds),
-        "--sample-seconds",
-        str(sample_seconds),
-    ]
-    if require_real_backend:
-        benchmark_cmd.append("--require-real-backend")
+    benchmark_cmd_by_target = {
+        "nerva": _build_benchmark_cmd(
+            targets=["nerva"],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            vllm_model_name=vllm_model_name,
+            vllm_url=vllm_url,
+            workload=workload,
+            level_arg=level_arg,
+            warmup_seconds=warmup_seconds,
+            sample_seconds=sample_seconds,
+            require_real_backend=require_real_backend,
+        ),
+        "vllm": _build_benchmark_cmd(
+            targets=["vllm"],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            vllm_model_name=vllm_model_name,
+            vllm_url=vllm_url,
+            workload=workload,
+            level_arg=level_arg,
+            warmup_seconds=warmup_seconds,
+            sample_seconds=sample_seconds,
+            require_real_backend=require_real_backend,
+        ),
+        "triton": _build_benchmark_cmd(
+            targets=["triton"],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            vllm_model_name=vllm_model_name,
+            vllm_url=vllm_url,
+            workload=workload,
+            level_arg=level_arg,
+            warmup_seconds=warmup_seconds,
+            sample_seconds=sample_seconds,
+            require_real_backend=require_real_backend,
+        ),
+    }
     return PerfCompareScenario(
         nerva_server_cmd=nerva_server_cmd,
         vllm_container_cmd=vllm_container_cmd,
         triton_prepare_cmd=triton_prepare_cmd,
         triton_container_cmd=triton_container_cmd,
-        benchmark_cmd=benchmark_cmd,
+        benchmark_cmd_by_target=benchmark_cmd_by_target,
     )

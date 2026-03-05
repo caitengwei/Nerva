@@ -5,6 +5,7 @@
 ## 1. 启动 Nerva Phase 7 服务
 
 ```bash
+PHASE7_VLLM_MODEL_PATH=<MODEL_PATH> \
 uv run uvicorn examples.phase7_multimodal_vllm_server:app --host 127.0.0.1 --port 8080
 ```
 
@@ -95,12 +96,14 @@ uv run python scripts/bench/infra/wait_service_ready.py \
 - `triton`：在 Triton model repository 内通过 ensemble 串联 `phase7_preprocess -> phase7_infer -> phase7_postprocess`，其中 `phase7_infer` 通过 OpenAI-compatible `/v1/completions` 调用 vLLM，统一计入端到端延迟。
 - 三目标统一采样参数：`--max-tokens` / `--temperature` / `--top-p`。
 - 建议压测命令启用 `--require-real-backend`，避免 mock 结果混入对照数据。
+- 采样原则：按目标分三次执行，每次仅启动当前目标所需服务，避免同机多服务并存导致资源争用污染结果。
 
-小流量冒烟（C=1,32）：
+小流量冒烟（C=1,32），按目标分别执行：
 
 ```bash
+# nerva（仅启动 nerva）
 uv run python scripts/bench/run_phase7.py \
-  --target nerva --target vllm --target triton \
+  --target nerva \
   --max-tokens 256 \
   --temperature 1.0 \
   --top-p 1.0 \
@@ -111,11 +114,42 @@ uv run python scripts/bench/run_phase7.py \
   --sample-seconds 30
 ```
 
-全矩阵（含 C=1000）：
+```bash
+# vllm（仅启动 vllm）
+uv run python scripts/bench/run_phase7.py \
+  --target vllm \
+  --max-tokens 256 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --require-real-backend \
+  --vllm-model /models \
+  --workload phase7_mm_vllm \
+  --concurrency-levels 1,32 \
+  --warmup-seconds 10 \
+  --sample-seconds 30
+```
 
 ```bash
+# triton（启动 vllm + triton）
 uv run python scripts/bench/run_phase7.py \
-  --target nerva --target vllm --target triton \
+  --target triton \
+  --max-tokens 256 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --require-real-backend \
+  --vllm-model /models \
+  --workload phase7_mm_vllm \
+  --concurrency-levels 1,32 \
+  --warmup-seconds 10 \
+  --sample-seconds 30
+```
+
+全矩阵（含 C=1000），按目标分别执行：
+
+```bash
+# nerva（仅启动 nerva）
+uv run python scripts/bench/run_phase7.py \
+  --target nerva \
   --max-tokens 256 \
   --temperature 1.0 \
   --top-p 1.0 \
@@ -126,11 +160,25 @@ uv run python scripts/bench/run_phase7.py \
   --sample-seconds 300
 ```
 
-容器模式（若 vLLM 用 `--model /models` 启动）请追加模型名参数：
+```bash
+# vllm（仅启动 vllm）
+uv run python scripts/bench/run_phase7.py \
+  --target vllm \
+  --max-tokens 256 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --require-real-backend \
+  --vllm-model /models \
+  --workload phase7_mm_vllm \
+  --concurrency-levels 1,32,128,512,1000 \
+  --warmup-seconds 60 \
+  --sample-seconds 300
+```
 
 ```bash
+# triton（启动 vllm + triton）
 uv run python scripts/bench/run_phase7.py \
-  --target nerva --target vllm --target triton \
+  --target triton \
   --max-tokens 256 \
   --temperature 1.0 \
   --top-p 1.0 \

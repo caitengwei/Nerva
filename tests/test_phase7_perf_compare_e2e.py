@@ -54,6 +54,9 @@ def test_linux_gpu_perf_compare_scenario_uses_nerdctl() -> None:
         triton_repo="/tmp/phase7-triton-repo",
     )
 
+    nerva_cmd = " ".join(scenario.nerva_server_cmd)
+    assert "PHASE7_VLLM_MODEL_PATH=/models/Qwen/Qwen2.5-7B-Instruct" in nerva_cmd
+
     assert scenario.vllm_container_cmd[:2] == ["nerdctl", "run"]
     assert "--gpus" in scenario.vllm_container_cmd
     assert "all" in scenario.vllm_container_cmd
@@ -66,16 +69,27 @@ def test_linux_gpu_perf_compare_scenario_uses_nerdctl() -> None:
     assert "--vllm-url http://127.0.0.1:8001" in prepare_cmd
     assert "--vllm-model /models" in prepare_cmd
 
-    bench_cmd = " ".join(scenario.benchmark_cmd)
-    assert "--target nerva" in bench_cmd
-    assert "--target vllm" in bench_cmd
-    assert "--target triton" in bench_cmd
-    assert "--vllm-url http://127.0.0.1:8001" in bench_cmd
-    assert "--require-real-backend" in bench_cmd
-    assert "--max-tokens 256" in bench_cmd
-    assert "--temperature 1.0" in bench_cmd
-    assert "--top-p 1.0" in bench_cmd
-    assert "--vllm-model /models" in bench_cmd
+    nerva_bench_cmd = " ".join(scenario.benchmark_cmd_by_target["nerva"])
+    assert "--target nerva" in nerva_bench_cmd
+    assert "--target vllm" not in nerva_bench_cmd
+    assert "--target triton" not in nerva_bench_cmd
+
+    vllm_bench_cmd = " ".join(scenario.benchmark_cmd_by_target["vllm"])
+    assert "--target vllm" in vllm_bench_cmd
+    assert "--target nerva" not in vllm_bench_cmd
+    assert "--target triton" not in vllm_bench_cmd
+
+    triton_bench_cmd = " ".join(scenario.benchmark_cmd_by_target["triton"])
+    assert "--target triton" in triton_bench_cmd
+    assert "--target nerva" not in triton_bench_cmd
+    assert "--target vllm" not in triton_bench_cmd
+    assert "--vllm-url http://127.0.0.1:8001" in triton_bench_cmd
+    assert "--require-real-backend" in triton_bench_cmd
+    assert "--max-tokens 256" in triton_bench_cmd
+    assert "--temperature 1.0" in triton_bench_cmd
+    assert "--top-p 1.0" in triton_bench_cmd
+    assert "--vllm-model /models" in triton_bench_cmd
+
     assert "vllm/vllm-openai:v0.6.0" in " ".join(scenario.vllm_container_cmd)
 
 

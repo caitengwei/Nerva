@@ -63,22 +63,26 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert 'name: "MAX_TOKENS"' in preprocess_cfg
     assert 'name: "TEMPERATURE"' in preprocess_cfg
     assert 'name: "TOP_P"' in preprocess_cfg
+    assert 'name: "DEADLINE_MS"' in preprocess_cfg
 
     infer_cfg = (repo / "phase7_infer" / "config.pbtxt").read_text()
     assert 'name: "PROMPT"' in infer_cfg
     assert 'name: "MAX_TOKENS"' in infer_cfg
     assert 'name: "TEMPERATURE"' in infer_cfg
     assert 'name: "TOP_P"' in infer_cfg
+    assert 'name: "DEADLINE_MS"' in infer_cfg
     infer_py = (repo / "phase7_infer" / "1" / "model.py").read_text()
     assert "/v1/completions" in infer_py
     assert "http://127.0.0.1:8001" in infer_py
     assert "/models" in infer_py
+    assert "deadline_ms" in infer_py
 
     ensemble_cfg = (repo / "phase7_mm_vllm" / "config.pbtxt").read_text()
     assert 'platform: "ensemble"' in ensemble_cfg
     assert 'model_name: "phase7_preprocess"' in ensemble_cfg
     assert 'model_name: "phase7_infer"' in ensemble_cfg
     assert 'model_name: "phase7_postprocess"' in ensemble_cfg
+    assert 'name: "DEADLINE_MS"' in ensemble_cfg
 
 
 def test_vllm_launch_mode_requires_explicit_mock_opt_in() -> None:

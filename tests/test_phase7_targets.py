@@ -403,4 +403,6 @@ async def test_triton_infer_builds_full_e2e_inputs_for_ensemble() -> None:
     assert isinstance(captured.get("inputs"), list)
     inputs = captured["inputs"]
     names = {item["name"] for item in inputs}
-    assert names == {"TEXT", "IMAGE_SIZE", "MAX_TOKENS", "TEMPERATURE", "TOP_P"}
+    assert names == {"TEXT", "IMAGE_SIZE", "MAX_TOKENS", "TEMPERATURE", "TOP_P", "DEADLINE_MS"}
+    by_name = {item["name"]: item for item in inputs}
+    assert by_name["DEADLINE_MS"]["data"] == [1000]
