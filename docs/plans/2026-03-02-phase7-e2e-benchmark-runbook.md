@@ -97,6 +97,7 @@ uv run python scripts/bench/infra/wait_service_ready.py \
 - 三目标统一采样参数：`--max-tokens` / `--temperature` / `--top-p`。
 - 建议压测命令启用 `--require-real-backend`，避免 mock 结果混入对照数据。
 - 采样原则：按目标分三次执行，每次仅启动当前目标所需服务，避免同机多服务并存导致资源争用污染结果。
+- TODO（下一个迭代）：`triton` 目标在 `--require-real-backend` 下，增加对其上游 vLLM 实例是否为 real 的联合校验。
 
 小流量冒烟（C=1,32），按目标分别执行：
 

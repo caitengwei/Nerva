@@ -211,6 +211,9 @@ async def _detect_backend_mode(
     *,
     health_getter: Any = _default_health_getter,
 ) -> str:
+    # TODO(next-iteration): for target_name == "triton", also verify the upstream vLLM
+    # dependency is running in real mode. Current check only validates Triton's own
+    # health endpoint, which can miss "real triton + mock vllm" mixed deployments.
     if target_name == "nerva":
         return "real"
 
