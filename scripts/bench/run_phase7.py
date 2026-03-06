@@ -5,6 +5,7 @@ import asyncio
 import csv
 import datetime as dt
 import json
+import math
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,7 @@ DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOP_P = 1.0
 FULL_E2E_CONTRACT = "full-e2e"
+# Process-global client reused within one script run; closed in _amain finally.
 _HEALTH_CLIENT: httpx.AsyncClient | None = None
 
 
@@ -172,10 +174,10 @@ def _phase7_source_input(
         raise ValueError(f"unsupported workload: {workload}")
     if max_tokens <= 0:
         raise ValueError("max_tokens must be > 0")
-    if top_p <= 0:
-        raise ValueError("top_p must be > 0")
-    if temperature < 0:
-        raise ValueError("temperature must be >= 0")
+    if not math.isfinite(top_p) or top_p <= 0 or top_p > 1:
+        raise ValueError("top_p must be finite and in (0, 1]")
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("temperature must be finite and >= 0")
 
     text = f"phase7 benchmark sample #{seq}"
     return {
@@ -227,9 +229,8 @@ async def _detect_backend_mode(
     # dependency is running in real mode. Current check only validates Triton's own
     # health endpoint, which can miss "real triton + mock vllm" mixed deployments.
     if target_name == "nerva":
-        return "real"
-
-    if target_name == "vllm":
+        url = f"{args.nerva_url.rstrip('/')}/v1/health"
+    elif target_name == "vllm":
         url = f"{args.vllm_url.rstrip('/')}/health"
     elif target_name == "triton":
         url = f"{args.triton_url.rstrip('/')}/v2/health/ready"
@@ -246,7 +247,7 @@ async def _detect_backend_mode(
 
     if isinstance(payload, dict):
         backend = str(payload.get("backend", "")).strip().lower()
-        if backend in {"mock_vllm", "mock_triton"}:
+        if backend == "mock" or backend.startswith("mock_"):
             return "mock"
 
     return "real"
@@ -359,7 +360,7 @@ def _cli(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--require-real-backend",
         action="store_true",
-        help="fail if vllm/triton health endpoints report mock backend mode",
+        help="fail if target health endpoint reports non-real backend mode",
     )
 
     parser.add_argument("--nerva-url", default="http://127.0.0.1:8080")

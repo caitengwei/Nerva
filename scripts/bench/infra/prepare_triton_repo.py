@@ -29,6 +29,8 @@ def _python_backend_config(
     return (
         f'name: "{model_name}"\n'
         'backend: "python"\n'
+        # Keep batching disabled for full-e2e comparability and to match the scalar
+        # request handling implemented in generated Python backend stages.
         'max_batch_size: 0\n'
         'input [\n'
         f"{input_entries}\n"
@@ -43,6 +45,8 @@ def _ensemble_config(model_name: str) -> str:
     return (
         f'name: "{model_name}"\n'
         'platform: "ensemble"\n'
+        # Keep batching disabled for full-e2e comparability and to match the scalar
+        # request handling implemented in generated Python backend stages.
         'max_batch_size: 0\n'
         'input [\n'
         '  { name: "TEXT" data_type: TYPE_STRING dims: [ 1 ] }\n'
@@ -163,8 +167,8 @@ def _preprocess_model_py() -> str:
 
 def _infer_model_py(*, vllm_base_url: str, vllm_model_name: str) -> str:
     vllm_url = f"{vllm_base_url.rstrip('/')}/v1/completions"
-    quoted_url = vllm_url.replace("\\", "\\\\").replace("'", "\\'")
-    quoted_model = vllm_model_name.replace("\\", "\\\\").replace("'", "\\'")
+    vllm_url_literal = repr(vllm_url)
+    vllm_model_literal = repr(vllm_model_name)
     return (
         "from __future__ import annotations\n"
         "\n"
@@ -185,8 +189,8 @@ def _infer_model_py(*, vllm_base_url: str, vllm_model_name: str) -> str:
         "class TritonPythonModel:\n"
         "    def initialize(self, args):\n"
         "        del args\n"
-        f"        self._vllm_url = '{quoted_url}'\n"
-        f"        self._vllm_model = '{quoted_model}'\n"
+        f"        self._vllm_url = {vllm_url_literal}\n"
+        f"        self._vllm_model = {vllm_model_literal}\n"
         "\n"
         "    def _request_vllm(self, *, prompt: str, max_tokens: int, temperature: float, top_p: float, deadline_ms: int) -> str:\n"
         "        body = {\n"

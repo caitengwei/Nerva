@@ -106,10 +106,15 @@ def _resolve_model_name(model_repo: str) -> str:
     if os.path.isdir(os.path.join(model_repo, preferred)):
         return preferred
 
+    stage_models = {"phase7_preprocess", "phase7_infer", "phase7_postprocess"}
+    candidates: list[str] = []
     with os.scandir(model_repo) as entries:
         for entry in entries:
-            if entry.is_dir():
-                return entry.name
+            if entry.is_dir() and entry.name not in stage_models:
+                candidates.append(entry.name)
+
+    if candidates:
+        return sorted(candidates)[0]
 
     return preferred
 

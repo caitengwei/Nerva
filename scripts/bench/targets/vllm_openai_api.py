@@ -8,6 +8,10 @@ import httpx
 from scripts.bench.targets.base import TargetResponse
 
 JSONSender = Callable[[str, dict[str, Any], int], Awaitable[dict[str, Any]]]
+# Keep these defaults aligned with scripts/bench/run_phase7.py benchmark defaults.
+DEFAULT_MAX_TOKENS = 256
+DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TOP_P = 1.0
 
 
 class VLLMOpenAIAPITarget:
@@ -34,9 +38,9 @@ class VLLMOpenAIAPITarget:
         request_body = {
             "model": self._model_name,
             "prompt": prompt,
-            "max_tokens": int(payload.get("max_tokens", 64)),
-            "temperature": float(payload.get("temperature", 0.0)),
-            "top_p": float(payload.get("top_p", 1.0)),
+            "max_tokens": int(payload.get("max_tokens", DEFAULT_MAX_TOKENS)),
+            "temperature": float(payload.get("temperature", DEFAULT_TEMPERATURE)),
+            "top_p": float(payload.get("top_p", DEFAULT_TOP_P)),
         }
         url = f"{self._base_url}/v1/completions"
 

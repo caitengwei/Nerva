@@ -4,6 +4,7 @@ import datetime as dt
 import json
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from scripts.bench.run_phase7 import (
     BenchmarkRun,
     _detect_backend_mode,
@@ -86,28 +87,14 @@ async def test_execute_benchmark_run_generates_non_zero_metrics() -> None:
     assert meta["deadline_ms"] == 100
 
 
-def test_payload_for_targets_uses_real_newline_and_binary_bytes() -> None:
-    nerva_payload = _payload_for_target(seq=7, workload="phase7_mm_vllm")
-    assert nerva_payload["text"] == "phase7 benchmark sample #7"
-    assert nerva_payload["image_bytes"] == b"\x00" * 16
-    assert len(nerva_payload["image_bytes"]) == 16
-    assert nerva_payload["max_tokens"] == 256
-    assert nerva_payload["temperature"] == 1.0
-    assert nerva_payload["top_p"] == 1.0
-
-    vllm_payload = _payload_for_target(seq=7, workload="phase7_mm_vllm")
-    assert vllm_payload["text"] == "phase7 benchmark sample #7"
-    assert vllm_payload["image_bytes"] == b"\x00" * 16
-    assert vllm_payload["max_tokens"] == 256
-    assert vllm_payload["temperature"] == 1.0
-    assert vllm_payload["top_p"] == 1.0
-
-    triton_payload = _payload_for_target(seq=7, workload="phase7_mm_vllm")
-    assert triton_payload["text"] == "phase7 benchmark sample #7"
-    assert triton_payload["image_bytes"] == b"\x00" * 16
-    assert triton_payload["max_tokens"] == 256
-    assert triton_payload["temperature"] == 1.0
-    assert triton_payload["top_p"] == 1.0
+def test_payload_for_target_uses_real_newline_and_binary_bytes() -> None:
+    payload = _payload_for_target(seq=7, workload="phase7_mm_vllm")
+    assert payload["text"] == "phase7 benchmark sample #7"
+    assert payload["image_bytes"] == b"\x00" * 16
+    assert len(payload["image_bytes"]) == 16
+    assert payload["max_tokens"] == 256
+    assert payload["temperature"] == 1.0
+    assert payload["top_p"] == 1.0
 
 
 def test_payload_for_targets_accepts_custom_sampling_params() -> None:
@@ -121,6 +108,22 @@ def test_payload_for_targets_accepts_custom_sampling_params() -> None:
     assert payload["max_tokens"] == 128
     assert payload["temperature"] == 0.2
     assert payload["top_p"] == 0.9
+
+
+@pytest.mark.parametrize("invalid_top_p", [0.0, -0.1, 1.1, float("inf"), float("nan")])
+def test_payload_for_targets_rejects_invalid_top_p(invalid_top_p: float) -> None:
+    with pytest.raises(ValueError, match="top_p must be finite and in \\(0, 1\\]"):
+        _payload_for_target(seq=1, workload="phase7_mm_vllm", top_p=invalid_top_p)
+
+
+@pytest.mark.parametrize("invalid_temperature", [-0.1, float("inf"), float("nan")])
+def test_payload_for_targets_rejects_invalid_temperature(invalid_temperature: float) -> None:
+    with pytest.raises(ValueError, match="temperature must be finite and >= 0"):
+        _payload_for_target(
+            seq=1,
+            workload="phase7_mm_vllm",
+            temperature=invalid_temperature,
+        )
 
 
 async def test_execute_benchmark_run_counts_target_errors() -> None:
@@ -151,14 +154,33 @@ async def test_execute_benchmark_run_counts_target_errors() -> None:
 async def test_detect_backend_mode_marks_mock_from_health_payload() -> None:
     class _Args:
         deadline_ms = 1234
+        nerva_url = "http://127.0.0.1:8080"
         vllm_url = "http://127.0.0.1:8001"
         triton_url = "http://127.0.0.1:8002"
 
     async def getter(url: str, timeout_ms: int) -> tuple[int, dict[str, Any] | None]:
         assert timeout_ms == 1234
+        if url.endswith("/v1/health"):
+            return 200, {"backend": "mock_nerva"}
         if url.endswith("/health"):
             return 200, {"backend": "mock_vllm"}
         return 200, {"backend": "mock_triton"}
 
+    assert await _detect_backend_mode(_Args(), "nerva", health_getter=getter) == "mock"
     assert await _detect_backend_mode(_Args(), "vllm", health_getter=getter) == "mock"
     assert await _detect_backend_mode(_Args(), "triton", health_getter=getter) == "mock"
+
+
+async def test_detect_backend_mode_marks_nerva_unknown_when_health_not_ready() -> None:
+    class _Args:
+        deadline_ms = 2000
+        nerva_url = "http://127.0.0.1:8080"
+        vllm_url = "http://127.0.0.1:8001"
+        triton_url = "http://127.0.0.1:8002"
+
+    async def getter(url: str, timeout_ms: int) -> tuple[int, dict[str, Any] | None]:
+        del timeout_ms
+        assert url.endswith("/v1/health")
+        return 503, {"status": "starting"}
+
+    assert await _detect_backend_mode(_Args(), "nerva", health_getter=getter) == "unknown"

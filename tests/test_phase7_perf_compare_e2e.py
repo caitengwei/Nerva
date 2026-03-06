@@ -102,6 +102,28 @@ def test_linux_gpu_perf_compare_scenario_rejects_empty_concurrency_levels() -> N
         )
 
 
+@pytest.mark.parametrize("invalid_top_p", [0.0, -0.1, 1.1, float("inf"), float("nan")])
+def test_linux_gpu_perf_compare_scenario_rejects_invalid_top_p(invalid_top_p: float) -> None:
+    with pytest.raises(ValueError, match="top_p must be finite and in \\(0, 1\\]"):
+        build_linux_gpu_perf_compare_scenario(
+            model_path="/models/Qwen/Qwen2.5-7B-Instruct",
+            triton_repo="/tmp/phase7-triton-repo",
+            top_p=invalid_top_p,
+        )
+
+
+@pytest.mark.parametrize("invalid_temperature", [-0.1, float("inf"), float("nan")])
+def test_linux_gpu_perf_compare_scenario_rejects_invalid_temperature(
+    invalid_temperature: float,
+) -> None:
+    with pytest.raises(ValueError, match="temperature must be finite and >= 0"):
+        build_linux_gpu_perf_compare_scenario(
+            model_path="/models/Qwen/Qwen2.5-7B-Instruct",
+            triton_repo="/tmp/phase7-triton-repo",
+            temperature=invalid_temperature,
+        )
+
+
 async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

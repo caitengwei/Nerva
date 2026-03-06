@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 DEFAULT_CONCURRENCY_LEVELS = [1, 32, 128, 512, 1000]
@@ -111,10 +112,10 @@ def build_linux_gpu_perf_compare_scenario(
         raise ValueError("sample_seconds must be > 0")
     if max_tokens <= 0:
         raise ValueError("max_tokens must be > 0")
-    if temperature < 0:
-        raise ValueError("temperature must be >= 0")
-    if top_p <= 0:
-        raise ValueError("top_p must be > 0")
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("temperature must be finite and >= 0")
+    if not math.isfinite(top_p) or top_p <= 0 or top_p > 1:
+        raise ValueError("top_p must be finite and in (0, 1]")
 
     if concurrency_levels is None:
         levels = list(DEFAULT_CONCURRENCY_LEVELS)

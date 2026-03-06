@@ -132,8 +132,8 @@ async def test_vllm_openai_api_parses_text_field() -> None:
     assert resp.ok is True
     assert resp.output_text == "hello from vllm"
     assert captured["prompt"] == "[image_bytes=16]\nhi"
-    assert captured["max_tokens"] == 64
-    assert captured["temperature"] == 0.0
+    assert captured["max_tokens"] == 256
+    assert captured["temperature"] == 1.0
 
 
 async def test_vllm_openai_api_postprocess_normalizes_output_text() -> None:
