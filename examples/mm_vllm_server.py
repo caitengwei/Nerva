@@ -83,7 +83,7 @@ mm_postprocess = model(
 )
 
 
-def _phase7_pipeline(request: Any) -> Any:
+def _mm_vllm_pipeline(request: Any) -> Any:
     pre_out = mm_preprocess(request)
     llm_out = mm_vllm(
         {
@@ -96,9 +96,9 @@ def _phase7_pipeline(request: Any) -> Any:
     return mm_postprocess({"text": llm_out["text"]})
 
 
-def build_phase7_graph() -> Graph:
-    return trace(_phase7_pipeline)
+def build_mm_vllm_graph() -> Graph:
+    return trace(_mm_vllm_pipeline)
 
 
-graph = build_phase7_graph()
-app = build_nerva_app({"phase7_mm_vllm": graph})
+graph = build_mm_vllm_graph()
+app = build_nerva_app({"mm_vllm": graph})

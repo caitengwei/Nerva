@@ -14,7 +14,7 @@ from nerva.worker.manager import WorkerManager
 from tests.helpers import EchoModel
 
 
-class TestPhase1EndToEnd:
+class TestWorkerManagerE2E:
     async def test_single_model_roundtrip(self) -> None:
         """Full cycle: start manager -> spawn worker -> infer -> shutdown."""
         handle = model("e2e-echo", EchoModel, backend="pytorch", device="cpu")
@@ -73,7 +73,7 @@ class TestPhase1EndToEnd:
             await manager.shutdown_all()
 
 
-class TestPhase1ShmPath:
+class TestWorkerManagerShm:
     async def test_infer_with_shm_pool(self) -> None:
         """Verify SHM path works for large payloads."""
         handle = model("echo", EchoModel, backend="pytorch", device="cpu")
@@ -92,7 +92,7 @@ class TestPhase1ShmPath:
 
 
 @pytest.mark.slow
-class TestPhase1Perf:
+class TestWorkerManagerPerf:
     async def test_ipc_overhead(self) -> None:
         """Measure IPC overhead vs Phase 0 in-process."""
         n = 100

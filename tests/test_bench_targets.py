@@ -44,7 +44,7 @@ async def test_nerva_binary_rpc_parses_data_and_error_frames() -> None:
 
     ok_target = NervaBinaryRPCTarget(
         base_url="http://localhost:8080",
-        pipeline_name="phase7_mm_vllm",
+        pipeline_name="mm_vllm",
         sender=sender_data,
     )
     ok_resp = await ok_target.infer({"prompt": "hi"}, deadline_ms=1000)
@@ -71,7 +71,7 @@ async def test_nerva_binary_rpc_parses_data_and_error_frames() -> None:
 
     err_target = NervaBinaryRPCTarget(
         base_url="http://localhost:8080",
-        pipeline_name="phase7_mm_vllm",
+        pipeline_name="mm_vllm",
         sender=sender_error,
     )
     err_resp = await err_target.infer({"prompt": "hi"}, deadline_ms=1000)
@@ -103,7 +103,7 @@ async def test_nerva_binary_rpc_rejects_data_without_text_field() -> None:
 
     target = NervaBinaryRPCTarget(
         base_url="http://localhost:8080",
-        pipeline_name="phase7_mm_vllm",
+        pipeline_name="mm_vllm",
         sender=sender,
     )
     resp = await target.infer({"prompt": "hi"}, deadline_ms=1000)
@@ -125,7 +125,7 @@ async def test_vllm_openai_api_parses_text_field() -> None:
 
     target = VLLMOpenAIAPITarget(
         base_url="http://127.0.0.1:8001",
-        model_name="phase7",
+        model_name="mm_vllm",
         sender=sender,
     )
     resp = await target.infer({"text": "hi", "image_bytes": b"\x00" * 16}, deadline_ms=1000)
@@ -147,7 +147,7 @@ async def test_vllm_openai_api_postprocess_normalizes_output_text() -> None:
 
     target = VLLMOpenAIAPITarget(
         base_url="http://127.0.0.1:8001",
-        model_name="phase7",
+        model_name="mm_vllm",
         sender=sender,
     )
     resp = await target.infer({"text": "hi", "image_bytes": b"\x00" * 16}, deadline_ms=1000)
@@ -169,7 +169,7 @@ async def test_vllm_openai_api_accepts_custom_sampling_params() -> None:
 
     target = VLLMOpenAIAPITarget(
         base_url="http://127.0.0.1:8001",
-        model_name="phase7",
+        model_name="mm_vllm",
         sender=sender,
     )
     resp = await target.infer(
@@ -226,7 +226,7 @@ async def test_vllm_openai_api_default_sender_reuses_async_client(monkeypatch: A
 
     monkeypatch.setattr(vllm_openai_api.httpx, "AsyncClient", _make_client)
 
-    target = VLLMOpenAIAPITarget(base_url="http://127.0.0.1:8001", model_name="phase7")
+    target = VLLMOpenAIAPITarget(base_url="http://127.0.0.1:8001", model_name="mm_vllm")
     first = await target.infer({"prompt": "hi-1"}, deadline_ms=1000)
     second = await target.infer({"prompt": "hi-2"}, deadline_ms=1000)
     await target.aclose()
@@ -276,7 +276,7 @@ async def test_triton_infer_default_sender_reuses_async_client(monkeypatch: Any)
 
     monkeypatch.setattr(triton_infer.httpx, "AsyncClient", _make_client)
 
-    target = TritonInferTarget(base_url="http://127.0.0.1:8002", model_name="phase7_mm_vllm")
+    target = TritonInferTarget(base_url="http://127.0.0.1:8002", model_name="mm_vllm")
     first = await target.infer({"prompt": "hi-1"}, deadline_ms=1000)
     second = await target.infer({"prompt": "hi-2"}, deadline_ms=1000)
     await target.aclose()
@@ -338,7 +338,7 @@ async def test_nerva_binary_rpc_default_sender_reuses_async_client(monkeypatch: 
 
     monkeypatch.setattr(nerva_binary_rpc.httpx, "AsyncClient", _make_client)
 
-    target = NervaBinaryRPCTarget(base_url="http://localhost:8080", pipeline_name="phase7_mm_vllm")
+    target = NervaBinaryRPCTarget(base_url="http://localhost:8080", pipeline_name="mm_vllm")
     first = await target.infer({"prompt": "hi-1"}, deadline_ms=1000)
     second = await target.infer({"prompt": "hi-2"}, deadline_ms=1000)
     await target.aclose()
@@ -362,7 +362,7 @@ async def test_triton_infer_parses_json_output() -> None:
 
     target = TritonInferTarget(
         base_url="http://127.0.0.1:8002",
-        model_name="phase7_mm_vllm",
+        model_name="mm_vllm",
         sender=sender,
     )
     resp = await target.infer({"prompt": "hi"}, deadline_ms=1000)
@@ -384,7 +384,7 @@ async def test_triton_infer_builds_full_e2e_inputs_for_ensemble() -> None:
 
     target = TritonInferTarget(
         base_url="http://127.0.0.1:8002",
-        model_name="phase7_mm_vllm",
+        model_name="mm_vllm",
         sender=sender,
     )
     resp = await target.infer(
@@ -422,7 +422,7 @@ async def test_triton_infer_uses_module_default_sampling_values() -> None:
 
     target = TritonInferTarget(
         base_url="http://127.0.0.1:8002",
-        model_name="phase7_mm_vllm",
+        model_name="mm_vllm",
         sender=sender,
     )
     resp = await target.infer({"text": "hi", "image_bytes": b"\x00" * 16}, deadline_ms=1000)

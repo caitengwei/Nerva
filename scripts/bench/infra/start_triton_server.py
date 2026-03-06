@@ -102,11 +102,11 @@ def _run_mock_server(*, host: str, port: int, model_repo: str) -> int:
 
 
 def _resolve_model_name(model_repo: str) -> str:
-    preferred = "phase7_mm_vllm"
+    preferred = "mm_vllm"
     if os.path.isdir(os.path.join(model_repo, preferred)):
         return preferred
 
-    stage_models = {"phase7_preprocess", "phase7_infer", "phase7_postprocess"}
+    stage_models = {"mm_preprocess", "mm_infer", "mm_postprocess"}
     candidates: list[str] = []
     with os.scandir(model_repo) as entries:
         for entry in entries:

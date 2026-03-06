@@ -10,7 +10,7 @@ from nerva.worker.manager import WorkerManager
 from tests.helpers import ConcatModel, EchoModel, UpperModel
 
 
-class TestPhase2SingleNode:
+class TestExecutorSingleNode:
     async def test_single_node_dag(self) -> None:
         """Simplest DAG: one node, one worker."""
         handle = model("echo", EchoModel, backend="pytorch", device="cpu")
@@ -29,7 +29,7 @@ class TestPhase2SingleNode:
             await manager.shutdown_all()
 
 
-class TestPhase2LinearChain:
+class TestExecutorLinearChain:
     async def test_linear_two_nodes(self) -> None:
         """echo -> upper: echo passes value, upper uppercases it."""
         h_echo = model("echo", EchoModel, backend="pytorch", device="cpu")
@@ -80,7 +80,7 @@ class TestPhase2LinearChain:
             await manager.shutdown_all()
 
 
-class TestPhase2Parallel:
+class TestExecutorParallel:
     async def test_parallel_to_concat(self) -> None:
         """parallel(upper_a, upper_b) -> concat."""
         h_upper = model("upper", UpperModel, backend="pytorch", device="cpu")
@@ -125,7 +125,7 @@ class TestPhase2Parallel:
             await manager.shutdown_all()
 
 
-class TestPhase2TraceAndExecute:
+class TestExecutorTraceAndExecute:
     async def test_trace_then_execute(self) -> None:
         """Full flow: trace a pipeline function, then execute the graph."""
         h_echo = model("echo", EchoModel, backend="pytorch", device="cpu")

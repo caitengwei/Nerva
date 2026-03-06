@@ -34,7 +34,7 @@ def test_start_vllm_server_dry_run_command() -> None:
 
 def test_start_triton_server_dry_run_command() -> None:
     cmd = build_triton_command(
-        model_repo="/tmp/phase7-triton-repo",
+        model_repo="/tmp/mm_vllm-triton-repo",
         http_port=8002,
         grpc_port=8003,
         metrics_port=8004,
@@ -45,15 +45,15 @@ def test_start_triton_server_dry_run_command() -> None:
 
 
 def test_resolve_model_name_prefers_ensemble_model(tmp_path: Path) -> None:
-    (tmp_path / "phase7_mm_vllm").mkdir()
-    (tmp_path / "phase7_preprocess").mkdir()
-    assert _resolve_model_name(str(tmp_path)) == "phase7_mm_vllm"
+    (tmp_path / "mm_vllm").mkdir()
+    (tmp_path / "mm_preprocess").mkdir()
+    assert _resolve_model_name(str(tmp_path)) == "mm_vllm"
 
 
 def test_resolve_model_name_skips_stage_models_in_fallback(tmp_path: Path) -> None:
-    (tmp_path / "phase7_preprocess").mkdir()
-    (tmp_path / "phase7_infer").mkdir()
-    (tmp_path / "phase7_postprocess").mkdir()
+    (tmp_path / "mm_preprocess").mkdir()
+    (tmp_path / "mm_infer").mkdir()
+    (tmp_path / "mm_postprocess").mkdir()
     (tmp_path / "custom_ensemble_model").mkdir()
     assert _resolve_model_name(str(tmp_path)) == "custom_ensemble_model"
 
@@ -61,59 +61,59 @@ def test_resolve_model_name_skips_stage_models_in_fallback(tmp_path: Path) -> No
 def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     repo = prepare_triton_repo(
         tmp_path,
-        model_name="phase7_mm_vllm",
+        model_name="mm_vllm",
         vllm_base_url="http://127.0.0.1:8001",
         vllm_model_name="/models",
     )
 
-    assert (repo / "phase7_preprocess" / "config.pbtxt").exists()
-    assert (repo / "phase7_preprocess" / "1" / "model.py").exists()
-    assert (repo / "phase7_infer" / "config.pbtxt").exists()
-    assert (repo / "phase7_infer" / "1" / "model.py").exists()
-    assert (repo / "phase7_postprocess" / "config.pbtxt").exists()
-    assert (repo / "phase7_postprocess" / "1" / "model.py").exists()
+    assert (repo / "mm_preprocess" / "config.pbtxt").exists()
+    assert (repo / "mm_preprocess" / "1" / "model.py").exists()
+    assert (repo / "mm_infer" / "config.pbtxt").exists()
+    assert (repo / "mm_infer" / "1" / "model.py").exists()
+    assert (repo / "mm_postprocess" / "config.pbtxt").exists()
+    assert (repo / "mm_postprocess" / "1" / "model.py").exists()
 
-    preprocess_cfg = (repo / "phase7_preprocess" / "config.pbtxt").read_text()
+    preprocess_cfg = (repo / "mm_preprocess" / "config.pbtxt").read_text()
     assert "max_batch_size: 0" in preprocess_cfg
     assert 'name: "MAX_TOKENS"' in preprocess_cfg
     assert 'name: "TEMPERATURE"' in preprocess_cfg
     assert 'name: "TOP_P"' in preprocess_cfg
     assert 'name: "DEADLINE_MS"' in preprocess_cfg
 
-    infer_cfg = (repo / "phase7_infer" / "config.pbtxt").read_text()
+    infer_cfg = (repo / "mm_infer" / "config.pbtxt").read_text()
     assert "max_batch_size: 0" in infer_cfg
     assert 'name: "PROMPT"' in infer_cfg
     assert 'name: "MAX_TOKENS"' in infer_cfg
     assert 'name: "TEMPERATURE"' in infer_cfg
     assert 'name: "TOP_P"' in infer_cfg
     assert 'name: "DEADLINE_MS"' in infer_cfg
-    infer_py = (repo / "phase7_infer" / "1" / "model.py").read_text()
+    infer_py = (repo / "mm_infer" / "1" / "model.py").read_text()
     assert "/v1/completions" in infer_py
     assert "http://127.0.0.1:8001" in infer_py
     assert "/models" in infer_py
     assert "deadline_ms" in infer_py
 
-    ensemble_cfg = (repo / "phase7_mm_vllm" / "config.pbtxt").read_text()
+    ensemble_cfg = (repo / "mm_vllm" / "config.pbtxt").read_text()
     assert "max_batch_size: 0" in ensemble_cfg
     assert 'platform: "ensemble"' in ensemble_cfg
-    assert 'model_name: "phase7_preprocess"' in ensemble_cfg
-    assert 'model_name: "phase7_infer"' in ensemble_cfg
-    assert 'model_name: "phase7_postprocess"' in ensemble_cfg
+    assert 'model_name: "mm_preprocess"' in ensemble_cfg
+    assert 'model_name: "mm_infer"' in ensemble_cfg
+    assert 'model_name: "mm_postprocess"' in ensemble_cfg
     assert 'name: "DEADLINE_MS"' in ensemble_cfg
 
-    postprocess_py = (repo / "phase7_postprocess" / "1" / "model.py").read_text()
+    postprocess_py = (repo / "mm_postprocess" / "1" / "model.py").read_text()
     assert "raw_text = _to_str(text_raw)" in postprocess_py
 
 
 def test_prepare_triton_repo_escapes_vllm_literals_with_repr(tmp_path: Path) -> None:
     repo = prepare_triton_repo(
         tmp_path / "repo-escaped",
-        model_name="phase7_mm_vllm",
+        model_name="mm_vllm",
         vllm_base_url="http://127.0.0.1:8001\ninjected",
         vllm_model_name="my'model\ninjected",
     )
-    infer_py = (repo / "phase7_infer" / "1" / "model.py").read_text()
-    compile(infer_py, "<phase7_infer_model>", "exec")
+    infer_py = (repo / "mm_infer" / "1" / "model.py").read_text()
+    compile(infer_py, "<mm_infer_model>", "exec")
 
     literal_lines = [
         line

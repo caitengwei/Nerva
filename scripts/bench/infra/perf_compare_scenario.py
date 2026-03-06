@@ -47,7 +47,7 @@ def _build_benchmark_cmd(
         "uv",
         "run",
         "python",
-        "scripts/bench/run_phase7.py",
+        "scripts/bench/run_bench.py",
     ]
     for target in targets:
         cmd.extend(["--target", target])
@@ -87,7 +87,7 @@ def build_linux_gpu_perf_compare_scenario(
     vllm_url: str = DEFAULT_VLLM_URL,
     vllm_model_name: str = DEFAULT_VLLM_MODEL_NAME,
     triton_image: str = DEFAULT_TRITON_IMAGE,
-    workload: str = "phase7_mm_vllm",
+    workload: str = "mm_vllm",
     concurrency_levels: list[int] | None = None,
     warmup_seconds: int = 60,
     sample_seconds: int = 300,
@@ -131,7 +131,7 @@ def build_linux_gpu_perf_compare_scenario(
         "uv",
         "run",
         "uvicorn",
-        "examples.phase7_multimodal_vllm_server:app",
+        "examples.mm_vllm_server:app",
         "--host",
         "127.0.0.1",
         "--port",

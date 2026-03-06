@@ -92,7 +92,7 @@ def collect_summary_rows(input_root: Path, *, commit: str | None = None) -> list
 
 def _build_markdown(rows: list[SummaryRow], *, input_root: Path, commit: str) -> str:
     header = [
-        "# Phase 7 Benchmark Report",
+        "# MM-vLLM Benchmark Report",
         "",
         "## 1. 报告范围",
         f"- 输入目录: `{input_root}`",
@@ -129,7 +129,7 @@ def _build_markdown(rows: list[SummaryRow], *, input_root: Path, commit: str) ->
 
 
 def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate Phase 7 benchmark markdown report")
+    parser = argparse.ArgumentParser(description="Generate benchmark markdown report")
     parser.add_argument("--input-root", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--commit", help="commit short sha filter; default is current HEAD short sha")

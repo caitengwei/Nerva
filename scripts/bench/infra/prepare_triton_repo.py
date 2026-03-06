@@ -8,9 +8,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-PREPROCESS_MODEL = "phase7_preprocess"
-INFER_MODEL = "phase7_infer"
-POSTPROCESS_MODEL = "phase7_postprocess"
+PREPROCESS_MODEL = "mm_preprocess"
+INFER_MODEL = "mm_infer"
+POSTPROCESS_MODEL = "mm_postprocess"
 
 
 def _python_backend_config(
@@ -295,7 +295,7 @@ def _postprocess_model_py() -> str:
 def prepare_triton_repo(
     output: Path,
     *,
-    model_name: str = "phase7_mm_vllm",
+    model_name: str = "mm_vllm",
     vllm_base_url: str = "http://127.0.0.1:8001",
     vllm_model_name: str = "/models",
 ) -> Path:
@@ -374,7 +374,7 @@ def prepare_triton_repo(
 def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare Triton model repository for Phase 7")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--model-name", default="phase7_mm_vllm")
+    parser.add_argument("--model-name", default="mm_vllm")
     parser.add_argument("--vllm-url", default="http://127.0.0.1:8001")
     parser.add_argument("--vllm-model", default="/models")
     return parser.parse_args(argv)

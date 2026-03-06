@@ -5,8 +5,8 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
-import scripts.bench.run_phase7 as run_phase7_module
-from scripts.bench.run_phase7 import (
+import scripts.bench.run_bench as run_bench_module
+from scripts.bench.run_bench import (
     BenchmarkRun,
     _detect_backend_mode,
     _payload_for_target,
@@ -30,7 +30,7 @@ def test_write_artifacts_creates_expected_files(tmp_path: Path) -> None:
     run = BenchmarkRun(
         target="nerva",
         concurrency=32,
-        workload="phase7_mm_vllm",
+        workload="mm_vllm",
         warmup_seconds=10,
         sample_seconds=30,
     )
@@ -70,7 +70,7 @@ async def test_execute_benchmark_run_generates_non_zero_metrics() -> None:
     run = BenchmarkRun(
         target="vllm",
         concurrency=8,
-        workload="phase7_mm_vllm",
+        workload="mm_vllm",
         warmup_seconds=0,
         sample_seconds=1,
     )
@@ -89,8 +89,8 @@ async def test_execute_benchmark_run_generates_non_zero_metrics() -> None:
 
 
 def test_payload_for_target_uses_real_newline_and_binary_bytes() -> None:
-    payload = _payload_for_target(seq=7, workload="phase7_mm_vllm")
-    assert payload["text"] == "phase7 benchmark sample #7"
+    payload = _payload_for_target(seq=7, workload="mm_vllm")
+    assert payload["text"] == "mm_vllm benchmark sample #7"
     assert payload["image_bytes"] == b"\x00" * 16
     assert len(payload["image_bytes"]) == 16
     assert payload["max_tokens"] == 256
@@ -101,7 +101,7 @@ def test_payload_for_target_uses_real_newline_and_binary_bytes() -> None:
 def test_payload_for_targets_accepts_custom_sampling_params() -> None:
     payload = _payload_for_target(
         seq=1,
-        workload="phase7_mm_vllm",
+        workload="mm_vllm",
         max_tokens=128,
         temperature=0.2,
         top_p=0.9,
@@ -114,7 +114,7 @@ def test_payload_for_targets_accepts_custom_sampling_params() -> None:
 @pytest.mark.parametrize("invalid_top_p", [0.0, -0.1, 1.1, float("inf"), float("nan")])
 def test_payload_for_targets_rejects_invalid_top_p(invalid_top_p: float) -> None:
     with pytest.raises(ValueError, match="top_p must be finite and in \\(0, 1\\]"):
-        _payload_for_target(seq=1, workload="phase7_mm_vllm", top_p=invalid_top_p)
+        _payload_for_target(seq=1, workload="mm_vllm", top_p=invalid_top_p)
 
 
 @pytest.mark.parametrize("invalid_temperature", [-0.1, float("inf"), float("nan")])
@@ -122,7 +122,7 @@ def test_payload_for_targets_rejects_invalid_temperature(invalid_temperature: fl
     with pytest.raises(ValueError, match="temperature must be finite and >= 0"):
         _payload_for_target(
             seq=1,
-            workload="phase7_mm_vllm",
+            workload="mm_vllm",
             temperature=invalid_temperature,
         )
 
@@ -137,7 +137,7 @@ async def test_execute_benchmark_run_counts_target_errors() -> None:
     run = BenchmarkRun(
         target="vllm",
         concurrency=2,
-        workload="phase7_mm_vllm",
+        workload="mm_vllm",
         warmup_seconds=0,
         sample_seconds=1,
     )
@@ -215,17 +215,17 @@ async def test_default_health_getter_reuses_and_closes_module_client(monkeypatch
         created_clients.append(client)
         return client
 
-    monkeypatch.setattr(run_phase7_module.httpx, "AsyncClient", _make_client)
-    await run_phase7_module._close_health_client()
-    status1, payload1 = await run_phase7_module._default_health_getter(
+    monkeypatch.setattr(run_bench_module.httpx, "AsyncClient", _make_client)
+    await run_bench_module._close_health_client()
+    status1, payload1 = await run_bench_module._default_health_getter(
         "http://127.0.0.1:8001/health",
         500,
     )
-    status2, payload2 = await run_phase7_module._default_health_getter(
+    status2, payload2 = await run_bench_module._default_health_getter(
         "http://127.0.0.1:8001/health",
         500,
     )
-    await run_phase7_module._close_health_client()
+    await run_bench_module._close_health_client()
 
     assert status1 == 200
     assert payload1 == {"ready": True}

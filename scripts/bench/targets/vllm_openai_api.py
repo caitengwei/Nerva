@@ -8,7 +8,7 @@ import httpx
 from scripts.bench.targets.base import TargetResponse
 
 JSONSender = Callable[[str, dict[str, Any], int], Awaitable[dict[str, Any]]]
-# Keep these defaults aligned with scripts/bench/run_phase7.py benchmark defaults.
+# Keep these defaults aligned with scripts/bench/run_bench.py benchmark defaults.
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOP_P = 1.0
@@ -60,7 +60,7 @@ class VLLMOpenAIAPITarget:
                 latency_ms=_latency_ms(start_ns),
                 ttft_ms=None,
                 error="",
-                output_text=_phase7_postprocess_text(output_text),
+                output_text=_mm_postprocess_text(output_text),
                 raw=data,
             )
         except Exception as exc:  # pragma: no cover - network/transport failures
@@ -147,5 +147,5 @@ def _image_size_from_payload(payload: dict[str, Any]) -> int:
     return max(parsed, 0)
 
 
-def _phase7_postprocess_text(output_text: str) -> str:
+def _mm_postprocess_text(output_text: str) -> str:
     return output_text.strip()

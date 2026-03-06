@@ -40,7 +40,7 @@ def test_runbook_mentions_nerdctl_gpu_commands() -> None:
     assert "--require-real-backend" in text
 
 
-def test_phase7_plan_has_no_agent_specific_instructions() -> None:
+def test_bench_plan_has_no_agent_specific_instructions() -> None:
     text = PLAN.read_text(encoding="utf-8")
     assert "For Claude" not in text
     assert "REQUIRED SUB-SKILL" not in text

@@ -104,7 +104,7 @@ def build_matrix(
     concurrency_levels: list[int],
     targets: list[str],
     *,
-    workload: str = "phase7_mm_vllm",
+    workload: str = "mm_vllm",
     warmup_seconds: int = DEFAULT_WARMUP_SECONDS,
     sample_seconds: int = DEFAULT_SAMPLE_SECONDS,
 ) -> list[BenchmarkRun]:
@@ -122,7 +122,7 @@ def build_matrix(
 
 
 def build_artifact_dir(root: Path, *, date: dt.date, commit: str, run: BenchmarkRun) -> Path:
-    return root / "phase7" / date.isoformat() / commit / run.target / str(run.concurrency)
+    return root / "mm_vllm" / date.isoformat() / commit / run.target / str(run.concurrency)
 
 
 def write_artifacts(
@@ -153,7 +153,7 @@ def _payload_for_target(
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
 ) -> dict[str, Any]:
-    return _phase7_source_input(
+    return _mm_vllm_source_input(
         seq=seq,
         workload=workload,
         max_tokens=max_tokens,
@@ -162,7 +162,7 @@ def _payload_for_target(
     )
 
 
-def _phase7_source_input(
+def _mm_vllm_source_input(
     *,
     seq: int,
     workload: str,
@@ -170,7 +170,7 @@ def _phase7_source_input(
     temperature: float,
     top_p: float,
 ) -> dict[str, Any]:
-    if workload != "phase7_mm_vllm":
+    if workload != "mm_vllm":
         raise ValueError(f"unsupported workload: {workload}")
     if max_tokens <= 0:
         raise ValueError("max_tokens must be > 0")
@@ -179,7 +179,7 @@ def _phase7_source_input(
     if not math.isfinite(temperature) or temperature < 0:
         raise ValueError("temperature must be finite and >= 0")
 
-    text = f"phase7 benchmark sample #{seq}"
+    text = f"mm_vllm benchmark sample #{seq}"
     return {
         "text": text,
         "image_bytes": b"\x00" * 16,
@@ -348,8 +348,8 @@ async def execute_benchmark_run(
 def _cli(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Phase 7 benchmark matrix")
     parser.add_argument("--target", action="append", choices=["nerva", "vllm", "triton"], required=True)
-    parser.add_argument("--workload", default="phase7_mm_vllm")
-    parser.add_argument("--config", help="path to phase7 benchmark config json")
+    parser.add_argument("--workload", default="mm_vllm")
+    parser.add_argument("--config", help="path to benchmark config json")
     parser.add_argument("--concurrency-levels", help="comma separated, e.g. 1,32,128,512,1000")
     parser.add_argument("--warmup-seconds", type=int)
     parser.add_argument("--sample-seconds", type=int)
@@ -364,11 +364,11 @@ def _cli(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     parser.add_argument("--nerva-url", default="http://127.0.0.1:8080")
-    parser.add_argument("--nerva-pipeline", default="phase7_mm_vllm")
+    parser.add_argument("--nerva-pipeline", default="mm_vllm")
     parser.add_argument("--vllm-url", default="http://127.0.0.1:8001")
-    parser.add_argument("--vllm-model", default="phase7_mm_vllm")
+    parser.add_argument("--vllm-model", default="mm_vllm")
     parser.add_argument("--triton-url", default="http://127.0.0.1:8002")
-    parser.add_argument("--triton-model", default="phase7_mm_vllm")
+    parser.add_argument("--triton-model", default="mm_vllm")
 
     parser.add_argument("--output-root", default="bench-results")
     parser.add_argument("--dry-run", action="store_true")
@@ -460,7 +460,7 @@ async def _amain(args: argparse.Namespace) -> None:
                 )
 
             write_artifacts(artifact_dir, summary=summary, latencies_ms=latencies, meta=meta)
-            print(f"[phase7] wrote artifacts: {artifact_dir}")
+            print(f"[bench] wrote artifacts: {artifact_dir}")
     finally:
         await _close_health_client()
 
