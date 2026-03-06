@@ -229,6 +229,79 @@ async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
         assert meta["deadline_ms"] == 99
 
 
+async def test_phase7_perf_compare_detect_backend_once_per_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    detect_calls: list[str] = []
+
+    async def fake_backend_mode(_args: object, target_name: str) -> str:
+        detect_calls.append(target_name)
+        return "real"
+
+    def fake_build_target(_args: object, target_name: str) -> _FakeTarget:
+        return _FakeTarget(target_name)
+
+    async def fake_execute(
+        run: run_phase7.BenchmarkRun,
+        *,
+        target: _FakeTarget,
+        deadline_ms: int,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+    ) -> tuple[dict[str, object], list[float], dict[str, object]]:
+        assert target.name == run.target
+        del deadline_ms, max_tokens, temperature, top_p
+        return (
+            {
+                "target": run.target,
+                "concurrency": run.concurrency,
+                "workload": run.workload,
+                "qps": 1.0,
+                "p50_ms": 1.0,
+                "p95_ms": 1.0,
+                "p99_ms": 1.0,
+                "error_rate": 0.0,
+                "max_in_flight": 1,
+                "total_requests": 1,
+                "error_count": 0,
+            },
+            [1.0],
+            {
+                "target": run.target,
+                "concurrency": run.concurrency,
+                "workload": run.workload,
+            },
+        )
+
+    monkeypatch.setattr(run_phase7, "_detect_backend_mode", fake_backend_mode)
+    monkeypatch.setattr(run_phase7, "_build_target_from_args", fake_build_target)
+    monkeypatch.setattr(run_phase7, "execute_benchmark_run", fake_execute)
+
+    args = _cli(
+        [
+            "--target",
+            "nerva",
+            "--target",
+            "vllm",
+            "--workload",
+            "phase7_mm_vllm",
+            "--concurrency-levels",
+            "1,2",
+            "--warmup-seconds",
+            "1",
+            "--sample-seconds",
+            "1",
+            "--output-root",
+            str(tmp_path),
+        ]
+    )
+    await _amain(args)
+
+    assert detect_calls == ["nerva", "vllm"]
+
+
 async def test_phase7_perf_compare_requires_real_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def fake_backend_mode(*_args: object, **_kwargs: object) -> str:
         return "mock"

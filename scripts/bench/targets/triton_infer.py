@@ -8,6 +8,9 @@ import httpx
 from scripts.bench.targets.base import TargetResponse
 
 JSONSender = Callable[[str, dict[str, Any], int], Awaitable[dict[str, Any]]]
+DEFAULT_MAX_TOKENS = 256
+DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TOP_P = 1.0
 
 
 class TritonInferTarget:
@@ -130,9 +133,9 @@ def _build_triton_inputs(payload: dict[str, Any], *, deadline_ms: int) -> list[d
     if "text" in payload or "image_bytes" in payload or "image_size" in payload:
         text = str(payload.get("text", ""))
         image_size = _image_size_from_payload(payload)
-        max_tokens = _int_payload(payload.get("max_tokens"), default=256, minimum=1)
-        temperature = _float_payload(payload.get("temperature"), default=1.0, minimum=0.0)
-        top_p = _float_payload(payload.get("top_p"), default=1.0, minimum=1e-6)
+        max_tokens = _int_payload(payload.get("max_tokens"), default=DEFAULT_MAX_TOKENS, minimum=1)
+        temperature = _float_payload(payload.get("temperature"), default=DEFAULT_TEMPERATURE, minimum=0.0)
+        top_p = _float_payload(payload.get("top_p"), default=DEFAULT_TOP_P, minimum=1e-6)
         per_request_deadline_ms = _int_payload(
             payload.get("deadline_ms"),
             default=deadline_ms,

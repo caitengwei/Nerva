@@ -388,6 +388,7 @@ async def _amain(args: argparse.Namespace) -> None:
     commit = _git_commit_short()
     today = dt.date.today()
     root = Path(args.output_root)
+    backend_mode_by_target: dict[str, str] = {}
 
     try:
         for run in matrix:
@@ -425,7 +426,10 @@ async def _amain(args: argparse.Namespace) -> None:
                     "dry_run": True,
                 }
             else:
-                backend_mode = await _detect_backend_mode(args, run.target)
+                backend_mode = backend_mode_by_target.get(run.target)
+                if backend_mode is None:
+                    backend_mode = await _detect_backend_mode(args, run.target)
+                    backend_mode_by_target[run.target] = backend_mode
                 if args.require_real_backend and backend_mode != "real":
                     raise RuntimeError(
                         f"target '{run.target}' is not running in real mode: {backend_mode}"

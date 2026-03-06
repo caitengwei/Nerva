@@ -406,3 +406,30 @@ async def test_triton_infer_builds_full_e2e_inputs_for_ensemble() -> None:
     assert names == {"TEXT", "IMAGE_SIZE", "MAX_TOKENS", "TEMPERATURE", "TOP_P", "DEADLINE_MS"}
     by_name = {item["name"]: item for item in inputs}
     assert by_name["DEADLINE_MS"]["data"] == [1000]
+
+
+async def test_triton_infer_uses_module_default_sampling_values() -> None:
+    captured: dict[str, Any] = {}
+
+    async def sender(
+        url: str,
+        payload: dict[str, Any],
+        timeout_ms: int,
+    ) -> dict[str, Any]:
+        del url, timeout_ms
+        captured.update(payload)
+        return {"outputs": [{"name": "OUTPUT_TEXT", "data": ["ok"]}]}
+
+    target = TritonInferTarget(
+        base_url="http://127.0.0.1:8002",
+        model_name="phase7_mm_vllm",
+        sender=sender,
+    )
+    resp = await target.infer({"text": "hi", "image_bytes": b"\x00" * 16}, deadline_ms=1000)
+
+    assert resp.ok is True
+    inputs = captured["inputs"]
+    by_name = {item["name"]: item for item in inputs}
+    assert by_name["MAX_TOKENS"]["data"] == [triton_infer.DEFAULT_MAX_TOKENS]
+    assert by_name["TEMPERATURE"]["data"] == [triton_infer.DEFAULT_TEMPERATURE]
+    assert by_name["TOP_P"]["data"] == [triton_infer.DEFAULT_TOP_P]

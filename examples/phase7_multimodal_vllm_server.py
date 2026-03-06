@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -22,8 +23,12 @@ class MMPreprocessModel(Model):
         image_bytes = inputs.get("image_bytes", b"")
         image_size = len(image_bytes) if isinstance(image_bytes, bytes) else 0
         max_tokens = max(int(inputs.get("max_tokens", 256)), 1)
-        temperature = max(float(inputs.get("temperature", 1.0)), 0.0)
-        top_p = max(float(inputs.get("top_p", 1.0)), 1e-6)
+        temperature = float(inputs.get("temperature", 1.0))
+        top_p = float(inputs.get("top_p", 1.0))
+        if not math.isfinite(temperature) or temperature < 0:
+            raise ValueError("temperature must be finite and >= 0")
+        if not math.isfinite(top_p) or top_p <= 0 or top_p > 1:
+            raise ValueError("top_p must be finite and in (0, 1]")
         prompt = f"[image_bytes={image_size}]\n{text}".strip()
         return {
             "prompt": prompt,
