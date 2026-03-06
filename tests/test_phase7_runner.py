@@ -5,6 +5,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import scripts.bench.run_phase7 as run_phase7_module
 from scripts.bench.run_phase7 import (
     BenchmarkRun,
     _detect_backend_mode,
@@ -184,3 +185,52 @@ async def test_detect_backend_mode_marks_nerva_unknown_when_health_not_ready() -
         return 503, {"status": "starting"}
 
     assert await _detect_backend_mode(_Args(), "nerva", health_getter=getter) == "unknown"
+
+
+async def test_default_health_getter_reuses_and_closes_module_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {"ready": True}
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.get_calls = 0
+            self.closed = False
+
+        async def get(self, url: str, *, timeout: float) -> _FakeResponse:
+            assert url == "http://127.0.0.1:8001/health"
+            assert timeout == 0.5
+            self.get_calls += 1
+            return _FakeResponse()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    created_clients: list[_FakeClient] = []
+
+    def _make_client(*_args: object, **_kwargs: object) -> _FakeClient:
+        client = _FakeClient()
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(run_phase7_module.httpx, "AsyncClient", _make_client)
+    await run_phase7_module._close_health_client()
+    status1, payload1 = await run_phase7_module._default_health_getter(
+        "http://127.0.0.1:8001/health",
+        500,
+    )
+    status2, payload2 = await run_phase7_module._default_health_getter(
+        "http://127.0.0.1:8001/health",
+        500,
+    )
+    await run_phase7_module._close_health_client()
+
+    assert status1 == 200
+    assert payload1 == {"ready": True}
+    assert status2 == 200
+    assert payload2 == {"ready": True}
+    assert len(created_clients) == 1
+    assert created_clients[0].get_calls == 2
+    assert created_clients[0].closed is True
