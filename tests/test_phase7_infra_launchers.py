@@ -60,12 +60,14 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert (repo / "phase7_postprocess" / "1" / "model.py").exists()
 
     preprocess_cfg = (repo / "phase7_preprocess" / "config.pbtxt").read_text()
+    assert "max_batch_size: 0" in preprocess_cfg
     assert 'name: "MAX_TOKENS"' in preprocess_cfg
     assert 'name: "TEMPERATURE"' in preprocess_cfg
     assert 'name: "TOP_P"' in preprocess_cfg
     assert 'name: "DEADLINE_MS"' in preprocess_cfg
 
     infer_cfg = (repo / "phase7_infer" / "config.pbtxt").read_text()
+    assert "max_batch_size: 0" in infer_cfg
     assert 'name: "PROMPT"' in infer_cfg
     assert 'name: "MAX_TOKENS"' in infer_cfg
     assert 'name: "TEMPERATURE"' in infer_cfg
@@ -78,11 +80,15 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert "deadline_ms" in infer_py
 
     ensemble_cfg = (repo / "phase7_mm_vllm" / "config.pbtxt").read_text()
+    assert "max_batch_size: 0" in ensemble_cfg
     assert 'platform: "ensemble"' in ensemble_cfg
     assert 'model_name: "phase7_preprocess"' in ensemble_cfg
     assert 'model_name: "phase7_infer"' in ensemble_cfg
     assert 'model_name: "phase7_postprocess"' in ensemble_cfg
     assert 'name: "DEADLINE_MS"' in ensemble_cfg
+
+    postprocess_py = (repo / "phase7_postprocess" / "1" / "model.py").read_text()
+    assert "raw_text = _to_str(text_raw)" in postprocess_py
 
 
 def test_vllm_launch_mode_requires_explicit_mock_opt_in() -> None:

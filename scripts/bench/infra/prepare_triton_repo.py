@@ -29,7 +29,7 @@ def _python_backend_config(
     return (
         f'name: "{model_name}"\n'
         'backend: "python"\n'
-        'max_batch_size: 8\n'
+        'max_batch_size: 0\n'
         'input [\n'
         f"{input_entries}\n"
         ']\n'
@@ -43,7 +43,7 @@ def _ensemble_config(model_name: str) -> str:
     return (
         f'name: "{model_name}"\n'
         'platform: "ensemble"\n'
-        'max_batch_size: 8\n'
+        'max_batch_size: 0\n'
         'input [\n'
         '  { name: "TEXT" data_type: TYPE_STRING dims: [ 1 ] }\n'
         '  { name: "IMAGE_SIZE" data_type: TYPE_INT32 dims: [ 1 ] }\n'
@@ -279,9 +279,10 @@ def _postprocess_model_py() -> str:
         "        for request in requests:\n"
         "            text_in = pb_utils.get_input_tensor_by_name(request, 'TEXT')\n"
         "            text_raw = text_in.as_numpy().reshape(-1)[0]\n"
-        "            normalized = _to_str(text_raw).strip()\n"
+        "            raw_text = _to_str(text_raw)\n"
+        "            normalized = raw_text.strip()\n"
         "            out_text = pb_utils.Tensor('OUTPUT_TEXT', np.array([normalized], dtype=object))\n"
-        "            out_raw = pb_utils.Tensor('RAW', np.array([normalized], dtype=object))\n"
+        "            out_raw = pb_utils.Tensor('RAW', np.array([raw_text], dtype=object))\n"
         "            responses.append(pb_utils.InferenceResponse(output_tensors=[out_text, out_raw]))\n"
         "        return responses\n"
     )

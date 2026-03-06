@@ -87,7 +87,7 @@ async def test_execute_benchmark_run_generates_non_zero_metrics() -> None:
 
 
 def test_payload_for_targets_uses_real_newline_and_binary_bytes() -> None:
-    nerva_payload = _payload_for_target("nerva", seq=7, workload="phase7_mm_vllm")
+    nerva_payload = _payload_for_target(seq=7, workload="phase7_mm_vllm")
     assert nerva_payload["text"] == "phase7 benchmark sample #7"
     assert nerva_payload["image_bytes"] == b"\x00" * 16
     assert len(nerva_payload["image_bytes"]) == 16
@@ -95,14 +95,14 @@ def test_payload_for_targets_uses_real_newline_and_binary_bytes() -> None:
     assert nerva_payload["temperature"] == 1.0
     assert nerva_payload["top_p"] == 1.0
 
-    vllm_payload = _payload_for_target("vllm", seq=7, workload="phase7_mm_vllm")
+    vllm_payload = _payload_for_target(seq=7, workload="phase7_mm_vllm")
     assert vllm_payload["text"] == "phase7 benchmark sample #7"
     assert vllm_payload["image_bytes"] == b"\x00" * 16
     assert vllm_payload["max_tokens"] == 256
     assert vllm_payload["temperature"] == 1.0
     assert vllm_payload["top_p"] == 1.0
 
-    triton_payload = _payload_for_target("triton", seq=7, workload="phase7_mm_vllm")
+    triton_payload = _payload_for_target(seq=7, workload="phase7_mm_vllm")
     assert triton_payload["text"] == "phase7 benchmark sample #7"
     assert triton_payload["image_bytes"] == b"\x00" * 16
     assert triton_payload["max_tokens"] == 256
@@ -112,7 +112,6 @@ def test_payload_for_targets_uses_real_newline_and_binary_bytes() -> None:
 
 def test_payload_for_targets_accepts_custom_sampling_params() -> None:
     payload = _payload_for_target(
-        "vllm",
         seq=1,
         workload="phase7_mm_vllm",
         max_tokens=128,

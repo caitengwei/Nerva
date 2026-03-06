@@ -34,6 +34,7 @@ DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOP_P = 1.0
 FULL_E2E_CONTRACT = "full-e2e"
+_HEALTH_CLIENT: httpx.AsyncClient | None = None
 
 
 @dataclass(frozen=True)
@@ -143,7 +144,6 @@ def write_artifacts(
 
 
 def _payload_for_target(
-    target: str,
     *,
     seq: int,
     workload: str,
@@ -151,7 +151,6 @@ def _payload_for_target(
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
 ) -> dict[str, Any]:
-    del target
     return _phase7_source_input(
         seq=seq,
         workload=workload,
@@ -188,13 +187,26 @@ def _phase7_source_input(
     }
 
 
+def _get_health_client() -> httpx.AsyncClient:
+    global _HEALTH_CLIENT
+    if _HEALTH_CLIENT is None:
+        _HEALTH_CLIENT = httpx.AsyncClient()
+    return _HEALTH_CLIENT
+
+
+async def _close_health_client() -> None:
+    global _HEALTH_CLIENT
+    if _HEALTH_CLIENT is not None:
+        await _HEALTH_CLIENT.aclose()
+        _HEALTH_CLIENT = None
+
+
 async def _default_health_getter(
     url: str,
     timeout_ms: int,
 ) -> tuple[int, dict[str, Any] | None]:
     timeout_s = max(timeout_ms / 1000.0, 0.001)
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, timeout=timeout_s)
+    response = await _get_health_client().get(url, timeout=timeout_s)
     payload: dict[str, Any] | None = None
     try:
         body = response.json()
@@ -291,7 +303,6 @@ async def execute_benchmark_run(
     async def _invoke(request_meta: dict[str, int], per_request_deadline_ms: int) -> tuple[bool, str]:
         seq = request_meta.get("seq", 0)
         payload = _payload_for_target(
-            run.target,
             seq=seq,
             workload=run.workload,
             max_tokens=max_tokens,
@@ -377,73 +388,76 @@ async def _amain(args: argparse.Namespace) -> None:
     today = dt.date.today()
     root = Path(args.output_root)
 
-    for run in matrix:
-        artifact_dir = build_artifact_dir(root, date=today, commit=commit, run=run)
+    try:
+        for run in matrix:
+            artifact_dir = build_artifact_dir(root, date=today, commit=commit, run=run)
 
-        if args.dry_run:
-            summary: dict[str, Any] = {
-                "target": run.target,
-                "concurrency": run.concurrency,
-                "workload": run.workload,
-                "qps": 0.0,
-                "p50_ms": 0.0,
-                "p95_ms": 0.0,
-                "p99_ms": 0.0,
-                "error_rate": 0.0,
-                "max_in_flight": 0,
-                "total_requests": 0,
-                "error_count": 0,
-                "dry_run": True,
-            }
-            latencies: list[float] = []
-            meta: dict[str, Any] = {
-                "target": run.target,
-                "target_endpoint": _target_endpoint(args, run.target),
-                "concurrency": run.concurrency,
-                "workload": run.workload,
-                "warmup_seconds": run.warmup_seconds,
-                "sample_seconds": run.sample_seconds,
-                "deadline_ms": args.deadline_ms,
-                "max_tokens": args.max_tokens,
-                "temperature": args.temperature,
-                "top_p": args.top_p,
-                "date": today.isoformat(),
-                "commit": commit,
-                "dry_run": True,
-            }
-        else:
-            backend_mode = await _detect_backend_mode(args, run.target)
-            if args.require_real_backend and backend_mode != "real":
-                raise RuntimeError(
-                    f"target '{run.target}' is not running in real mode: {backend_mode}"
-                )
-
-            target = _build_target_from_args(args, run.target)
-            try:
-                summary, latencies, meta = await execute_benchmark_run(
-                    run,
-                    target=target,
-                    deadline_ms=args.deadline_ms,
-                    max_tokens=args.max_tokens,
-                    temperature=args.temperature,
-                    top_p=args.top_p,
-                )
-            finally:
-                close = getattr(target, "aclose", None)
-                if callable(close):
-                    await close()
-            meta.update(
-                {
+            if args.dry_run:
+                summary: dict[str, Any] = {
+                    "target": run.target,
+                    "concurrency": run.concurrency,
+                    "workload": run.workload,
+                    "qps": 0.0,
+                    "p50_ms": 0.0,
+                    "p95_ms": 0.0,
+                    "p99_ms": 0.0,
+                    "error_rate": 0.0,
+                    "max_in_flight": 0,
+                    "total_requests": 0,
+                    "error_count": 0,
+                    "dry_run": True,
+                }
+                latencies: list[float] = []
+                meta: dict[str, Any] = {
+                    "target": run.target,
                     "target_endpoint": _target_endpoint(args, run.target),
+                    "concurrency": run.concurrency,
+                    "workload": run.workload,
+                    "warmup_seconds": run.warmup_seconds,
+                    "sample_seconds": run.sample_seconds,
+                    "deadline_ms": args.deadline_ms,
+                    "max_tokens": args.max_tokens,
+                    "temperature": args.temperature,
+                    "top_p": args.top_p,
                     "date": today.isoformat(),
                     "commit": commit,
-                    "backend_mode": backend_mode,
-                    "dry_run": False,
+                    "dry_run": True,
                 }
-            )
+            else:
+                backend_mode = await _detect_backend_mode(args, run.target)
+                if args.require_real_backend and backend_mode != "real":
+                    raise RuntimeError(
+                        f"target '{run.target}' is not running in real mode: {backend_mode}"
+                    )
 
-        write_artifacts(artifact_dir, summary=summary, latencies_ms=latencies, meta=meta)
-        print(f"[phase7] wrote artifacts: {artifact_dir}")
+                target = _build_target_from_args(args, run.target)
+                try:
+                    summary, latencies, meta = await execute_benchmark_run(
+                        run,
+                        target=target,
+                        deadline_ms=args.deadline_ms,
+                        max_tokens=args.max_tokens,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                    )
+                finally:
+                    close = getattr(target, "aclose", None)
+                    if callable(close):
+                        await close()
+                meta.update(
+                    {
+                        "target_endpoint": _target_endpoint(args, run.target),
+                        "date": today.isoformat(),
+                        "commit": commit,
+                        "backend_mode": backend_mode,
+                        "dry_run": False,
+                    }
+                )
+
+            write_artifacts(artifact_dir, summary=summary, latencies_ms=latencies, meta=meta)
+            print(f"[phase7] wrote artifacts: {artifact_dir}")
+    finally:
+        await _close_health_client()
 
 
 def main() -> None:
