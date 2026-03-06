@@ -8,6 +8,9 @@ import httpx
 from scripts.bench.targets.base import TargetResponse
 
 JSONSender = Callable[[str, dict[str, Any], int], Awaitable[dict[str, Any]]]
+DEFAULT_MAX_TOKENS = 256
+DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TOP_P = 1.0
 
 
 class TritonInferTarget:
@@ -30,16 +33,8 @@ class TritonInferTarget:
 
     async def infer(self, payload: dict[str, Any], *, deadline_ms: int) -> TargetResponse:
         start_ns = time.perf_counter_ns()
-        prompt = str(payload.get("prompt", ""))
         request_body = {
-            "inputs": [
-                {
-                    "name": "PROMPT",
-                    "shape": [1],
-                    "datatype": "BYTES",
-                    "data": [prompt],
-                }
-            ]
+            "inputs": _build_triton_inputs(payload, deadline_ms=deadline_ms),
         }
         url = f"{self._base_url}/v2/models/{self._model_name}/infer"
 
@@ -102,6 +97,21 @@ def _extract_triton_text(data: dict[str, Any]) -> str | None:
     if not isinstance(outputs, list):
         return None
 
+    # Prefer semantically explicit names from phase7 full-e2e ensemble.
+    for wanted_name in ("OUTPUT_TEXT", "TEXT", "output_text", "text", "RAW", "raw"):
+        for output in outputs:
+            if not isinstance(output, dict):
+                continue
+            if str(output.get("name", "")).upper() != wanted_name.upper():
+                continue
+            values = output.get("data")
+            if not isinstance(values, list) or not values:
+                continue
+            first = values[0]
+            if isinstance(first, str):
+                return first
+
+    # Fallback for generic Triton schemas that do not set stable output names.
     for output in outputs:
         if not isinstance(output, dict):
             continue
@@ -117,3 +127,94 @@ def _extract_triton_text(data: dict[str, Any]) -> str | None:
 
 def _latency_ms(start_ns: int) -> float:
     return (time.perf_counter_ns() - start_ns) / 1_000_000.0
+
+
+def _build_triton_inputs(payload: dict[str, Any], *, deadline_ms: int) -> list[dict[str, Any]]:
+    if "text" in payload or "image_bytes" in payload or "image_size" in payload:
+        text = str(payload.get("text", ""))
+        image_size = _image_size_from_payload(payload)
+        max_tokens = _int_payload(payload.get("max_tokens"), default=DEFAULT_MAX_TOKENS, minimum=1)
+        temperature = _float_payload(payload.get("temperature"), default=DEFAULT_TEMPERATURE, minimum=0.0)
+        top_p = _float_payload(payload.get("top_p"), default=DEFAULT_TOP_P, minimum=1e-6)
+        per_request_deadline_ms = _int_payload(
+            payload.get("deadline_ms"),
+            default=deadline_ms,
+            minimum=1,
+        )
+        return [
+            {
+                "name": "TEXT",
+                "shape": [1],
+                "datatype": "BYTES",
+                "data": [text],
+            },
+            {
+                "name": "IMAGE_SIZE",
+                "shape": [1],
+                "datatype": "INT32",
+                "data": [image_size],
+            },
+            {
+                "name": "MAX_TOKENS",
+                "shape": [1],
+                "datatype": "INT32",
+                "data": [max_tokens],
+            },
+            {
+                "name": "TEMPERATURE",
+                "shape": [1],
+                "datatype": "FP32",
+                "data": [temperature],
+            },
+            {
+                "name": "TOP_P",
+                "shape": [1],
+                "datatype": "FP32",
+                "data": [top_p],
+            },
+            {
+                "name": "DEADLINE_MS",
+                "shape": [1],
+                "datatype": "INT32",
+                "data": [per_request_deadline_ms],
+            },
+        ]
+
+    prompt = str(payload.get("prompt", ""))
+    return [
+        {
+            "name": "PROMPT",
+            "shape": [1],
+            "datatype": "BYTES",
+            "data": [prompt],
+        }
+    ]
+
+
+def _image_size_from_payload(payload: dict[str, Any]) -> int:
+    image_bytes = payload.get("image_bytes")
+    if isinstance(image_bytes, bytes | bytearray | memoryview):
+        return len(image_bytes)
+
+    image_size = payload.get("image_size", 0)
+    try:
+        parsed = int(image_size)
+    except Exception:
+        return 0
+    return max(parsed, 0)
+
+
+def _int_payload(value: object, *, default: int, minimum: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return default
+    return max(parsed, minimum)
+
+
+def _float_payload(value: object, *, default: float, minimum: float) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        return default
+    return max(parsed, minimum)

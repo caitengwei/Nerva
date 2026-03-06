@@ -8,6 +8,10 @@ import httpx
 from scripts.bench.targets.base import TargetResponse
 
 JSONSender = Callable[[str, dict[str, Any], int], Awaitable[dict[str, Any]]]
+# Keep these defaults aligned with scripts/bench/run_phase7.py benchmark defaults.
+DEFAULT_MAX_TOKENS = 256
+DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TOP_P = 1.0
 
 
 class VLLMOpenAIAPITarget:
@@ -30,11 +34,13 @@ class VLLMOpenAIAPITarget:
 
     async def infer(self, payload: dict[str, Any], *, deadline_ms: int) -> TargetResponse:
         start_ns = time.perf_counter_ns()
+        prompt = _prompt_from_payload(payload)
         request_body = {
             "model": self._model_name,
-            "prompt": str(payload.get("prompt", "")),
-            "max_tokens": int(payload.get("max_tokens", 64)),
-            "temperature": float(payload.get("temperature", 0.0)),
+            "prompt": prompt,
+            "max_tokens": int(payload.get("max_tokens", DEFAULT_MAX_TOKENS)),
+            "temperature": float(payload.get("temperature", DEFAULT_TEMPERATURE)),
+            "top_p": float(payload.get("top_p", DEFAULT_TOP_P)),
         }
         url = f"{self._base_url}/v1/completions"
 
@@ -54,7 +60,7 @@ class VLLMOpenAIAPITarget:
                 latency_ms=_latency_ms(start_ns),
                 ttft_ms=None,
                 error="",
-                output_text=output_text,
+                output_text=_phase7_postprocess_text(output_text),
                 raw=data,
             )
         except Exception as exc:  # pragma: no cover - network/transport failures
@@ -116,3 +122,30 @@ def _extract_openai_text(data: dict[str, Any]) -> str | None:
 
 def _latency_ms(start_ns: int) -> float:
     return (time.perf_counter_ns() - start_ns) / 1_000_000.0
+
+
+def _prompt_from_payload(payload: dict[str, Any]) -> str:
+    prompt = payload.get("prompt")
+    if prompt is not None:
+        return str(prompt)
+
+    text = str(payload.get("text", ""))
+    image_size = _image_size_from_payload(payload)
+    return f"[image_bytes={image_size}]\n{text}".strip()
+
+
+def _image_size_from_payload(payload: dict[str, Any]) -> int:
+    image_bytes = payload.get("image_bytes")
+    if isinstance(image_bytes, bytes | bytearray | memoryview):
+        return len(image_bytes)
+
+    image_size = payload.get("image_size", 0)
+    try:
+        parsed = int(image_size)
+    except Exception:
+        return 0
+    return max(parsed, 0)
+
+
+def _phase7_postprocess_text(output_text: str) -> str:
+    return output_text.strip()

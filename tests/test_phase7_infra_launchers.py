@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import argparse
+from typing import TYPE_CHECKING
 
 import pytest
-from scripts.bench.infra.start_triton_server import build_triton_command
+from scripts.bench.infra.prepare_triton_repo import prepare_triton_repo
+from scripts.bench.infra.start_triton_server import _resolve_model_name, build_triton_command
 from scripts.bench.infra.start_triton_server import main as triton_main
 from scripts.bench.infra.start_triton_server import resolve_launch_mode as resolve_triton_mode
 from scripts.bench.infra.start_vllm_server import build_vllm_command
 from scripts.bench.infra.start_vllm_server import resolve_launch_mode as resolve_vllm_mode
 from scripts.bench.infra.wait_service_ready import wait_service_ready
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_start_vllm_server_dry_run_command() -> None:
@@ -37,6 +42,87 @@ def test_start_triton_server_dry_run_command() -> None:
     joined = " ".join(cmd)
     assert "tritonserver" in joined
     assert "--model-repository" in joined
+
+
+def test_resolve_model_name_prefers_ensemble_model(tmp_path: Path) -> None:
+    (tmp_path / "phase7_mm_vllm").mkdir()
+    (tmp_path / "phase7_preprocess").mkdir()
+    assert _resolve_model_name(str(tmp_path)) == "phase7_mm_vllm"
+
+
+def test_resolve_model_name_skips_stage_models_in_fallback(tmp_path: Path) -> None:
+    (tmp_path / "phase7_preprocess").mkdir()
+    (tmp_path / "phase7_infer").mkdir()
+    (tmp_path / "phase7_postprocess").mkdir()
+    (tmp_path / "custom_ensemble_model").mkdir()
+    assert _resolve_model_name(str(tmp_path)) == "custom_ensemble_model"
+
+
+def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
+    repo = prepare_triton_repo(
+        tmp_path,
+        model_name="phase7_mm_vllm",
+        vllm_base_url="http://127.0.0.1:8001",
+        vllm_model_name="/models",
+    )
+
+    assert (repo / "phase7_preprocess" / "config.pbtxt").exists()
+    assert (repo / "phase7_preprocess" / "1" / "model.py").exists()
+    assert (repo / "phase7_infer" / "config.pbtxt").exists()
+    assert (repo / "phase7_infer" / "1" / "model.py").exists()
+    assert (repo / "phase7_postprocess" / "config.pbtxt").exists()
+    assert (repo / "phase7_postprocess" / "1" / "model.py").exists()
+
+    preprocess_cfg = (repo / "phase7_preprocess" / "config.pbtxt").read_text()
+    assert "max_batch_size: 0" in preprocess_cfg
+    assert 'name: "MAX_TOKENS"' in preprocess_cfg
+    assert 'name: "TEMPERATURE"' in preprocess_cfg
+    assert 'name: "TOP_P"' in preprocess_cfg
+    assert 'name: "DEADLINE_MS"' in preprocess_cfg
+
+    infer_cfg = (repo / "phase7_infer" / "config.pbtxt").read_text()
+    assert "max_batch_size: 0" in infer_cfg
+    assert 'name: "PROMPT"' in infer_cfg
+    assert 'name: "MAX_TOKENS"' in infer_cfg
+    assert 'name: "TEMPERATURE"' in infer_cfg
+    assert 'name: "TOP_P"' in infer_cfg
+    assert 'name: "DEADLINE_MS"' in infer_cfg
+    infer_py = (repo / "phase7_infer" / "1" / "model.py").read_text()
+    assert "/v1/completions" in infer_py
+    assert "http://127.0.0.1:8001" in infer_py
+    assert "/models" in infer_py
+    assert "deadline_ms" in infer_py
+
+    ensemble_cfg = (repo / "phase7_mm_vllm" / "config.pbtxt").read_text()
+    assert "max_batch_size: 0" in ensemble_cfg
+    assert 'platform: "ensemble"' in ensemble_cfg
+    assert 'model_name: "phase7_preprocess"' in ensemble_cfg
+    assert 'model_name: "phase7_infer"' in ensemble_cfg
+    assert 'model_name: "phase7_postprocess"' in ensemble_cfg
+    assert 'name: "DEADLINE_MS"' in ensemble_cfg
+
+    postprocess_py = (repo / "phase7_postprocess" / "1" / "model.py").read_text()
+    assert "raw_text = _to_str(text_raw)" in postprocess_py
+
+
+def test_prepare_triton_repo_escapes_vllm_literals_with_repr(tmp_path: Path) -> None:
+    repo = prepare_triton_repo(
+        tmp_path / "repo-escaped",
+        model_name="phase7_mm_vllm",
+        vllm_base_url="http://127.0.0.1:8001\ninjected",
+        vllm_model_name="my'model\ninjected",
+    )
+    infer_py = (repo / "phase7_infer" / "1" / "model.py").read_text()
+    compile(infer_py, "<phase7_infer_model>", "exec")
+
+    literal_lines = [
+        line
+        for line in infer_py.splitlines()
+        if "self._vllm_url =" in line or "self._vllm_model =" in line
+    ]
+    assert len(literal_lines) == 2
+    assert "\\n" in literal_lines[0]
+    assert "\\n" in literal_lines[1]
 
 
 def test_vllm_launch_mode_requires_explicit_mock_opt_in() -> None:
