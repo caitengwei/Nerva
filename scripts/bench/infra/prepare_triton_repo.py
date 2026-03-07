@@ -372,7 +372,7 @@ def prepare_triton_repo(
 
 
 def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Prepare Triton model repository for Phase 7")
+    parser = argparse.ArgumentParser(description="Prepare Triton model repository for the mm_vllm ensemble")
     parser.add_argument("--output", required=True)
     parser.add_argument("--model-name", default="mm_vllm")
     parser.add_argument("--vllm-url", default="http://127.0.0.1:8001")

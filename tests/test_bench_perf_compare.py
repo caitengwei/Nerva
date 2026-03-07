@@ -339,9 +339,9 @@ class _FakeTarget:
 
 @pytest.mark.gpu
 async def test_bench_perf_compare_real_services_smoke(tmp_path: Path) -> None:
-    if os.getenv("NERVA_PHASE7_E2E_COMPARE") != "1":
+    if os.getenv("NERVA_MM_VLLM_E2E_COMPARE") != "1":
         pytest.skip(
-            "set NERVA_PHASE7_E2E_COMPARE=1 and start nerva/vllm/triton services before running"
+            "set NERVA_MM_VLLM_E2E_COMPARE=1 and start nerva/vllm/triton services before running"
         )
 
     args = _cli(
@@ -355,7 +355,7 @@ async def test_bench_perf_compare_real_services_smoke(tmp_path: Path) -> None:
             "--workload",
             "mm_vllm",
             "--vllm-model",
-            os.getenv("NERVA_PHASE7_VLLM_MODEL", "mm_vllm"),
+            os.getenv("NERVA_MM_VLLM_VLLM_MODEL", "mm_vllm"),
             "--concurrency-levels",
             "1",
             "--warmup-seconds",
@@ -363,11 +363,11 @@ async def test_bench_perf_compare_real_services_smoke(tmp_path: Path) -> None:
             "--sample-seconds",
             "1",
             "--nerva-url",
-            os.getenv("NERVA_PHASE7_NERVA_URL", "http://127.0.0.1:8080"),
+            os.getenv("NERVA_MM_VLLM_NERVA_URL", "http://127.0.0.1:8080"),
             "--vllm-url",
-            os.getenv("NERVA_PHASE7_VLLM_URL", "http://127.0.0.1:8001"),
+            os.getenv("NERVA_MM_VLLM_VLLM_URL", "http://127.0.0.1:8001"),
             "--triton-url",
-            os.getenv("NERVA_PHASE7_TRITON_URL", "http://127.0.0.1:8002"),
+            os.getenv("NERVA_MM_VLLM_TRITON_URL", "http://127.0.0.1:8002"),
             "--output-root",
             str(tmp_path),
         ]

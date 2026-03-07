@@ -346,7 +346,7 @@ async def execute_benchmark_run(
 
 
 def _cli(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Phase 7 benchmark matrix")
+    parser = argparse.ArgumentParser(description="Run mm_vllm benchmark matrix")
     parser.add_argument("--target", action="append", choices=["nerva", "vllm", "triton"], required=True)
     parser.add_argument("--workload", default="mm_vllm")
     parser.add_argument("--config", help="path to benchmark config json")
