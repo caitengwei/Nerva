@@ -127,7 +127,7 @@ def build_linux_gpu_perf_compare_scenario(
 
     nerva_server_cmd = [
         "env",
-        f"PHASE7_VLLM_MODEL_PATH={model_path}",
+        f"MM_VLLM_MODEL_PATH={model_path}",
         "uv",
         "run",
         "uvicorn",

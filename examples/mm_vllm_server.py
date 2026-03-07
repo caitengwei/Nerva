@@ -73,7 +73,8 @@ mm_vllm = model(
     MMVLLMPlaceholderModel,
     backend="vllm",
     device="cuda:0",
-    model_path=os.environ.get("PHASE7_VLLM_MODEL_PATH", "Qwen/Qwen2.5-0.5B-Instruct"),
+    model_path=os.environ.get("MM_VLLM_MODEL_PATH")
+    or os.environ.get("PHASE7_VLLM_MODEL_PATH", "Qwen/Qwen2.5-0.5B-Instruct"),
 )
 mm_postprocess = model(
     "mm_postprocess",

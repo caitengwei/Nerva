@@ -55,7 +55,8 @@ def test_linux_gpu_perf_compare_scenario_uses_nerdctl() -> None:
     )
 
     nerva_cmd = " ".join(scenario.nerva_server_cmd)
-    assert "PHASE7_VLLM_MODEL_PATH=/models/Qwen/Qwen2.5-7B-Instruct" in nerva_cmd
+    assert "MM_VLLM_MODEL_PATH=/models/Qwen/Qwen2.5-7B-Instruct" in nerva_cmd
+    assert "PHASE7_VLLM_MODEL_PATH" not in nerva_cmd
 
     assert scenario.vllm_container_cmd[:2] == ["nerdctl", "run"]
     assert "--gpus" in scenario.vllm_container_cmd
