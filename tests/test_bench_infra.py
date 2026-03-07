@@ -50,12 +50,26 @@ def test_resolve_model_name_prefers_ensemble_model(tmp_path: Path) -> None:
     assert _resolve_model_name(str(tmp_path)) == "mm_vllm"
 
 
+def test_resolve_model_name_prefers_legacy_ensemble_model(tmp_path: Path) -> None:
+    (tmp_path / "phase7_mm_vllm").mkdir()
+    (tmp_path / "phase7_preprocess").mkdir()
+    assert _resolve_model_name(str(tmp_path)) == "phase7_mm_vllm"
+
+
 def test_resolve_model_name_skips_stage_models_in_fallback(tmp_path: Path) -> None:
     (tmp_path / "mm_preprocess").mkdir()
     (tmp_path / "mm_infer").mkdir()
     (tmp_path / "mm_postprocess").mkdir()
     (tmp_path / "custom_ensemble_model").mkdir()
     assert _resolve_model_name(str(tmp_path)) == "custom_ensemble_model"
+
+
+def test_resolve_model_name_skips_legacy_stage_models_in_fallback(tmp_path: Path) -> None:
+    (tmp_path / "phase7_preprocess").mkdir()
+    (tmp_path / "phase7_infer").mkdir()
+    (tmp_path / "phase7_postprocess").mkdir()
+    (tmp_path / "legacy_ensemble_model").mkdir()
+    assert _resolve_model_name(str(tmp_path)) == "legacy_ensemble_model"
 
 
 def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:

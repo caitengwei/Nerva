@@ -102,11 +102,19 @@ def _run_mock_server(*, host: str, port: int, model_repo: str) -> int:
 
 
 def _resolve_model_name(model_repo: str) -> str:
-    preferred = "mm_vllm"
-    if os.path.isdir(os.path.join(model_repo, preferred)):
-        return preferred
+    preferred_models = ("mm_vllm", "phase7_mm_vllm")
+    for model_name in preferred_models:
+        if os.path.isdir(os.path.join(model_repo, model_name)):
+            return model_name
 
-    stage_models = {"mm_preprocess", "mm_infer", "mm_postprocess"}
+    stage_models = {
+        "mm_preprocess",
+        "mm_infer",
+        "mm_postprocess",
+        "phase7_preprocess",
+        "phase7_infer",
+        "phase7_postprocess",
+    }
     candidates: list[str] = []
     with os.scandir(model_repo) as entries:
         for entry in entries:
@@ -116,7 +124,7 @@ def _resolve_model_name(model_repo: str) -> str:
     if candidates:
         return sorted(candidates)[0]
 
-    return preferred
+    return preferred_models[0]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
