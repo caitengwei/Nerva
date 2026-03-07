@@ -1,5 +1,5 @@
-# tests/test_phase4_e2e.py
-"""Phase 4 end-to-end tests: Binary RPC with real Workers."""
+
+"""Binary RPC E2E tests with real Workers."""
 
 from __future__ import annotations
 

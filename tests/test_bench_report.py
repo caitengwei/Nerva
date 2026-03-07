@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from scripts.bench.report_phase7 import collect_summary_rows
+from scripts.bench.report_bench import collect_summary_rows
 
 if TYPE_CHECKING:
     from pathlib import Path

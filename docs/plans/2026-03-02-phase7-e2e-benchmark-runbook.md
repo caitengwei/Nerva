@@ -5,8 +5,8 @@
 ## 1. 启动 Nerva Phase 7 服务
 
 ```bash
-PHASE7_VLLM_MODEL_PATH=<MODEL_PATH> \
-uv run uvicorn examples.phase7_multimodal_vllm_server:app --host 127.0.0.1 --port 8080
+MM_VLLM_MODEL_PATH=<MODEL_PATH> \
+uv run uvicorn examples.mm_vllm_server:app --host 127.0.0.1 --port 8080
 ```
 
 ## 2. 启动 Native vLLM

@@ -5,15 +5,15 @@ import os
 from typing import TYPE_CHECKING
 
 import pytest
-import scripts.bench.run_phase7 as run_phase7
+import scripts.bench.run_bench as run_bench
 from scripts.bench.infra.perf_compare_scenario import build_linux_gpu_perf_compare_scenario
-from scripts.bench.run_phase7 import _amain, _cli
+from scripts.bench.run_bench import _amain, _cli
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-async def test_phase7_perf_compare_dry_run_writes_all_targets(tmp_path: Path) -> None:
+async def test_bench_perf_compare_dry_run_writes_all_targets(tmp_path: Path) -> None:
     args = _cli(
         [
             "--target",
@@ -23,7 +23,7 @@ async def test_phase7_perf_compare_dry_run_writes_all_targets(tmp_path: Path) ->
             "--target",
             "triton",
             "--workload",
-            "phase7_mm_vllm",
+            "mm_vllm",
             "--concurrency-levels",
             "1",
             "--warmup-seconds",
@@ -37,7 +37,7 @@ async def test_phase7_perf_compare_dry_run_writes_all_targets(tmp_path: Path) ->
     )
     await _amain(args)
 
-    summary_files = sorted(tmp_path.glob("phase7/*/*/*/*/summary.json"))
+    summary_files = sorted(tmp_path.glob("mm_vllm/*/*/*/*/summary.json"))
     assert len(summary_files) == 3
 
     targets: set[str] = set()
@@ -51,11 +51,12 @@ async def test_phase7_perf_compare_dry_run_writes_all_targets(tmp_path: Path) ->
 def test_linux_gpu_perf_compare_scenario_uses_nerdctl() -> None:
     scenario = build_linux_gpu_perf_compare_scenario(
         model_path="/models/Qwen/Qwen2.5-7B-Instruct",
-        triton_repo="/tmp/phase7-triton-repo",
+        triton_repo="/tmp/mm_vllm-triton-repo",
     )
 
     nerva_cmd = " ".join(scenario.nerva_server_cmd)
-    assert "PHASE7_VLLM_MODEL_PATH=/models/Qwen/Qwen2.5-7B-Instruct" in nerva_cmd
+    assert "MM_VLLM_MODEL_PATH=/models/Qwen/Qwen2.5-7B-Instruct" in nerva_cmd
+    assert "PHASE7_VLLM_MODEL_PATH" not in nerva_cmd
 
     assert scenario.vllm_container_cmd[:2] == ["nerdctl", "run"]
     assert "--gpus" in scenario.vllm_container_cmd
@@ -97,7 +98,7 @@ def test_linux_gpu_perf_compare_scenario_rejects_empty_concurrency_levels() -> N
     with pytest.raises(ValueError, match="must not be empty"):
         build_linux_gpu_perf_compare_scenario(
             model_path="/models/Qwen/Qwen2.5-7B-Instruct",
-            triton_repo="/tmp/phase7-triton-repo",
+            triton_repo="/tmp/mm_vllm-triton-repo",
             concurrency_levels=[],
         )
 
@@ -107,7 +108,7 @@ def test_linux_gpu_perf_compare_scenario_rejects_invalid_top_p(invalid_top_p: fl
     with pytest.raises(ValueError, match="top_p must be finite and in \\(0, 1\\]"):
         build_linux_gpu_perf_compare_scenario(
             model_path="/models/Qwen/Qwen2.5-7B-Instruct",
-            triton_repo="/tmp/phase7-triton-repo",
+            triton_repo="/tmp/mm_vllm-triton-repo",
             top_p=invalid_top_p,
         )
 
@@ -119,12 +120,12 @@ def test_linux_gpu_perf_compare_scenario_rejects_invalid_temperature(
     with pytest.raises(ValueError, match="temperature must be finite and >= 0"):
         build_linux_gpu_perf_compare_scenario(
             model_path="/models/Qwen/Qwen2.5-7B-Instruct",
-            triton_repo="/tmp/phase7-triton-repo",
+            triton_repo="/tmp/mm_vllm-triton-repo",
             temperature=invalid_temperature,
         )
 
 
-async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
+async def test_bench_perf_compare_non_dry_run_executes_all_targets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -137,7 +138,7 @@ async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
         return target
 
     async def fake_execute(
-        run: run_phase7.BenchmarkRun,
+        run: run_bench.BenchmarkRun,
         *,
         target: _FakeTarget,
         deadline_ms: int,
@@ -175,13 +176,13 @@ async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
             },
         )
 
-    monkeypatch.setattr(run_phase7, "_build_target_from_args", fake_build_target)
-    monkeypatch.setattr(run_phase7, "execute_benchmark_run", fake_execute)
+    monkeypatch.setattr(run_bench, "_build_target_from_args", fake_build_target)
+    monkeypatch.setattr(run_bench, "execute_benchmark_run", fake_execute)
 
     async def fake_backend_mode(*_args: object, **_kwargs: object) -> str:
         return "real"
 
-    monkeypatch.setattr(run_phase7, "_detect_backend_mode", fake_backend_mode)
+    monkeypatch.setattr(run_bench, "_detect_backend_mode", fake_backend_mode)
 
     args = _cli(
         [
@@ -192,7 +193,7 @@ async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
             "--target",
             "triton",
             "--workload",
-            "phase7_mm_vllm",
+            "mm_vllm",
             "--concurrency-levels",
             "1",
             "--warmup-seconds",
@@ -212,8 +213,8 @@ async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
     assert all(target.closed for target in built_targets.values())
 
     for target_name in ("nerva", "vllm", "triton"):
-        summaries = list(tmp_path.glob(f"phase7/*/*/{target_name}/1/summary.json"))
-        metas = list(tmp_path.glob(f"phase7/*/*/{target_name}/1/run-meta.json"))
+        summaries = list(tmp_path.glob(f"mm_vllm/*/*/{target_name}/1/summary.json"))
+        metas = list(tmp_path.glob(f"mm_vllm/*/*/{target_name}/1/run-meta.json"))
         assert len(summaries) == 1
         assert len(metas) == 1
 
@@ -229,7 +230,7 @@ async def test_phase7_perf_compare_non_dry_run_executes_all_targets(
         assert meta["deadline_ms"] == 99
 
 
-async def test_phase7_perf_compare_detect_backend_once_per_target(
+async def test_bench_perf_compare_detect_backend_once_per_target(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -243,7 +244,7 @@ async def test_phase7_perf_compare_detect_backend_once_per_target(
         return _FakeTarget(target_name)
 
     async def fake_execute(
-        run: run_phase7.BenchmarkRun,
+        run: run_bench.BenchmarkRun,
         *,
         target: _FakeTarget,
         deadline_ms: int,
@@ -275,9 +276,9 @@ async def test_phase7_perf_compare_detect_backend_once_per_target(
             },
         )
 
-    monkeypatch.setattr(run_phase7, "_detect_backend_mode", fake_backend_mode)
-    monkeypatch.setattr(run_phase7, "_build_target_from_args", fake_build_target)
-    monkeypatch.setattr(run_phase7, "execute_benchmark_run", fake_execute)
+    monkeypatch.setattr(run_bench, "_detect_backend_mode", fake_backend_mode)
+    monkeypatch.setattr(run_bench, "_build_target_from_args", fake_build_target)
+    monkeypatch.setattr(run_bench, "execute_benchmark_run", fake_execute)
 
     args = _cli(
         [
@@ -286,7 +287,7 @@ async def test_phase7_perf_compare_detect_backend_once_per_target(
             "--target",
             "vllm",
             "--workload",
-            "phase7_mm_vllm",
+            "mm_vllm",
             "--concurrency-levels",
             "1,2",
             "--warmup-seconds",
@@ -302,17 +303,17 @@ async def test_phase7_perf_compare_detect_backend_once_per_target(
     assert detect_calls == ["nerva", "vllm"]
 
 
-async def test_phase7_perf_compare_requires_real_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_bench_perf_compare_requires_real_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def fake_backend_mode(*_args: object, **_kwargs: object) -> str:
         return "mock"
 
-    monkeypatch.setattr(run_phase7, "_detect_backend_mode", fake_backend_mode)
+    monkeypatch.setattr(run_bench, "_detect_backend_mode", fake_backend_mode)
     args = _cli(
         [
             "--target",
             "vllm",
             "--workload",
-            "phase7_mm_vllm",
+            "mm_vllm",
             "--concurrency-levels",
             "1",
             "--warmup-seconds",
@@ -338,10 +339,10 @@ class _FakeTarget:
 
 
 @pytest.mark.gpu
-async def test_phase7_perf_compare_real_services_smoke(tmp_path: Path) -> None:
-    if os.getenv("NERVA_PHASE7_E2E_COMPARE") != "1":
+async def test_bench_perf_compare_real_services_smoke(tmp_path: Path) -> None:
+    if os.getenv("NERVA_MM_VLLM_E2E_COMPARE") != "1":
         pytest.skip(
-            "set NERVA_PHASE7_E2E_COMPARE=1 and start nerva/vllm/triton services before running"
+            "set NERVA_MM_VLLM_E2E_COMPARE=1 and start nerva/vllm/triton services before running"
         )
 
     args = _cli(
@@ -353,9 +354,9 @@ async def test_phase7_perf_compare_real_services_smoke(tmp_path: Path) -> None:
             "--target",
             "triton",
             "--workload",
-            "phase7_mm_vllm",
+            "mm_vllm",
             "--vllm-model",
-            os.getenv("NERVA_PHASE7_VLLM_MODEL", "phase7_mm_vllm"),
+            os.getenv("NERVA_MM_VLLM_VLLM_MODEL", "mm_vllm"),
             "--concurrency-levels",
             "1",
             "--warmup-seconds",
@@ -363,16 +364,16 @@ async def test_phase7_perf_compare_real_services_smoke(tmp_path: Path) -> None:
             "--sample-seconds",
             "1",
             "--nerva-url",
-            os.getenv("NERVA_PHASE7_NERVA_URL", "http://127.0.0.1:8080"),
+            os.getenv("NERVA_MM_VLLM_NERVA_URL", "http://127.0.0.1:8080"),
             "--vllm-url",
-            os.getenv("NERVA_PHASE7_VLLM_URL", "http://127.0.0.1:8001"),
+            os.getenv("NERVA_MM_VLLM_VLLM_URL", "http://127.0.0.1:8001"),
             "--triton-url",
-            os.getenv("NERVA_PHASE7_TRITON_URL", "http://127.0.0.1:8002"),
+            os.getenv("NERVA_MM_VLLM_TRITON_URL", "http://127.0.0.1:8002"),
             "--output-root",
             str(tmp_path),
         ]
     )
 
     await _amain(args)
-    summary_files = sorted(tmp_path.glob("phase7/*/*/*/*/summary.json"))
+    summary_files = sorted(tmp_path.glob("mm_vllm/*/*/*/*/summary.json"))
     assert len(summary_files) == 3

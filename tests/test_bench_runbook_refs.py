@@ -8,6 +8,7 @@ PLAN = Path("docs/plans/2026-03-02-phase7-e2e-benchmark-plan.md")
 
 def test_runbook_includes_launcher_commands() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
+    assert "examples.mm_vllm_server:app" in text
     assert "scripts/bench/infra/start_vllm_server.py" in text
     assert "scripts/bench/infra/start_triton_server.py" in text
     assert "scripts/bench/infra/wait_service_ready.py" in text
@@ -22,7 +23,7 @@ def test_runbook_mentions_full_e2e_contract() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     assert "full-e2e" in text
     assert "不再区分 infer-only" in text
-    assert "PHASE7_VLLM_MODEL_PATH=<MODEL_PATH>" in text
+    assert "MM_VLLM_MODEL_PATH=<MODEL_PATH>" in text
     assert "ensemble" in text
     assert "--max-tokens" in text
     assert "--temperature" in text
@@ -40,7 +41,7 @@ def test_runbook_mentions_nerdctl_gpu_commands() -> None:
     assert "--require-real-backend" in text
 
 
-def test_phase7_plan_has_no_agent_specific_instructions() -> None:
+def test_bench_plan_has_no_agent_specific_instructions() -> None:
     text = PLAN.read_text(encoding="utf-8")
     assert "For Claude" not in text
     assert "REQUIRED SUB-SKILL" not in text

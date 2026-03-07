@@ -1,4 +1,4 @@
-"""End-to-end integration tests for Phase 1 (Master-Worker IPC)."""
+"""Worker-Manager IPC end-to-end integration tests."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from nerva.worker.manager import WorkerManager
 from tests.helpers import EchoModel
 
 
-class TestPhase1EndToEnd:
+class TestWorkerManagerE2E:
     async def test_single_model_roundtrip(self) -> None:
         """Full cycle: start manager -> spawn worker -> infer -> shutdown."""
         handle = model("e2e-echo", EchoModel, backend="pytorch", device="cpu")
@@ -28,8 +28,8 @@ class TestPhase1EndToEnd:
             await manager.shutdown_all()
 
     async def test_result_matches_phase0(self) -> None:
-        """Phase 1 IPC result should match Phase 0 in-process result."""
-        # Phase 0: direct in-process
+        """IPC result should match in-process result."""
+        # in-process (direct, no IPC)
         backend = PyTorchBackend()
         config = ModelConfig(
             model_name="echo", model_class=EchoModel, device="cpu"
@@ -39,7 +39,7 @@ class TestPhase1EndToEnd:
         result_p0 = await backend.infer({"value": [1, 2, 3]}, ctx0)
         await backend.unload_model()
 
-        # Phase 1: via IPC
+        # via IPC (WorkerManager)
         handle = model("echo", EchoModel, backend="pytorch", device="cpu")
         manager = WorkerManager()
         try:
@@ -73,7 +73,7 @@ class TestPhase1EndToEnd:
             await manager.shutdown_all()
 
 
-class TestPhase1ShmPath:
+class TestWorkerManagerShm:
     async def test_infer_with_shm_pool(self) -> None:
         """Verify SHM path works for large payloads."""
         handle = model("echo", EchoModel, backend="pytorch", device="cpu")
@@ -92,12 +92,12 @@ class TestPhase1ShmPath:
 
 
 @pytest.mark.slow
-class TestPhase1Perf:
+class TestWorkerManagerPerf:
     async def test_ipc_overhead(self) -> None:
-        """Measure IPC overhead vs Phase 0 in-process."""
+        """Measure IPC overhead vs in-process baseline."""
         n = 100
 
-        # Phase 0 baseline
+        # in-process baseline
         backend = PyTorchBackend()
         config = ModelConfig(
             model_name="echo", model_class=EchoModel, device="cpu"
@@ -111,7 +111,7 @@ class TestPhase1Perf:
         p0_total = time.perf_counter() - t0
         await backend.unload_model()
 
-        # Phase 1
+        # via IPC
         handle = model("echo", EchoModel, backend="pytorch", device="cpu")
         manager = WorkerManager()
         try:
@@ -129,7 +129,7 @@ class TestPhase1Perf:
         p1_avg_us = (p1_total / n) * 1_000_000
         overhead_us = p1_avg_us - p0_avg_us
 
-        print(f"\nPhase 0 avg: {p0_avg_us:.0f} us")
+        print(f"\nin-process avg: {p0_avg_us:.0f} us")
         print(f"Phase 1 avg: {p1_avg_us:.0f} us")
         print(f"IPC overhead: {overhead_us:.0f} us")
 
