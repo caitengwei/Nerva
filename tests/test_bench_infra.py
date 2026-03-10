@@ -86,8 +86,11 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert (repo / "mm_infer" / "1" / "model.py").exists()
     assert (repo / "mm_postprocess" / "config.pbtxt").exists()
     assert (repo / "mm_postprocess" / "1" / "model.py").exists()
+    # Triton requires a version directory for ensemble models.
+    assert (repo / "mm_vllm" / "1").is_dir()
 
     preprocess_cfg = (repo / "mm_preprocess" / "config.pbtxt").read_text()
+    assert "}\n  {" not in preprocess_cfg
     assert "max_batch_size: 0" in preprocess_cfg
     assert 'name: "MAX_TOKENS"' in preprocess_cfg
     assert 'name: "TEMPERATURE"' in preprocess_cfg
@@ -95,6 +98,7 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert 'name: "DEADLINE_MS"' in preprocess_cfg
 
     infer_cfg = (repo / "mm_infer" / "config.pbtxt").read_text()
+    assert "}\n  {" not in infer_cfg
     assert "max_batch_size: 0" in infer_cfg
     assert 'name: "PROMPT"' in infer_cfg
     assert 'name: "MAX_TOKENS"' in infer_cfg
@@ -108,6 +112,7 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert "deadline_ms" in infer_py
 
     ensemble_cfg = (repo / "mm_vllm" / "config.pbtxt").read_text()
+    assert "}\n  {" not in ensemble_cfg
     assert "max_batch_size: 0" in ensemble_cfg
     assert 'platform: "ensemble"' in ensemble_cfg
     assert 'model_name: "mm_preprocess"' in ensemble_cfg
@@ -137,6 +142,30 @@ def test_prepare_triton_repo_escapes_vllm_literals_with_repr(tmp_path: Path) -> 
     assert len(literal_lines) == 2
     assert "\\n" in literal_lines[0]
     assert "\\n" in literal_lines[1]
+
+
+def test_prepare_triton_repo_supports_infer_instance_count(tmp_path: Path) -> None:
+    repo = prepare_triton_repo(
+        tmp_path / "repo-infer-instance-count",
+        model_name="mm_vllm",
+        vllm_base_url="http://127.0.0.1:8001",
+        vllm_model_name="/models",
+        infer_instance_count=8,
+    )
+    infer_cfg = (repo / "mm_infer" / "config.pbtxt").read_text()
+    assert "instance_group [" in infer_cfg
+    assert "{ kind: KIND_CPU count: 8 }" in infer_cfg
+
+
+def test_prepare_triton_repo_rejects_non_positive_infer_instance_count(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="infer_instance_count must be > 0"):
+        prepare_triton_repo(
+            tmp_path / "repo-invalid-infer-instance-count",
+            model_name="mm_vllm",
+            vllm_base_url="http://127.0.0.1:8001",
+            vllm_model_name="/models",
+            infer_instance_count=0,
+        )
 
 
 def test_vllm_launch_mode_requires_explicit_mock_opt_in() -> None:

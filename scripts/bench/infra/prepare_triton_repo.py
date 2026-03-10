@@ -18,13 +18,22 @@ def _python_backend_config(
     *,
     inputs: list[tuple[str, str]],
     outputs: list[tuple[str, str]],
+    instance_count: int | None = None,
 ) -> str:
-    input_entries = "\n".join(
+    input_entries = ",\n".join(
         f'  {{ name: "{name}" data_type: {dtype} dims: [ 1 ] }}' for name, dtype in inputs
     )
-    output_entries = "\n".join(
+    output_entries = ",\n".join(
         f'  {{ name: "{name}" data_type: {dtype} dims: [ 1 ] }}' for name, dtype in outputs
     )
+
+    instance_group = ""
+    if instance_count is not None:
+        instance_group = (
+            "instance_group [\n"
+            f"  {{ kind: KIND_CPU count: {instance_count} }}\n"
+            "]\n"
+        )
 
     return (
         f'name: "{model_name}"\n'
@@ -32,6 +41,7 @@ def _python_backend_config(
         # Keep batching disabled for full-e2e comparability and to match the scalar
         # request handling implemented in generated Python backend stages.
         'max_batch_size: 0\n'
+        f"{instance_group}"
         'input [\n'
         f"{input_entries}\n"
         ']\n'
@@ -42,6 +52,22 @@ def _python_backend_config(
 
 
 def _ensemble_config(model_name: str) -> str:
+    input_entries = ",\n".join(
+        [
+            '  { name: "TEXT" data_type: TYPE_STRING dims: [ 1 ] }',
+            '  { name: "IMAGE_SIZE" data_type: TYPE_INT32 dims: [ 1 ] }',
+            '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] }',
+            '  { name: "TEMPERATURE" data_type: TYPE_FP32 dims: [ 1 ] }',
+            '  { name: "TOP_P" data_type: TYPE_FP32 dims: [ 1 ] }',
+            '  { name: "DEADLINE_MS" data_type: TYPE_INT32 dims: [ 1 ] }',
+        ]
+    )
+    output_entries = ",\n".join(
+        [
+            '  { name: "OUTPUT_TEXT" data_type: TYPE_STRING dims: [ 1 ] }',
+            '  { name: "RAW" data_type: TYPE_STRING dims: [ 1 ] }',
+        ]
+    )
     return (
         f'name: "{model_name}"\n'
         'platform: "ensemble"\n'
@@ -49,16 +75,10 @@ def _ensemble_config(model_name: str) -> str:
         # request handling implemented in generated Python backend stages.
         'max_batch_size: 0\n'
         'input [\n'
-        '  { name: "TEXT" data_type: TYPE_STRING dims: [ 1 ] }\n'
-        '  { name: "IMAGE_SIZE" data_type: TYPE_INT32 dims: [ 1 ] }\n'
-        '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] }\n'
-        '  { name: "TEMPERATURE" data_type: TYPE_FP32 dims: [ 1 ] }\n'
-        '  { name: "TOP_P" data_type: TYPE_FP32 dims: [ 1 ] }\n'
-        '  { name: "DEADLINE_MS" data_type: TYPE_INT32 dims: [ 1 ] }\n'
+        f"{input_entries}\n"
         ']\n'
         'output [\n'
-        '  { name: "OUTPUT_TEXT" data_type: TYPE_STRING dims: [ 1 ] }\n'
-        '  { name: "RAW" data_type: TYPE_STRING dims: [ 1 ] }\n'
+        f"{output_entries}\n"
         ']\n'
         "ensemble_scheduling {\n"
         "  step [\n"
@@ -298,6 +318,7 @@ def prepare_triton_repo(
     model_name: str = "mm_vllm",
     vllm_base_url: str = "http://127.0.0.1:8001",
     vllm_model_name: str = "/models",
+    infer_instance_count: int = 1,
 ) -> Path:
     if model_name in {PREPROCESS_MODEL, INFER_MODEL, POSTPROCESS_MODEL}:
         raise ValueError(f"model_name '{model_name}' conflicts with reserved stage model names")
@@ -305,6 +326,8 @@ def prepare_triton_repo(
         raise ValueError("vllm_base_url must not be empty")
     if not vllm_model_name:
         raise ValueError("vllm_model_name must not be empty")
+    if infer_instance_count <= 0:
+        raise ValueError("infer_instance_count must be > 0")
 
     output.mkdir(parents=True, exist_ok=True)
 
@@ -351,6 +374,7 @@ def prepare_triton_repo(
                 ("DEADLINE_MS", "TYPE_INT32"),
             ],
             outputs=[("TEXT", "TYPE_STRING")],
+            instance_count=infer_instance_count if infer_instance_count > 1 else None,
         )
     )
     _write_python_model(
@@ -368,6 +392,8 @@ def prepare_triton_repo(
     _write_python_model(postprocess_root, source=_postprocess_model_py())
 
     (ensemble_root / "config.pbtxt").write_text(_ensemble_config(model_name))
+    # Ensemble model also needs a concrete version directory for Triton loading.
+    (ensemble_root / "1").mkdir(parents=True, exist_ok=True)
     return output
 
 
@@ -377,6 +403,7 @@ def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-name", default="mm_vllm")
     parser.add_argument("--vllm-url", default="http://127.0.0.1:8001")
     parser.add_argument("--vllm-model", default="/models")
+    parser.add_argument("--infer-instance-count", type=int, default=1)
     return parser.parse_args(argv)
 
 
@@ -388,6 +415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         model_name=args.model_name,
         vllm_base_url=args.vllm_url,
         vllm_model_name=args.vllm_model,
+        infer_instance_count=args.infer_instance_count,
     )
     print(repo)
     return 0
