@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import scripts.bench.run_bench as run_bench_module
 from scripts.bench.run_bench import (
+    DEFAULT_IMAGE_SIZE_BYTES,
     BenchmarkRun,
     _detect_backend_mode,
     _payload_for_target,
@@ -91,8 +92,8 @@ async def test_execute_benchmark_run_generates_non_zero_metrics() -> None:
 def test_payload_for_target_uses_real_newline_and_binary_bytes() -> None:
     payload = _payload_for_target(seq=7, workload="mm_vllm")
     assert payload["text"] == "mm_vllm benchmark sample #7"
-    assert payload["image_bytes"] == b"\x00" * 16
-    assert len(payload["image_bytes"]) == 16
+    assert payload["image_bytes"] == b"\x00" * DEFAULT_IMAGE_SIZE_BYTES
+    assert len(payload["image_bytes"]) == DEFAULT_IMAGE_SIZE_BYTES
     assert payload["max_tokens"] == 256
     assert payload["temperature"] == 1.0
     assert payload["top_p"] == 1.0
@@ -125,6 +126,12 @@ def test_payload_for_targets_rejects_invalid_temperature(invalid_temperature: fl
             workload="mm_vllm",
             temperature=invalid_temperature,
         )
+
+
+@pytest.mark.parametrize("invalid_size", [0, -1, -100])
+def test_payload_for_targets_rejects_invalid_image_size_bytes(invalid_size: int) -> None:
+    with pytest.raises(ValueError, match="image_size_bytes must be > 0"):
+        _payload_for_target(seq=1, workload="mm_vllm", image_size_bytes=invalid_size)
 
 
 async def test_execute_benchmark_run_counts_target_errors() -> None:

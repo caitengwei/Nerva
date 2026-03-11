@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import csv
 import datetime as dt
+import functools
 import json
 import math
 import subprocess
@@ -34,6 +35,10 @@ DEFAULT_DEADLINE_MS = 30_000
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOP_P = 1.0
+# Synthetic image payload size in bytes.  16 bytes is unrealistically small;
+# 65536 (64 KB) better approximates a compressed thumbnail.  For real-world
+# multimodal workloads this can be several MB (use --image-size-bytes).
+DEFAULT_IMAGE_SIZE_BYTES = 65536
 FULL_E2E_CONTRACT = "full-e2e"
 # Process-global client reused within one script run; closed in _amain finally.
 _HEALTH_CLIENT: httpx.AsyncClient | None = None
@@ -152,6 +157,7 @@ def _payload_for_target(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
+    image_size_bytes: int = DEFAULT_IMAGE_SIZE_BYTES,
 ) -> dict[str, Any]:
     return _mm_vllm_source_input(
         seq=seq,
@@ -159,7 +165,14 @@ def _payload_for_target(
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=top_p,
+        image_size_bytes=image_size_bytes,
     )
+
+
+@functools.lru_cache(maxsize=8)
+def _synthetic_image(size: int) -> bytes:
+    """Return a zero-filled synthetic image buffer, cached by size to avoid per-request allocation."""
+    return b"\x00" * size
 
 
 def _mm_vllm_source_input(
@@ -169,6 +182,7 @@ def _mm_vllm_source_input(
     max_tokens: int,
     temperature: float,
     top_p: float,
+    image_size_bytes: int = DEFAULT_IMAGE_SIZE_BYTES,
 ) -> dict[str, Any]:
     if workload != "mm_vllm":
         raise ValueError(f"unsupported workload: {workload}")
@@ -178,11 +192,13 @@ def _mm_vllm_source_input(
         raise ValueError("top_p must be finite and in (0, 1]")
     if not math.isfinite(temperature) or temperature < 0:
         raise ValueError("temperature must be finite and >= 0")
+    if image_size_bytes <= 0:
+        raise ValueError("image_size_bytes must be > 0")
 
     text = f"mm_vllm benchmark sample #{seq}"
     return {
         "text": text,
-        "image_bytes": b"\x00" * 16,
+        "image_bytes": _synthetic_image(image_size_bytes),
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
@@ -297,6 +313,7 @@ async def execute_benchmark_run(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
+    image_size_bytes: int = DEFAULT_IMAGE_SIZE_BYTES,
 ) -> tuple[dict[str, Any], list[float], dict[str, Any]]:
     if deadline_ms <= 0:
         raise ValueError("deadline_ms must be > 0")
@@ -309,6 +326,7 @@ async def execute_benchmark_run(
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
+            image_size_bytes=image_size_bytes,
         )
         response = await target.infer(payload, deadline_ms=min(deadline_ms, per_request_deadline_ms))
         return response.ok, response.error
@@ -341,6 +359,7 @@ async def execute_benchmark_run(
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
+        "image_size_bytes": image_size_bytes,
     }
     return summary, result.latencies_ms, meta
 
@@ -357,6 +376,12 @@ def _cli(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P)
+    parser.add_argument(
+        "--image-size-bytes",
+        type=int,
+        default=DEFAULT_IMAGE_SIZE_BYTES,
+        help="synthetic image payload size in bytes (default: 65536 / 64 KB)",
+    )
     parser.add_argument(
         "--require-real-backend",
         action="store_true",
@@ -421,6 +446,7 @@ async def _amain(args: argparse.Namespace) -> None:
                     "max_tokens": args.max_tokens,
                     "temperature": args.temperature,
                     "top_p": args.top_p,
+                    "image_size_bytes": args.image_size_bytes,
                     "date": today.isoformat(),
                     "commit": commit,
                     "dry_run": True,
@@ -444,6 +470,7 @@ async def _amain(args: argparse.Namespace) -> None:
                         max_tokens=args.max_tokens,
                         temperature=args.temperature,
                         top_p=args.top_p,
+                        image_size_bytes=args.image_size_bytes,
                     )
                 finally:
                     close = getattr(target, "aclose", None)

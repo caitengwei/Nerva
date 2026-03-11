@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -130,9 +131,12 @@ def _latency_ms(start_ns: int) -> float:
 
 
 def _build_triton_inputs(payload: dict[str, Any], *, deadline_ms: int) -> list[dict[str, Any]]:
-    if "text" in payload or "image_bytes" in payload or "image_size" in payload:
+    if "text" in payload or "image_bytes" in payload:
         text = str(payload.get("text", ""))
-        image_size = _image_size_from_payload(payload)
+        raw_bytes = payload.get("image_bytes", b"")
+        if not isinstance(raw_bytes, (bytes, bytearray, memoryview)):
+            raw_bytes = b""
+        image_b64 = base64.b64encode(bytes(raw_bytes)).decode("ascii")
         max_tokens = _int_payload(payload.get("max_tokens"), default=DEFAULT_MAX_TOKENS, minimum=1)
         temperature = _float_payload(payload.get("temperature"), default=DEFAULT_TEMPERATURE, minimum=0.0)
         top_p = _float_payload(payload.get("top_p"), default=DEFAULT_TOP_P, minimum=1e-6)
@@ -149,10 +153,10 @@ def _build_triton_inputs(payload: dict[str, Any], *, deadline_ms: int) -> list[d
                 "data": [text],
             },
             {
-                "name": "IMAGE_SIZE",
+                "name": "IMAGE_BYTES",
                 "shape": [1],
-                "datatype": "INT32",
-                "data": [image_size],
+                "datatype": "BYTES",
+                "data": [image_b64],
             },
             {
                 "name": "MAX_TOKENS",
@@ -195,19 +199,6 @@ def _build_triton_inputs(payload: dict[str, Any], *, deadline_ms: int) -> list[d
             "data": [prompt],
         }
     ]
-
-
-def _image_size_from_payload(payload: dict[str, Any]) -> int:
-    image_bytes = payload.get("image_bytes")
-    if isinstance(image_bytes, bytes | bytearray | memoryview):
-        return len(image_bytes)
-
-    image_size = payload.get("image_size", 0)
-    try:
-        parsed = int(image_size)
-    except Exception:
-        return 0
-    return max(parsed, 0)
 
 
 def _int_payload(value: object, *, default: int, minimum: int) -> int:

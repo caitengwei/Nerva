@@ -77,7 +77,7 @@ def _ensemble_config(model_name: str) -> str:
     input_entries = ",\n".join(
         [
             '  { name: "TEXT" data_type: TYPE_STRING dims: [ 1 ] }',
-            '  { name: "IMAGE_SIZE" data_type: TYPE_INT32 dims: [ 1 ] }',
+            '  { name: "IMAGE_BYTES" data_type: TYPE_BYTES dims: [ 1 ] }',
             '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] }',
             '  { name: "TEMPERATURE" data_type: TYPE_FP32 dims: [ 1 ] }',
             '  { name: "TOP_P" data_type: TYPE_FP32 dims: [ 1 ] }',
@@ -112,7 +112,7 @@ def _ensemble_config(model_name: str) -> str:
         f'      model_name: "{PREPROCESS_MODEL}"\n'
         "      model_version: -1\n"
         '      input_map { key: "TEXT" value: "TEXT" }\n'
-        '      input_map { key: "IMAGE_SIZE" value: "IMAGE_SIZE" }\n'
+        '      input_map { key: "IMAGE_BYTES" value: "IMAGE_BYTES" }\n'
         '      input_map { key: "MAX_TOKENS" value: "MAX_TOKENS" }\n'
         '      input_map { key: "TEMPERATURE" value: "TEMPERATURE" }\n'
         '      input_map { key: "TOP_P" value: "TOP_P" }\n'
@@ -174,19 +174,22 @@ def _preprocess_model_py() -> str:
         "        responses = []\n"
         "        for request in requests:\n"
         "            text_in = pb_utils.get_input_tensor_by_name(request, 'TEXT')\n"
-        "            size_in = pb_utils.get_input_tensor_by_name(request, 'IMAGE_SIZE')\n"
+        "            image_bytes_in = pb_utils.get_input_tensor_by_name(request, 'IMAGE_BYTES')\n"
         "            max_tokens_in = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
         "            temperature_in = pb_utils.get_input_tensor_by_name(request, 'TEMPERATURE')\n"
         "            top_p_in = pb_utils.get_input_tensor_by_name(request, 'TOP_P')\n"
         "            deadline_in = pb_utils.get_input_tensor_by_name(request, 'DEADLINE_MS')\n"
         "            text_raw = text_in.as_numpy().reshape(-1)[0]\n"
-        "            size_raw = size_in.as_numpy().reshape(-1)[0]\n"
+        "            image_raw = image_bytes_in.as_numpy().reshape(-1)[0]\n"
         "            max_tokens_raw = max_tokens_in.as_numpy().reshape(-1)[0]\n"
         "            temperature_raw = temperature_in.as_numpy().reshape(-1)[0]\n"
         "            top_p_raw = top_p_in.as_numpy().reshape(-1)[0]\n"
         "            deadline_raw = deadline_in.as_numpy().reshape(-1)[0]\n"
         "            text = _to_str(text_raw)\n"
-        "            image_size = int(size_raw)\n"
+        "            # Triton HTTP/REST frontend base64-decodes BYTES tensors before passing\n"
+        "            # to the Python backend; image_raw is already the raw image bytes.\n"
+        "            image_bytes = image_raw if isinstance(image_raw, bytes) else str(image_raw).encode()\n"
+        "            image_size = len(image_bytes)\n"
         "            max_tokens = int(max_tokens_raw)\n"
         "            temperature = float(temperature_raw)\n"
         "            top_p = float(top_p_raw)\n"
@@ -421,7 +424,7 @@ def prepare_triton_repo(
             PREPROCESS_MODEL,
             inputs=[
                 ("TEXT", "TYPE_STRING"),
-                ("IMAGE_SIZE", "TYPE_INT32"),
+                ("IMAGE_BYTES", "TYPE_BYTES"),
                 ("MAX_TOKENS", "TYPE_INT32"),
                 ("TEMPERATURE", "TYPE_FP32"),
                 ("TOP_P", "TYPE_FP32"),
