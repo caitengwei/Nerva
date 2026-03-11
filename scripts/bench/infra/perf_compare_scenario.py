@@ -166,8 +166,6 @@ def build_linux_gpu_perf_compare_scenario(
         triton_repo,
         "--model-name",
         workload,
-        "--vllm-url",
-        vllm_url,
         "--vllm-model",
         vllm_model_name,
     ]

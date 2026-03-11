@@ -67,7 +67,7 @@ def test_linux_gpu_perf_compare_scenario_uses_nerdctl() -> None:
     assert "all" in scenario.triton_container_cmd
 
     prepare_cmd = " ".join(scenario.triton_prepare_cmd)
-    assert "--vllm-url http://127.0.0.1:8001" in prepare_cmd
+    assert "--vllm-url" not in prepare_cmd
     assert "--vllm-model /models" in prepare_cmd
 
     nerva_bench_cmd = " ".join(scenario.benchmark_cmd_by_target["nerva"])
@@ -336,6 +336,17 @@ class _FakeTarget:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+def test_triton_prepare_cmd_does_not_include_vllm_url() -> None:
+    scenario = build_linux_gpu_perf_compare_scenario(
+        model_path="/models",
+        triton_repo="/tmp/triton-repo",
+    )
+    prepare_cmd = " ".join(scenario.triton_prepare_cmd)
+    assert "--vllm-url" not in prepare_cmd
+    assert "prepare_triton_repo.py" in prepare_cmd
+    assert "--vllm-model" in prepare_cmd  # model path 保留
 
 
 @pytest.mark.gpu
