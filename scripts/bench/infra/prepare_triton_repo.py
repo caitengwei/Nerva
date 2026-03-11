@@ -51,6 +51,28 @@ def _python_backend_config(
     )
 
 
+def _infer_model_config(model_name: str) -> str:
+    return (
+        f'name: "{model_name}"\n'
+        'backend: "python"\n'
+        'max_batch_size: 0\n'
+        'model_transaction_policy {\n'
+        '  decoupled: true\n'
+        '}\n'
+        'input [\n'
+        '  { name: "PROMPT" data_type: TYPE_STRING dims: [ 1 ] },\n'
+        '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] },\n'
+        '  { name: "TEMPERATURE" data_type: TYPE_FP32 dims: [ 1 ] },\n'
+        '  { name: "TOP_P" data_type: TYPE_FP32 dims: [ 1 ] },\n'
+        '  { name: "DEADLINE_MS" data_type: TYPE_INT32 dims: [ 1 ] },\n'
+        '  { name: "STREAM" data_type: TYPE_BOOL dims: [ 1 ] optional: true }\n'
+        ']\n'
+        'output [\n'
+        '  { name: "TEXT" data_type: TYPE_STRING dims: [ 1 ] }\n'
+        ']\n'
+    )
+
+
 def _ensemble_config(model_name: str) -> str:
     input_entries = ",\n".join(
         [
@@ -74,6 +96,9 @@ def _ensemble_config(model_name: str) -> str:
         # Keep batching disabled for full-e2e comparability and to match the scalar
         # request handling implemented in generated Python backend stages.
         'max_batch_size: 0\n'
+        'model_transaction_policy {\n'
+        '  decoupled: true\n'
+        '}\n'
         'input [\n'
         f"{input_entries}\n"
         ']\n'
@@ -185,16 +210,14 @@ def _preprocess_model_py() -> str:
     )
 
 
-def _infer_model_py(*, vllm_base_url: str, vllm_model_name: str) -> str:
-    vllm_url = f"{vllm_base_url.rstrip('/')}/v1/completions"
-    vllm_url_literal = repr(vllm_url)
+def _infer_model_py(*, vllm_model_name: str) -> str:
     vllm_model_literal = repr(vllm_model_name)
     return (
         "from __future__ import annotations\n"
         "\n"
-        "import json\n"
-        "import urllib.error\n"
-        "import urllib.request\n"
+        "import asyncio\n"
+        "import threading\n"
+        "import uuid\n"
         "\n"
         "import numpy as np\n"
         "import triton_python_backend_utils as pb_utils\n"
@@ -208,75 +231,89 @@ def _infer_model_py(*, vllm_base_url: str, vllm_model_name: str) -> str:
         "\n"
         "class TritonPythonModel:\n"
         "    def initialize(self, args):\n"
-        "        del args\n"
-        f"        self._vllm_url = {vllm_url_literal}\n"
-        f"        self._vllm_model = {vllm_model_literal}\n"
-        "\n"
-        "    def _request_vllm(self, *, prompt: str, max_tokens: int, temperature: float, top_p: float, deadline_ms: int) -> str:\n"
-        "        body = {\n"
-        "            'model': self._vllm_model,\n"
-        "            'prompt': prompt,\n"
-        "            'max_tokens': max_tokens,\n"
-        "            'temperature': temperature,\n"
-        "            'top_p': top_p,\n"
-        "            'stream': False,\n"
-        "        }\n"
-        "        encoded = json.dumps(body).encode('utf-8')\n"
-        "        req = urllib.request.Request(\n"
-        "            self._vllm_url,\n"
-        "            data=encoded,\n"
-        "            headers={'Content-Type': 'application/json'},\n"
-        "            method='POST',\n"
+        "        import vllm\n"
+        f"        engine_args = vllm.AsyncEngineArgs(model={vllm_model_literal})\n"
+        "        self._engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)\n"
+        "        self._loop = asyncio.new_event_loop()\n"
+        "        self._thread = threading.Thread(\n"
+        "            target=self._loop.run_forever, daemon=True\n"
         "        )\n"
-        "        timeout_s = max(float(deadline_ms) / 1000.0, 0.001)\n"
-        "        with urllib.request.urlopen(req, timeout=timeout_s) as response:\n"
-        "            payload = response.read().decode('utf-8', errors='ignore')\n"
-        "        data = json.loads(payload)\n"
-        "        choices = data.get('choices') if isinstance(data, dict) else None\n"
-        "        if not isinstance(choices, list) or not choices:\n"
-        "            raise RuntimeError('missing choices in vLLM response')\n"
-        "        first = choices[0]\n"
-        "        if not isinstance(first, dict):\n"
-        "            raise RuntimeError('invalid first choice in vLLM response')\n"
-        "        text = first.get('text')\n"
-        "        if not isinstance(text, str):\n"
-        "            raise RuntimeError('missing text in vLLM response')\n"
-        "        return text\n"
+        "        self._thread.start()\n"
         "\n"
         "    def execute(self, requests):\n"
-        "        responses = []\n"
         "        for request in requests:\n"
-        "            prompt_in = pb_utils.get_input_tensor_by_name(request, 'PROMPT')\n"
-        "            max_tokens_in = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
-        "            temperature_in = pb_utils.get_input_tensor_by_name(request, 'TEMPERATURE')\n"
-        "            top_p_in = pb_utils.get_input_tensor_by_name(request, 'TOP_P')\n"
-        "            deadline_in = pb_utils.get_input_tensor_by_name(request, 'DEADLINE_MS')\n"
-        "            prompt_raw = prompt_in.as_numpy().reshape(-1)[0]\n"
-        "            max_tokens_raw = max_tokens_in.as_numpy().reshape(-1)[0]\n"
-        "            temperature_raw = temperature_in.as_numpy().reshape(-1)[0]\n"
-        "            top_p_raw = top_p_in.as_numpy().reshape(-1)[0]\n"
-        "            deadline_raw = deadline_in.as_numpy().reshape(-1)[0]\n"
-        "            max_tokens = int(max_tokens_raw)\n"
-        "            temperature = float(temperature_raw)\n"
-        "            top_p = float(top_p_raw)\n"
-        "            deadline_ms = max(int(deadline_raw), 1)\n"
-        "            prompt = _to_str(prompt_raw)\n"
-        "            try:\n"
-        "                text = self._request_vllm(\n"
-        "                    prompt=prompt,\n"
-        "                    max_tokens=max_tokens,\n"
-        "                    temperature=temperature,\n"
-        "                    top_p=top_p,\n"
-        "                    deadline_ms=deadline_ms,\n"
-        "                )\n"
-        "            except Exception as exc:\n"
-        "                responses.append(\n"
-        "                    pb_utils.InferenceResponse(error=pb_utils.TritonError(str(exc)))\n"
-        "                )\n"
-        "                continue\n"
-        "            out = pb_utils.Tensor('TEXT', np.array([text], dtype=object))\n"
-        "            responses.append(pb_utils.InferenceResponse(output_tensors=[out]))\n"
-        "        return responses\n"
+        "            sender = request.get_response_sender()\n"
+        "            asyncio.run_coroutine_threadsafe(\n"
+        "                self._handle(request, sender), self._loop\n"
+        "            )\n"
+        "        return None\n"
+        "\n"
+        "    async def _handle(self, request, sender):\n"
+        "        import vllm\n"
+        "        try:\n"
+        "            prompt_t = pb_utils.get_input_tensor_by_name(request, 'PROMPT')\n"
+        "            max_tokens_t = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
+        "            temperature_t = pb_utils.get_input_tensor_by_name(request, 'TEMPERATURE')\n"
+        "            top_p_t = pb_utils.get_input_tensor_by_name(request, 'TOP_P')\n"
+        "            deadline_t = pb_utils.get_input_tensor_by_name(request, 'DEADLINE_MS')\n"
+        "            stream_t = pb_utils.get_input_tensor_by_name(request, 'STREAM')\n"
+        "\n"
+        "            prompt = _to_str(prompt_t.as_numpy().reshape(-1)[0])\n"
+        "            max_tokens = int(max_tokens_t.as_numpy().reshape(-1)[0])\n"
+        "            temperature = float(temperature_t.as_numpy().reshape(-1)[0])\n"
+        "            top_p = float(top_p_t.as_numpy().reshape(-1)[0])\n"
+        "            deadline_ms = max(int(deadline_t.as_numpy().reshape(-1)[0]), 1)\n"
+        "            stream = (\n"
+        "                bool(stream_t.as_numpy().reshape(-1)[0])\n"
+        "                if stream_t is not None\n"
+        "                else False\n"
+        "            )\n"
+        "\n"
+        "            sampling_params = vllm.SamplingParams(\n"
+        "                max_tokens=max_tokens,\n"
+        "                temperature=temperature,\n"
+        "                top_p=top_p,\n"
+        "            )\n"
+        "            request_id = str(uuid.uuid4())\n"
+        "            timeout_s = deadline_ms / 1000.0\n"
+        "\n"
+        "            final_text = ''\n"
+        "            async with asyncio.timeout(timeout_s):\n"
+        "                async for output in self._engine.generate(\n"
+        "                    prompt, sampling_params, request_id\n"
+        "                ):\n"
+        "                    if output.outputs:\n"
+        "                        final_text = output.outputs[0].text\n"
+        "                    if stream and output.outputs:\n"
+        "                        out = pb_utils.Tensor(\n"
+        "                            'TEXT',\n"
+        "                            np.array([output.outputs[0].text], dtype=object),\n"
+        "                        )\n"
+        "                        flags = (\n"
+        "                            pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL\n"
+        "                            if output.finished\n"
+        "                            else 0\n"
+        "                        )\n"
+        "                        sender.send(\n"
+        "                            pb_utils.InferenceResponse(output_tensors=[out]),\n"
+        "                            flags=flags,\n"
+        "                        )\n"
+        "                    elif not stream and output.finished:\n"
+        "                        out = pb_utils.Tensor(\n"
+        "                            'TEXT',\n"
+        "                            np.array([final_text], dtype=object),\n"
+        "                        )\n"
+        "                        sender.send(\n"
+        "                            pb_utils.InferenceResponse(output_tensors=[out]),\n"
+        "                            flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
+        "                        )\n"
+        "        except Exception as exc:\n"
+        "            sender.send(\n"
+        "                pb_utils.InferenceResponse(\n"
+        "                    error=pb_utils.TritonError(str(exc))\n"
+        "                ),\n"
+        "                flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
+        "            )\n"
     )
 
 
@@ -316,18 +353,12 @@ def prepare_triton_repo(
     output: Path,
     *,
     model_name: str = "mm_vllm",
-    vllm_base_url: str = "http://127.0.0.1:8001",
     vllm_model_name: str = "/models",
-    infer_instance_count: int = 1,
 ) -> Path:
     if model_name in {PREPROCESS_MODEL, INFER_MODEL, POSTPROCESS_MODEL}:
         raise ValueError(f"model_name '{model_name}' conflicts with reserved stage model names")
-    if not vllm_base_url:
-        raise ValueError("vllm_base_url must not be empty")
     if not vllm_model_name:
         raise ValueError("vllm_model_name must not be empty")
-    if infer_instance_count <= 0:
-        raise ValueError("infer_instance_count must be > 0")
 
     output.mkdir(parents=True, exist_ok=True)
 
@@ -363,23 +394,10 @@ def prepare_triton_repo(
     )
     _write_python_model(preprocess_root, source=_preprocess_model_py())
 
-    (infer_root / "config.pbtxt").write_text(
-        _python_backend_config(
-            INFER_MODEL,
-            inputs=[
-                ("PROMPT", "TYPE_STRING"),
-                ("MAX_TOKENS", "TYPE_INT32"),
-                ("TEMPERATURE", "TYPE_FP32"),
-                ("TOP_P", "TYPE_FP32"),
-                ("DEADLINE_MS", "TYPE_INT32"),
-            ],
-            outputs=[("TEXT", "TYPE_STRING")],
-            instance_count=infer_instance_count if infer_instance_count > 1 else None,
-        )
-    )
+    (infer_root / "config.pbtxt").write_text(_infer_model_config(INFER_MODEL))
     _write_python_model(
         infer_root,
-        source=_infer_model_py(vllm_base_url=vllm_base_url, vllm_model_name=vllm_model_name),
+        source=_infer_model_py(vllm_model_name=vllm_model_name),
     )
 
     (postprocess_root / "config.pbtxt").write_text(
@@ -401,9 +419,7 @@ def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare Triton model repository for the mm_vllm ensemble")
     parser.add_argument("--output", required=True)
     parser.add_argument("--model-name", default="mm_vllm")
-    parser.add_argument("--vllm-url", default="http://127.0.0.1:8001")
     parser.add_argument("--vllm-model", default="/models")
-    parser.add_argument("--infer-instance-count", type=int, default=1)
     return parser.parse_args(argv)
 
 
@@ -413,9 +429,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo = prepare_triton_repo(
         output,
         model_name=args.model_name,
-        vllm_base_url=args.vllm_url,
         vllm_model_name=args.vllm_model,
-        infer_instance_count=args.infer_instance_count,
     )
     print(repo)
     return 0

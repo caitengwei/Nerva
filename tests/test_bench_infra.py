@@ -76,7 +76,6 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     repo = prepare_triton_repo(
         tmp_path,
         model_name="mm_vllm",
-        vllm_base_url="http://127.0.0.1:8001",
         vllm_model_name="/models",
     )
 
@@ -86,7 +85,6 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert (repo / "mm_infer" / "1" / "model.py").exists()
     assert (repo / "mm_postprocess" / "config.pbtxt").exists()
     assert (repo / "mm_postprocess" / "1" / "model.py").exists()
-    # Triton requires a version directory for ensemble models.
     assert (repo / "mm_vllm" / "1").is_dir()
 
     preprocess_cfg = (repo / "mm_preprocess" / "config.pbtxt").read_text()
@@ -98,74 +96,44 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert 'name: "DEADLINE_MS"' in preprocess_cfg
 
     infer_cfg = (repo / "mm_infer" / "config.pbtxt").read_text()
-    assert "}\n  {" not in infer_cfg
     assert "max_batch_size: 0" in infer_cfg
+    assert "decoupled: true" in infer_cfg
     assert 'name: "PROMPT"' in infer_cfg
-    assert 'name: "MAX_TOKENS"' in infer_cfg
-    assert 'name: "TEMPERATURE"' in infer_cfg
-    assert 'name: "TOP_P"' in infer_cfg
-    assert 'name: "DEADLINE_MS"' in infer_cfg
+    assert 'name: "STREAM"' in infer_cfg
+
     infer_py = (repo / "mm_infer" / "1" / "model.py").read_text()
-    assert "/v1/completions" in infer_py
-    assert "http://127.0.0.1:8001" in infer_py
+    assert "AsyncLLMEngine" in infer_py
+    assert "AsyncEngineArgs" in infer_py
+    assert "/v1/completions" not in infer_py
     assert "/models" in infer_py
     assert "deadline_ms" in infer_py
 
     ensemble_cfg = (repo / "mm_vllm" / "config.pbtxt").read_text()
     assert "}\n  {" not in ensemble_cfg
     assert "max_batch_size: 0" in ensemble_cfg
+    assert "decoupled: true" in ensemble_cfg
     assert 'platform: "ensemble"' in ensemble_cfg
     assert 'model_name: "mm_preprocess"' in ensemble_cfg
     assert 'model_name: "mm_infer"' in ensemble_cfg
     assert 'model_name: "mm_postprocess"' in ensemble_cfg
-    assert 'name: "DEADLINE_MS"' in ensemble_cfg
 
     postprocess_py = (repo / "mm_postprocess" / "1" / "model.py").read_text()
     assert "raw_text = _to_str(text_raw)" in postprocess_py
 
 
-def test_prepare_triton_repo_escapes_vllm_literals_with_repr(tmp_path: Path) -> None:
+def test_prepare_triton_repo_escapes_vllm_model_name_with_repr(tmp_path: Path) -> None:
     repo = prepare_triton_repo(
         tmp_path / "repo-escaped",
         model_name="mm_vllm",
-        vllm_base_url="http://127.0.0.1:8001\ninjected",
         vllm_model_name="my'model\ninjected",
     )
     infer_py = (repo / "mm_infer" / "1" / "model.py").read_text()
     compile(infer_py, "<mm_infer_model>", "exec")
-
     literal_lines = [
-        line
-        for line in infer_py.splitlines()
-        if "self._vllm_url =" in line or "self._vllm_model =" in line
+        line for line in infer_py.splitlines() if "AsyncEngineArgs" in line
     ]
-    assert len(literal_lines) == 2
+    assert len(literal_lines) == 1
     assert "\\n" in literal_lines[0]
-    assert "\\n" in literal_lines[1]
-
-
-def test_prepare_triton_repo_supports_infer_instance_count(tmp_path: Path) -> None:
-    repo = prepare_triton_repo(
-        tmp_path / "repo-infer-instance-count",
-        model_name="mm_vllm",
-        vllm_base_url="http://127.0.0.1:8001",
-        vllm_model_name="/models",
-        infer_instance_count=8,
-    )
-    infer_cfg = (repo / "mm_infer" / "config.pbtxt").read_text()
-    assert "instance_group [" in infer_cfg
-    assert "{ kind: KIND_CPU count: 8 }" in infer_cfg
-
-
-def test_prepare_triton_repo_rejects_non_positive_infer_instance_count(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="infer_instance_count must be > 0"):
-        prepare_triton_repo(
-            tmp_path / "repo-invalid-infer-instance-count",
-            model_name="mm_vllm",
-            vllm_base_url="http://127.0.0.1:8001",
-            vllm_model_name="/models",
-            infer_instance_count=0,
-        )
 
 
 def test_vllm_launch_mode_requires_explicit_mock_opt_in() -> None:
