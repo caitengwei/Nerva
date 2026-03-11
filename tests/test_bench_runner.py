@@ -128,6 +128,12 @@ def test_payload_for_targets_rejects_invalid_temperature(invalid_temperature: fl
         )
 
 
+@pytest.mark.parametrize("invalid_size", [0, -1, -100])
+def test_payload_for_targets_rejects_invalid_image_size_bytes(invalid_size: int) -> None:
+    with pytest.raises(ValueError, match="image_size_bytes must be > 0"):
+        _payload_for_target(seq=1, workload="mm_vllm", image_size_bytes=invalid_size)
+
+
 async def test_execute_benchmark_run_counts_target_errors() -> None:
     class _DummyTarget:
         async def infer(self, payload: dict[str, Any], *, deadline_ms: int) -> TargetResponse:

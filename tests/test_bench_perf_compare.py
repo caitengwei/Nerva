@@ -145,6 +145,7 @@ async def test_bench_perf_compare_non_dry_run_executes_all_targets(
         max_tokens: int,
         temperature: float,
         top_p: float,
+        image_size_bytes: int,
     ) -> tuple[dict[str, object], list[float], dict[str, object]]:
         called_targets.append(run.target)
         assert target.name == run.target
@@ -251,9 +252,10 @@ async def test_bench_perf_compare_detect_backend_once_per_target(
         max_tokens: int,
         temperature: float,
         top_p: float,
+        image_size_bytes: int,
     ) -> tuple[dict[str, object], list[float], dict[str, object]]:
         assert target.name == run.target
-        del deadline_ms, max_tokens, temperature, top_p
+        del deadline_ms, max_tokens, temperature, top_p, image_size_bytes
         return (
             {
                 "target": run.target,

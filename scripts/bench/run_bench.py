@@ -439,6 +439,7 @@ async def _amain(args: argparse.Namespace) -> None:
                     "max_tokens": args.max_tokens,
                     "temperature": args.temperature,
                     "top_p": args.top_p,
+                    "image_size_bytes": args.image_size_bytes,
                     "date": today.isoformat(),
                     "commit": commit,
                     "dry_run": True,
