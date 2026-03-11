@@ -90,6 +90,9 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     preprocess_cfg = (repo / "mm_preprocess" / "config.pbtxt").read_text()
     assert "}\n  {" not in preprocess_cfg
     assert "max_batch_size: 0" in preprocess_cfg
+    assert 'name: "IMAGE_BYTES"' in preprocess_cfg
+    assert "TYPE_BYTES" in preprocess_cfg
+    assert 'name: "IMAGE_SIZE"' not in preprocess_cfg
     assert 'name: "MAX_TOKENS"' in preprocess_cfg
     assert 'name: "TEMPERATURE"' in preprocess_cfg
     assert 'name: "TOP_P"' in preprocess_cfg
@@ -120,11 +123,19 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert "max_batch_size: 0" in ensemble_cfg
     assert "decoupled: true" in ensemble_cfg
     assert 'name: "STREAM"' in ensemble_cfg
+    assert 'name: "IMAGE_BYTES"' in ensemble_cfg
     assert 'platform: "ensemble"' in ensemble_cfg
     assert 'model_name: "mm_preprocess"' in ensemble_cfg
     assert 'model_name: "mm_infer"' in ensemble_cfg
     assert 'model_name: "mm_postprocess"' in ensemble_cfg
     assert 'input_map { key: "STREAM" value: "STREAM" }' in ensemble_cfg
+    assert 'input_map { key: "IMAGE_BYTES" value: "IMAGE_BYTES" }' in ensemble_cfg
+
+    preprocess_py = (repo / "mm_preprocess" / "1" / "model.py").read_text()
+    assert "import base64" in preprocess_py
+    assert "IMAGE_BYTES" in preprocess_py
+    assert "base64.b64decode" in preprocess_py
+    assert "image_size" in preprocess_py
 
     postprocess_py = (repo / "mm_postprocess" / "1" / "model.py").read_text()
     assert "raw_text = _to_str(text_raw)" in postprocess_py

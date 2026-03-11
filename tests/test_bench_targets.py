@@ -403,7 +403,7 @@ async def test_triton_infer_builds_full_e2e_inputs_for_ensemble() -> None:
     assert isinstance(captured.get("inputs"), list)
     inputs = captured["inputs"]
     names = {item["name"] for item in inputs}
-    assert names == {"TEXT", "IMAGE_SIZE", "MAX_TOKENS", "TEMPERATURE", "TOP_P", "DEADLINE_MS", "STREAM"}
+    assert names == {"TEXT", "IMAGE_BYTES", "MAX_TOKENS", "TEMPERATURE", "TOP_P", "DEADLINE_MS", "STREAM"}
     by_name = {item["name"]: item for item in inputs}
     assert by_name["DEADLINE_MS"]["data"] == [1000]
 
@@ -436,18 +436,29 @@ async def test_triton_infer_uses_module_default_sampling_values() -> None:
 
 
 def test_triton_infer_sends_stream_false_tensor() -> None:
+    import base64
+
     from scripts.bench.targets.triton_infer import _build_triton_inputs
 
+    image_bytes = b"\xde\xad\xbe\xef" * 4  # non-ASCII bytes to confirm base64 encoding
     payload = {
         "text": "hello",
-        "image_bytes": b"\x00" * 16,
+        "image_bytes": image_bytes,
         "max_tokens": 256,
         "temperature": 1.0,
         "top_p": 1.0,
     }
     inputs = _build_triton_inputs(payload, deadline_ms=5000)
     names = [inp["name"] for inp in inputs]
+
     assert "STREAM" in names
     stream_input = next(inp for inp in inputs if inp["name"] == "STREAM")
     assert stream_input["datatype"] == "BOOL"
     assert stream_input["data"] == [False]
+
+    assert "IMAGE_BYTES" in names
+    image_input = next(inp for inp in inputs if inp["name"] == "IMAGE_BYTES")
+    assert image_input["datatype"] == "BYTES"
+    # data[0] must be a valid base64 string decoding to the original bytes
+    decoded = base64.b64decode(image_input["data"][0])
+    assert decoded == image_bytes
