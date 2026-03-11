@@ -107,20 +107,24 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert "/v1/completions" not in infer_py
     assert "/models" in infer_py
     assert "deadline_ms" in infer_py
+    assert "DEADLINE_EXCEEDED" in infer_py
     assert "TRITONSERVER_RESPONSE_COMPLETE_FINAL" in infer_py
     assert "asyncio.timeout" in infer_py
     assert "run_coroutine_threadsafe" in infer_py
     assert "get_response_sender" in infer_py
     assert "TritonError" in infer_py
+    assert "def finalize(self)" in infer_py
 
     ensemble_cfg = (repo / "mm_vllm" / "config.pbtxt").read_text()
     assert "}\n  {" not in ensemble_cfg
     assert "max_batch_size: 0" in ensemble_cfg
     assert "decoupled: true" in ensemble_cfg
+    assert 'name: "STREAM"' in ensemble_cfg
     assert 'platform: "ensemble"' in ensemble_cfg
     assert 'model_name: "mm_preprocess"' in ensemble_cfg
     assert 'model_name: "mm_infer"' in ensemble_cfg
     assert 'model_name: "mm_postprocess"' in ensemble_cfg
+    assert 'input_map { key: "STREAM" value: "STREAM" }' in ensemble_cfg
 
     postprocess_py = (repo / "mm_postprocess" / "1" / "model.py").read_text()
     assert "raw_text = _to_str(text_raw)" in postprocess_py

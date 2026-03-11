@@ -82,6 +82,7 @@ def _ensemble_config(model_name: str) -> str:
             '  { name: "TEMPERATURE" data_type: TYPE_FP32 dims: [ 1 ] }',
             '  { name: "TOP_P" data_type: TYPE_FP32 dims: [ 1 ] }',
             '  { name: "DEADLINE_MS" data_type: TYPE_INT32 dims: [ 1 ] }',
+            '  { name: "STREAM" data_type: TYPE_BOOL dims: [ 1 ] optional: true }',
         ]
     )
     output_entries = ",\n".join(
@@ -130,6 +131,7 @@ def _ensemble_config(model_name: str) -> str:
         '      input_map { key: "TEMPERATURE" value: "PHASE7_TEMPERATURE" }\n'
         '      input_map { key: "TOP_P" value: "PHASE7_TOP_P" }\n'
         '      input_map { key: "DEADLINE_MS" value: "PHASE7_DEADLINE_MS" }\n'
+        '      input_map { key: "STREAM" value: "STREAM" }\n'
         '      output_map { key: "TEXT" value: "PHASE7_TEXT" }\n'
         "    },\n"
         "    {\n"
@@ -231,6 +233,7 @@ def _infer_model_py(*, vllm_model_name: str) -> str:
         "\n"
         "class TritonPythonModel:\n"
         "    def initialize(self, args):\n"
+        "        del args\n"
         "        import vllm\n"
         f"        engine_args = vllm.AsyncEngineArgs(model={vllm_model_literal})\n"
         "        self._engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)\n"
@@ -240,9 +243,27 @@ def _infer_model_py(*, vllm_model_name: str) -> str:
         "        )\n"
         "        self._thread.start()\n"
         "\n"
+        "    def finalize(self):\n"
+        "        loop = getattr(self, '_loop', None)\n"
+        "        thread = getattr(self, '_thread', None)\n"
+        "        self._engine = None\n"
+        "        self._loop = None\n"
+        "        self._thread = None\n"
+        "        if loop is not None:\n"
+        "            try:\n"
+        "                loop.call_soon_threadsafe(loop.stop)\n"
+        "            except Exception:\n"
+        "                pass\n"
+        "        if (\n"
+        "            thread is not None\n"
+        "            and thread.is_alive()\n"
+        "            and thread is not threading.current_thread()\n"
+        "        ):\n"
+        "            thread.join(timeout=5.0)\n"
+        "\n"
         "    def execute(self, requests):\n"
         "        for request in requests:\n"
-        "            sender = request.get_response_sender()\n"
+            "            sender = request.get_response_sender()\n"
         "            asyncio.run_coroutine_threadsafe(\n"
         "                self._handle(request, sender), self._loop\n"
         "            )\n"
@@ -250,11 +271,13 @@ def _infer_model_py(*, vllm_model_name: str) -> str:
         "\n"
         "    async def _handle(self, request, sender):\n"
         "        import vllm\n"
+        "        deadline_ms = 0\n"
+        "        timeout_s = 0.0\n"
         "        try:\n"
-        "            prompt_t = pb_utils.get_input_tensor_by_name(request, 'PROMPT')\n"
-        "            max_tokens_t = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
-        "            temperature_t = pb_utils.get_input_tensor_by_name(request, 'TEMPERATURE')\n"
-        "            top_p_t = pb_utils.get_input_tensor_by_name(request, 'TOP_P')\n"
+            "            prompt_t = pb_utils.get_input_tensor_by_name(request, 'PROMPT')\n"
+            "            max_tokens_t = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
+            "            temperature_t = pb_utils.get_input_tensor_by_name(request, 'TEMPERATURE')\n"
+            "            top_p_t = pb_utils.get_input_tensor_by_name(request, 'TOP_P')\n"
         "            deadline_t = pb_utils.get_input_tensor_by_name(request, 'DEADLINE_MS')\n"
         "            stream_t = pb_utils.get_input_tensor_by_name(request, 'STREAM')\n"
         "\n"
@@ -319,11 +342,20 @@ def _infer_model_py(*, vllm_model_name: str) -> str:
         "                            pb_utils.InferenceResponse(output_tensors=[out]),\n"
         "                            flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
         "                        )\n"
-        "        except Exception as exc:\n"
+        "        except TimeoutError:\n"
         "            sender.send(\n"
         "                pb_utils.InferenceResponse(\n"
-        "                    error=pb_utils.TritonError(str(exc))\n"
+        "                    error=pb_utils.TritonError(\n"
+        "                        f'DEADLINE_EXCEEDED: deadline_ms={deadline_ms}, timeout_s={timeout_s:.3f}'\n"
+        "                    )\n"
         "                ),\n"
+        "                flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
+        "            )\n"
+        "        except Exception as exc:\n"
+            "            sender.send(\n"
+                "                pb_utils.InferenceResponse(\n"
+                    "                    error=pb_utils.TritonError(str(exc))\n"
+                "                ),\n"
         "                flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
         "            )\n"
     )
