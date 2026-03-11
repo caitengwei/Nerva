@@ -178,6 +178,12 @@ def _build_triton_inputs(payload: dict[str, Any], *, deadline_ms: int) -> list[d
                 "datatype": "INT32",
                 "data": [per_request_deadline_ms],
             },
+            {
+                "name": "STREAM",
+                "shape": [1],
+                "datatype": "BOOL",
+                "data": [False],
+            },
         ]
 
     prompt = str(payload.get("prompt", ""))
@@ -206,7 +212,7 @@ def _image_size_from_payload(payload: dict[str, Any]) -> int:
 
 def _int_payload(value: object, *, default: int, minimum: int) -> int:
     try:
-        parsed = int(value)
+        parsed = int(str(value))
     except Exception:
         return default
     return max(parsed, minimum)
@@ -214,7 +220,7 @@ def _int_payload(value: object, *, default: int, minimum: int) -> int:
 
 def _float_payload(value: object, *, default: float, minimum: float) -> float:
     try:
-        parsed = float(value)
+        parsed = float(str(value))
     except Exception:
         return default
     return max(parsed, minimum)

@@ -403,7 +403,7 @@ async def test_triton_infer_builds_full_e2e_inputs_for_ensemble() -> None:
     assert isinstance(captured.get("inputs"), list)
     inputs = captured["inputs"]
     names = {item["name"] for item in inputs}
-    assert names == {"TEXT", "IMAGE_SIZE", "MAX_TOKENS", "TEMPERATURE", "TOP_P", "DEADLINE_MS"}
+    assert names == {"TEXT", "IMAGE_SIZE", "MAX_TOKENS", "TEMPERATURE", "TOP_P", "DEADLINE_MS", "STREAM"}
     by_name = {item["name"]: item for item in inputs}
     assert by_name["DEADLINE_MS"]["data"] == [1000]
 
@@ -433,3 +433,21 @@ async def test_triton_infer_uses_module_default_sampling_values() -> None:
     assert by_name["MAX_TOKENS"]["data"] == [triton_infer.DEFAULT_MAX_TOKENS]
     assert by_name["TEMPERATURE"]["data"] == [triton_infer.DEFAULT_TEMPERATURE]
     assert by_name["TOP_P"]["data"] == [triton_infer.DEFAULT_TOP_P]
+
+
+def test_triton_infer_sends_stream_false_tensor() -> None:
+    from scripts.bench.targets.triton_infer import _build_triton_inputs
+
+    payload = {
+        "text": "hello",
+        "image_bytes": b"\x00" * 16,
+        "max_tokens": 256,
+        "temperature": 1.0,
+        "top_p": 1.0,
+    }
+    inputs = _build_triton_inputs(payload, deadline_ms=5000)
+    names = [inp["name"] for inp in inputs]
+    assert "STREAM" in names
+    stream_input = next(inp for inp in inputs if inp["name"] == "STREAM")
+    assert stream_input["datatype"] == "BOOL"
+    assert stream_input["data"] == [False]
