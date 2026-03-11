@@ -212,7 +212,7 @@ def _image_size_from_payload(payload: dict[str, Any]) -> int:
 
 def _int_payload(value: object, *, default: int, minimum: int) -> int:
     try:
-        parsed = int(value)
+        parsed = int(str(value))
     except Exception:
         return default
     return max(parsed, minimum)
@@ -220,7 +220,7 @@ def _int_payload(value: object, *, default: int, minimum: int) -> int:
 
 def _float_payload(value: object, *, default: float, minimum: float) -> float:
     try:
-        parsed = float(value)
+        parsed = float(str(value))
     except Exception:
         return default
     return max(parsed, minimum)
