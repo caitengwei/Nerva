@@ -107,6 +107,11 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert "/v1/completions" not in infer_py
     assert "/models" in infer_py
     assert "deadline_ms" in infer_py
+    assert "TRITONSERVER_RESPONSE_COMPLETE_FINAL" in infer_py
+    assert "asyncio.timeout" in infer_py
+    assert "run_coroutine_threadsafe" in infer_py
+    assert "get_response_sender" in infer_py
+    assert "TritonError" in infer_py
 
     ensemble_cfg = (repo / "mm_vllm" / "config.pbtxt").read_text()
     assert "}\n  {" not in ensemble_cfg
@@ -134,6 +139,9 @@ def test_prepare_triton_repo_escapes_vllm_model_name_with_repr(tmp_path: Path) -
     ]
     assert len(literal_lines) == 1
     assert "\\n" in literal_lines[0]
+    # repr() wraps with double quotes when the string contains single quotes,
+    # so the single quote appears literally but is syntactically valid Python.
+    # The compile() call above already verifies the output is valid Python.
 
 
 def test_vllm_launch_mode_requires_explicit_mock_opt_in() -> None:
