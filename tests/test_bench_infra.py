@@ -132,10 +132,11 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert 'input_map { key: "IMAGE_BYTES" value: "IMAGE_BYTES" }' in ensemble_cfg
 
     preprocess_py = (repo / "mm_preprocess" / "1" / "model.py").read_text()
-    assert "import base64" in preprocess_py
+    assert "import base64" not in preprocess_py
     assert "IMAGE_BYTES" in preprocess_py
-    assert "base64.b64decode" in preprocess_py
+    assert "base64.b64decode" not in preprocess_py
     assert "image_size" in preprocess_py
+    assert "image_bytes" in preprocess_py
 
     postprocess_py = (repo / "mm_postprocess" / "1" / "model.py").read_text()
     assert "raw_text = _to_str(text_raw)" in postprocess_py
