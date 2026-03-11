@@ -178,6 +178,12 @@ def _build_triton_inputs(payload: dict[str, Any], *, deadline_ms: int) -> list[d
                 "datatype": "INT32",
                 "data": [per_request_deadline_ms],
             },
+            {
+                "name": "STREAM",
+                "shape": [1],
+                "datatype": "BOOL",
+                "data": [False],
+            },
         ]
 
     prompt = str(payload.get("prompt", ""))
