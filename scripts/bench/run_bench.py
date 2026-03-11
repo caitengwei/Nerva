@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import csv
 import datetime as dt
+import functools
 import json
 import math
 import subprocess
@@ -168,6 +169,12 @@ def _payload_for_target(
     )
 
 
+@functools.lru_cache(maxsize=8)
+def _synthetic_image(size: int) -> bytes:
+    """Return a zero-filled synthetic image buffer, cached by size to avoid per-request allocation."""
+    return b"\x00" * size
+
+
 def _mm_vllm_source_input(
     *,
     seq: int,
@@ -191,7 +198,7 @@ def _mm_vllm_source_input(
     text = f"mm_vllm benchmark sample #{seq}"
     return {
         "text": text,
-        "image_bytes": b"\x00" * image_size_bytes,
+        "image_bytes": _synthetic_image(image_size_bytes),
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
