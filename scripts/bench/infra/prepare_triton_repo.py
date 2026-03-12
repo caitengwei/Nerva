@@ -364,6 +364,75 @@ def _infer_model_py(*, vllm_model_name: str) -> str:
     )
 
 
+def _infer_model_py_cpu_mock(*, token_latency_ms: float = 0.5) -> str:
+    """Generate mm_infer model.py that simulates LLM latency without vLLM/GPU.
+
+    Preserves the decoupled sender pattern of the real mm_infer so the ensemble
+    routing and response-handling path stay identical to production.
+    Delay = max_tokens * token_latency_ms milliseconds.
+    """
+    latency_literal = repr(float(token_latency_ms))
+    return (
+        "from __future__ import annotations\n"
+        "\n"
+        "import asyncio\n"
+        "import threading\n"
+        "\n"
+        "import numpy as np\n"
+        "import triton_python_backend_utils as pb_utils\n"
+        "\n"
+        f"_TOKEN_LATENCY_MS: float = {latency_literal}\n"
+        "\n"
+        "\n"
+        "class TritonPythonModel:\n"
+        "    def initialize(self, args):\n"
+        "        del args\n"
+        "        self._loop = asyncio.new_event_loop()\n"
+        "        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)\n"
+        "        self._thread.start()\n"
+        "\n"
+        "    def finalize(self):\n"
+        "        loop = getattr(self, '_loop', None)\n"
+        "        thread = getattr(self, '_thread', None)\n"
+        "        self._loop = None\n"
+        "        self._thread = None\n"
+        "        if loop is not None:\n"
+        "            try:\n"
+        "                loop.call_soon_threadsafe(loop.stop)\n"
+        "            except Exception:\n"
+        "                pass\n"
+        "        if (\n"
+        "            thread is not None\n"
+        "            and thread.is_alive()\n"
+        "            and thread is not threading.current_thread()\n"
+        "        ):\n"
+        "            thread.join(timeout=5.0)\n"
+        "\n"
+        "    def execute(self, requests):\n"
+        "        for request in requests:\n"
+        "            sender = request.get_response_sender()\n"
+        "            asyncio.run_coroutine_threadsafe(self._handle(request, sender), self._loop)\n"
+        "        return None\n"
+        "\n"
+        "    async def _handle(self, request, sender):\n"
+        "        try:\n"
+        "            max_tokens_t = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
+        "            max_tokens = max(int(max_tokens_t.as_numpy().reshape(-1)[0]), 1)\n"
+        "            await asyncio.sleep(max_tokens * _TOKEN_LATENCY_MS / 1000.0)\n"
+        "            text = ' '.join(['tok'] * max_tokens)\n"
+        "            out = pb_utils.Tensor('TEXT', np.array([text], dtype=object))\n"
+        "            sender.send(\n"
+        "                pb_utils.InferenceResponse(output_tensors=[out]),\n"
+        "                flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
+        "            )\n"
+        "        except Exception as exc:\n"
+        "            sender.send(\n"
+        "                pb_utils.InferenceResponse(error=pb_utils.TritonError(str(exc))),\n"
+        "                flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
+        "            )\n"
+    )
+
+
 def _postprocess_model_py() -> str:
     return (
         "from __future__ import annotations\n"
@@ -401,10 +470,12 @@ def prepare_triton_repo(
     *,
     model_name: str = "mm_vllm",
     vllm_model_name: str = "/models",
+    cpu_mock: bool = False,
+    mock_token_latency_ms: float = 0.5,
 ) -> Path:
     if model_name in {PREPROCESS_MODEL, INFER_MODEL, POSTPROCESS_MODEL}:
         raise ValueError(f"model_name '{model_name}' conflicts with reserved stage model names")
-    if not vllm_model_name:
+    if not cpu_mock and not vllm_model_name:
         raise ValueError("vllm_model_name must not be empty")
 
     output.mkdir(parents=True, exist_ok=True)
@@ -442,10 +513,12 @@ def prepare_triton_repo(
     _write_python_model(preprocess_root, source=_preprocess_model_py())
 
     (infer_root / "config.pbtxt").write_text(_infer_model_config(INFER_MODEL))
-    _write_python_model(
-        infer_root,
-        source=_infer_model_py(vllm_model_name=vllm_model_name),
+    infer_source = (
+        _infer_model_py_cpu_mock(token_latency_ms=mock_token_latency_ms)
+        if cpu_mock
+        else _infer_model_py(vllm_model_name=vllm_model_name)
     )
+    _write_python_model(infer_root, source=infer_source)
 
     (postprocess_root / "config.pbtxt").write_text(
         _python_backend_config(
@@ -467,6 +540,17 @@ def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--model-name", default="mm_vllm")
     parser.add_argument("--vllm-model", default="/models")
+    parser.add_argument(
+        "--cpu-mock",
+        action="store_true",
+        help="replace mm_infer vLLM backend with a CPU mock (asyncio.sleep); no GPU required",
+    )
+    parser.add_argument(
+        "--mock-token-latency-ms",
+        type=float,
+        default=0.5,
+        help="per-token latency injected by the CPU mock mm_infer (ms, default: 0.5)",
+    )
     return parser.parse_args(argv)
 
 
@@ -477,6 +561,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output,
         model_name=args.model_name,
         vllm_model_name=args.vllm_model,
+        cpu_mock=args.cpu_mock,
+        mock_token_latency_ms=args.mock_token_latency_ms,
     )
     print(repo)
     return 0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import shlex
@@ -39,6 +40,37 @@ def build_triton_command(
     ]
 
 
+def build_container_command(
+    *,
+    container_cli: str,
+    triton_image: str,
+    model_repo: str,
+    http_port: int,
+    grpc_port: int,
+    metrics_port: int,
+) -> list[str]:
+    """Build command to run tritonserver inside a container (podman/docker/nerdctl).
+
+    Uses port publishing (-p) instead of --network host for compatibility
+    with macOS container runtimes (podman machine uses a Linux VM).
+    """
+    return [
+        container_cli,
+        "run",
+        "--rm",
+        "-p", f"{http_port}:{http_port}",
+        "-p", f"{grpc_port}:{grpc_port}",
+        "-p", f"{metrics_port}:{metrics_port}",
+        "-v", f"{model_repo}:/models",
+        triton_image,
+        "tritonserver",
+        "--model-repository=/models",
+        f"--http-port={http_port}",
+        f"--grpc-port={grpc_port}",
+        f"--metrics-port={metrics_port}",
+    ]
+
+
 def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start Triton server for Phase 7 benchmark")
     parser.add_argument("--model-repo", required=True)
@@ -49,6 +81,24 @@ def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--allow-mock",
         action="store_true",
         help="fallback to a mock Triton-compatible HTTP server when tritonserver is unavailable",
+    )
+    parser.add_argument(
+        "--mock-token-latency-ms",
+        type=float,
+        default=0.0,
+        help="per-token latency (ms) injected into mock infer responses to simulate LLM generation"
+        " (default: 0.0, instant echo)",
+    )
+    parser.add_argument(
+        "--container-cli",
+        default="",
+        help="container runtime to use for launching Triton (e.g. podman, docker, nerdctl);"
+        " when set, runs tritonserver inside a container instead of as a local binary",
+    )
+    parser.add_argument(
+        "--triton-image",
+        default="nvcr.io/nvidia/tritonserver:24.08-py3",
+        help="Triton container image (default: nvcr.io/nvidia/tritonserver:24.08-py3)",
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
@@ -64,7 +114,23 @@ def resolve_launch_mode(*, binary_exists: bool, allow_mock: bool) -> str:
     )
 
 
-def _run_mock_server(*, host: str, port: int, model_repo: str) -> int:
+def _extract_max_tokens(inputs: list[Any]) -> int:
+    """Parse MAX_TOKENS value from a Triton v2 inputs list."""
+    for inp in inputs:
+        if not isinstance(inp, dict):
+            continue
+        if str(inp.get("name", "")).upper() != "MAX_TOKENS":
+            continue
+        data = inp.get("data")
+        if isinstance(data, list) and data:
+            try:
+                return max(int(data[0]), 1)
+            except (TypeError, ValueError):
+                pass
+    return 256
+
+
+def _run_mock_server(*, host: str, port: int, model_repo: str, token_latency_ms: float = 0.0) -> int:
     model_name = _resolve_model_name(model_repo)
 
     async def ready(_request: Request) -> JSONResponse:
@@ -80,6 +146,9 @@ def _run_mock_server(*, host: str, port: int, model_repo: str) -> int:
                 data = first.get("data")
                 if isinstance(data, list) and data:
                     prompt = str(data[0])
+            if token_latency_ms > 0:
+                max_tokens = _extract_max_tokens(inputs)
+                await asyncio.sleep(max_tokens * token_latency_ms / 1000.0)
         payload = {
             "model_name": model_name,
             "outputs": [{"name": "text", "data": [f"[mock-triton] {prompt}"]}],
@@ -129,6 +198,23 @@ def _resolve_model_name(model_repo: str) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _cli(argv)
+
+    # Container mode: delegate entirely to the container runtime.
+    if args.container_cli:
+        container_cmd = build_container_command(
+            container_cli=args.container_cli,
+            triton_image=args.triton_image,
+            model_repo=args.model_repo,
+            http_port=args.http_port,
+            grpc_port=args.grpc_port,
+            metrics_port=args.metrics_port,
+        )
+        if args.dry_run:
+            print(shlex.join(container_cmd))
+            return 0
+        completed = subprocess.run(container_cmd, check=False)
+        return completed.returncode
+
     cmd = build_triton_command(
         model_repo=args.model_repo,
         http_port=args.http_port,
@@ -150,7 +236,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     if launch_mode == "mock":
-        return _run_mock_server(host="127.0.0.1", port=args.http_port, model_repo=args.model_repo)
+        return _run_mock_server(
+            host="127.0.0.1",
+            port=args.http_port,
+            model_repo=args.model_repo,
+            token_latency_ms=args.mock_token_latency_ms,
+        )
 
     completed = subprocess.run(cmd, check=False)
     return completed.returncode

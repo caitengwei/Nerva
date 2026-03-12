@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import time
 from collections import deque
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, Any
@@ -17,6 +19,7 @@ import zmq
 import zmq.asyncio
 
 from nerva.engine.shm_pool import IPC_CONTROL_INLINE_MAX_BYTES, ShmPoolExhausted
+from nerva.observability.timing import AsyncTimingSink
 from nerva.worker.ipc import (
     AckStatus,
     Descriptor,
@@ -61,6 +64,10 @@ class WorkerProxy:
 
         self._recv_task: asyncio.Task[None] | None = None
 
+        # Per-instance IPC timing log (enabled via NERVA_TIMING_LOG_DIR env var).
+        self._model_name: str = ""
+        self._timing_sink: AsyncTimingSink | None = None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -99,6 +106,10 @@ class WorkerProxy:
         if self._ctx is not None:
             self._ctx.term()
             self._ctx = None
+
+        if self._timing_sink is not None:
+            await self._timing_sink.stop()
+            self._timing_sink = None
 
     # ------------------------------------------------------------------
     # RPC methods
@@ -141,6 +152,12 @@ class WorkerProxy:
             error = ack.get("error", "unknown error")
             raise RuntimeError(f"load_model failed: [{status}] {error}")
 
+        self._model_name = model_name
+        timing_log_dir = os.environ.get("NERVA_TIMING_LOG_DIR")
+        if timing_log_dir and self._timing_sink is None:
+            self._timing_sink = AsyncTimingSink()
+            await self._timing_sink.start(timing_log_dir, f"nerva_proxy_{model_name}.log")
+
     async def infer(
         self,
         inputs: dict[str, Any],
@@ -149,6 +166,7 @@ class WorkerProxy:
     ) -> dict[str, Any]:
         """Serialize inputs, send INFER_SUBMIT, wait for INFER_ACK, return output."""
         request_id = context.request_id
+        t_ser_start = time.perf_counter()
         raw_bytes_input = self._extract_raw_bytes_input(inputs)
         if raw_bytes_input is None:
             input_key = None
@@ -157,6 +175,7 @@ class WorkerProxy:
         else:
             input_key, input_bytes = raw_bytes_input
             payload_codec = "raw_bytes_v1"
+        proxy_serialize_ms = round((time.perf_counter() - t_ser_start) * 1000, 3)
         shm_slot = None
 
         if len(input_bytes) <= IPC_CONTROL_INLINE_MAX_BYTES or shm_pool is None:
@@ -190,6 +209,7 @@ class WorkerProxy:
         self._pending[request_id] = fut
         self._request_pools[request_id] = shm_pool
 
+        t_send = time.perf_counter()
         try:
             await self._send({
                 "type": MessageType.INFER_SUBMIT.value,
@@ -199,6 +219,7 @@ class WorkerProxy:
             })
 
             ack = await asyncio.wait_for(fut, timeout=self._submit_timeout)
+            ipc_round_trip_ms = round((time.perf_counter() - t_send) * 1000, 3)
         except TimeoutError:
             self._pending.pop(request_id, None)
             self._release_output_slot(request_id)
@@ -229,7 +250,19 @@ class WorkerProxy:
 
         # Deserialize output from descriptor.
         out_descriptor = Descriptor.from_dict(ack["descriptor"])
-        return self._decode_output(out_descriptor, request_id)
+        t_des_start = time.perf_counter()
+        result = self._decode_output(out_descriptor, request_id)
+        proxy_deserialize_ms = round((time.perf_counter() - t_des_start) * 1000, 3)
+        if self._timing_sink is not None:
+            self._timing_sink.write({
+                "event": "ipc_timing",
+                "request_id": request_id,
+                "model": self._model_name,
+                "ipc_round_trip_ms": ipc_round_trip_ms,
+                "proxy_serialize_ms": proxy_serialize_ms,
+                "proxy_deserialize_ms": proxy_deserialize_ms,
+            })
+        return result
 
     async def cancel(self, request_id: str, reason: str = "") -> None:
         """Send CANCEL (best-effort)."""

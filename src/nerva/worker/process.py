@@ -6,6 +6,8 @@ Entry point: ``worker_entry(socket_path)`` is passed to ``multiprocessing.Proces
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 import uuid
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any
@@ -18,6 +20,7 @@ import zmq.asyncio
 from nerva.backends.base import Backend, InferContext, ModelConfig
 from nerva.backends.registry import get_backend
 from nerva.engine.shm_pool import IPC_CONTROL_INLINE_MAX_BYTES
+from nerva.observability.timing import AsyncTimingSink
 from nerva.worker.ipc import (
     AckStatus,
     Descriptor,
@@ -52,6 +55,7 @@ class _WorkerLoop:
         socket_path: str,
         *,
         shm_alloc_timeout_s: float = DEFAULT_SHM_ALLOC_TIMEOUT_S,
+        timing_log_dir: str | None = None,
     ) -> None:
         self._socket_path = socket_path
         self._shm_alloc_timeout_s = shm_alloc_timeout_s
@@ -63,6 +67,9 @@ class _WorkerLoop:
         self._send_lock: asyncio.Lock | None = None
         self._ctx: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
+        self._model_name: str = ""
+        self._timing_log_dir = timing_log_dir
+        self._timing_sink: AsyncTimingSink | None = None
 
     # -- public entry -------------------------------------------------------
 
@@ -73,6 +80,9 @@ class _WorkerLoop:
         self._socket = self._ctx.socket(zmq.PAIR)
         self._socket.connect(f"ipc://{self._socket_path}")
         self._running = True
+        if self._timing_log_dir is not None:
+            self._timing_sink = AsyncTimingSink()
+            await self._timing_sink.start(self._timing_log_dir, f"nerva_worker_{os.getpid()}.log")
 
         try:
             # Announce readiness.
@@ -145,6 +155,7 @@ class _WorkerLoop:
             )
             await backend.load_model(config)
             self._backend = backend
+            self._model_name = model_name
 
             await self._send({
                 "type": MessageType.LOAD_MODEL_ACK.value,
@@ -165,6 +176,7 @@ class _WorkerLoop:
         """Deserialize inputs, run inference, send INFER_ACK."""
         request_id: str = msg.get("request_id", "")
         context: InferContext | None = None
+        t_recv = time.perf_counter()
         structlog.contextvars.bind_contextvars(request_id=request_id)
         try:
             if self._backend is None:
@@ -191,11 +203,21 @@ class _WorkerLoop:
                 return
 
             try:
+                t_infer_start = time.perf_counter()
                 # Run inference in a thread to avoid blocking the event loop.
                 output = await asyncio.wait_for(
                     asyncio.to_thread(self._run_infer_sync, inputs, context),
                     timeout=context.deadline_ms / 1000.0,
                 )
+                t_infer_end = time.perf_counter()
+                if self._timing_sink is not None:
+                    self._timing_sink.write({
+                        "event": "infer_timing",
+                        "request_id": request_id,
+                        "model": self._model_name,
+                        "worker_deser_ms": round((t_infer_start - t_recv) * 1000, 3),
+                        "backend_infer_ms": round((t_infer_end - t_infer_start) * 1000, 3),
+                    })
             except TimeoutError:
                 context.cancelled = True
                 await self._send({
@@ -469,6 +491,11 @@ class _WorkerLoop:
             self._ctx.term()
             self._ctx = None
 
+        # Stop timing writer and close file.
+        if self._timing_sink is not None:
+            await self._timing_sink.stop()
+            self._timing_sink = None
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -479,7 +506,12 @@ def worker_entry(
     socket_path: str,
     *,
     shm_alloc_timeout_s: float = DEFAULT_SHM_ALLOC_TIMEOUT_S,
+    timing_log_dir: str | None = None,
 ) -> None:
     """Entry point for ``multiprocessing.Process(target=worker_entry, args=(path,))``."""
-    loop = _WorkerLoop(socket_path, shm_alloc_timeout_s=shm_alloc_timeout_s)
+    loop = _WorkerLoop(
+        socket_path,
+        shm_alloc_timeout_s=shm_alloc_timeout_s,
+        timing_log_dir=timing_log_dir,
+    )
     asyncio.run(loop.run())

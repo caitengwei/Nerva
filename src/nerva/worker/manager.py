@@ -92,8 +92,12 @@ class WorkerManager:
             os.unlink(socket_path)
 
         proxy = WorkerProxy(socket_path)
+        timing_log_dir = os.environ.get("NERVA_TIMING_LOG_DIR") or None
         proc = multiprocessing.Process(
-            target=worker_entry, args=(socket_path,), daemon=False
+            target=worker_entry,
+            args=(socket_path,),
+            kwargs={"timing_log_dir": timing_log_dir},
+            daemon=False,
         )
 
         entry = _WorkerEntry(

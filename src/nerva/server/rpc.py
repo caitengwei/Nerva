@@ -16,6 +16,7 @@ from starlette.routing import Route
 if TYPE_CHECKING:
     from starlette.requests import Request
 
+import nerva.observability.timing as _timing
 from nerva.observability.metrics import NervaMetrics, get_metrics
 from nerva.server.protocol import Frame, FrameType, ProtocolError, decode_frame, encode_frame
 
@@ -165,7 +166,9 @@ class RpcHandler:
             )
 
         # Read and parse frames.
+        t_body_start = time.perf_counter()
         body = await request.body()
+        t_body_end = time.perf_counter()
         try:
             frames = _parse_frames(body)
         except ProtocolError as e:
@@ -226,7 +229,10 @@ class RpcHandler:
             )
 
         try:
+            t_parse_start = time.perf_counter()
             inputs: dict[str, Any] = msgpack.unpackb(data_frames[0].payload, raw=False)
+            rpc_parse_ms = round((time.perf_counter() - t_parse_start) * 1000, 3)
+            rpc_body_read_ms = round((t_body_end - t_body_start) * 1000, 3)
         except Exception:
             return Response(
                 content=_error_frame(
@@ -241,6 +247,7 @@ class RpcHandler:
             request_id=str(request_id), pipeline=pipeline_name
         )
         t0 = time.monotonic()
+        t_exec_start = time.perf_counter()
         self._metrics.request_in_flight.labels(pipeline=pipeline_name).inc()
         try:
             result = await executor.execute(
@@ -263,15 +270,33 @@ class RpcHandler:
             self._metrics.request_in_flight.labels(pipeline=pipeline_name).dec()
             structlog.contextvars.clear_contextvars()
 
+        rpc_execute_ms = round((time.perf_counter() - t_exec_start) * 1000, 3)
+
         self._metrics.request_total.labels(pipeline=pipeline_name, status="ok").inc()
 
         # Build response: DATA + END.
+        t_ser_start = time.perf_counter()
         resp_data = encode_frame(
             Frame(FrameType.DATA, request_id, 0, msgpack.packb(result, use_bin_type=True))
         )
         resp_end = encode_frame(
             Frame(FrameType.END, request_id, 0, msgpack.packb({"status": 0}, use_bin_type=True))
         )
+        rpc_serialize_ms = round((time.perf_counter() - t_ser_start) * 1000, 3)
+
+        _timing.write({
+            "event": "rpc_timing",
+            "request_id": str(request_id),
+            "pipeline": pipeline_name,
+            "rpc_body_read_ms": rpc_body_read_ms,
+            "rpc_parse_ms": rpc_parse_ms,
+            "rpc_execute_ms": rpc_execute_ms,
+            "rpc_serialize_ms": rpc_serialize_ms,
+            "rpc_overhead_ms": round(
+                rpc_body_read_ms + rpc_parse_ms + rpc_serialize_ms, 3
+            ),
+        })
+
         return Response(
             content=resp_data + resp_end,
             media_type=CONTENT_TYPE,
