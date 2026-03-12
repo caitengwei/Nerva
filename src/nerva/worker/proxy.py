@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
+import time
 from collections import deque
 from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, Any
@@ -26,6 +29,8 @@ from nerva.worker.ipc import (
 )
 
 if TYPE_CHECKING:
+    from typing import IO
+
     from nerva.backends.base import InferContext
     from nerva.engine.shm_pool import ShmPool, ShmSlot
 
@@ -60,6 +65,10 @@ class WorkerProxy:
         self._health_future: asyncio.Future[dict[str, Any]] | None = None
 
         self._recv_task: asyncio.Task[None] | None = None
+
+        # Per-instance IPC timing log (enabled via NERVA_TIMING_LOG_DIR env var).
+        self._model_name: str = ""
+        self._timing_fp: IO[str] | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -99,6 +108,19 @@ class WorkerProxy:
         if self._ctx is not None:
             self._ctx.term()
             self._ctx = None
+
+        if self._timing_fp is not None:
+            self._timing_fp.close()
+            self._timing_fp = None
+
+    # ------------------------------------------------------------------
+    # Timing helpers
+    # ------------------------------------------------------------------
+
+    def _write_timing(self, data: dict[str, Any]) -> None:
+        """Write a timing JSON line to the per-proxy timing file (no-op if not configured)."""
+        if self._timing_fp is not None:
+            self._timing_fp.write(json.dumps(data) + "\n")
 
     # ------------------------------------------------------------------
     # RPC methods
@@ -140,6 +162,13 @@ class WorkerProxy:
         if status != AckStatus.OK.value:
             error = ack.get("error", "unknown error")
             raise RuntimeError(f"load_model failed: [{status}] {error}")
+
+        self._model_name = model_name
+        timing_log_dir = os.environ.get("NERVA_TIMING_LOG_DIR")
+        if timing_log_dir and self._timing_fp is None:
+            os.makedirs(timing_log_dir, exist_ok=True)
+            fp_path = os.path.join(timing_log_dir, f"nerva_proxy_{model_name}.log")
+            self._timing_fp = open(fp_path, "a", buffering=1)  # noqa: SIM115
 
     async def infer(
         self,
@@ -190,6 +219,7 @@ class WorkerProxy:
         self._pending[request_id] = fut
         self._request_pools[request_id] = shm_pool
 
+        t_send = time.perf_counter()
         try:
             await self._send({
                 "type": MessageType.INFER_SUBMIT.value,
@@ -199,6 +229,12 @@ class WorkerProxy:
             })
 
             ack = await asyncio.wait_for(fut, timeout=self._submit_timeout)
+            self._write_timing({
+                "event": "ipc_timing",
+                "request_id": request_id,
+                "model": self._model_name,
+                "ipc_round_trip_ms": round((time.perf_counter() - t_send) * 1000, 3),
+            })
         except TimeoutError:
             self._pending.pop(request_id, None)
             self._release_output_slot(request_id)
