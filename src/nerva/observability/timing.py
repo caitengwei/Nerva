@@ -72,9 +72,11 @@ class AsyncTimingSink:
                     break
                 if nxt is None:
                     await asyncio.to_thread(fp.write, "".join(batch))
+                    await asyncio.to_thread(fp.flush)
                     return
                 batch.append(nxt)
             await asyncio.to_thread(fp.write, "".join(batch))
+            await asyncio.to_thread(fp.flush)
 
 
 # ---------------------------------------------------------------------------

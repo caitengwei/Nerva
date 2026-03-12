@@ -164,6 +164,7 @@ podman run --rm \
 
 # 4. 压测
 env -u http_proxy -u https_proxy -u all_proxy \
+    -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
 uv run python scripts/bench/run_bench.py \
     --target nerva --target triton \
     --concurrency-levels 1,4,16 \

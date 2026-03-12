@@ -6,25 +6,21 @@ Entry point: ``worker_entry(socket_path)`` is passed to ``multiprocessing.Proces
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json
 import os
 import time
 import uuid
 from multiprocessing.shared_memory import SharedMemory
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import msgpack
 import structlog
 import zmq
 import zmq.asyncio
 
-if TYPE_CHECKING:
-    from typing import IO
-
 from nerva.backends.base import Backend, InferContext, ModelConfig
 from nerva.backends.registry import get_backend
 from nerva.engine.shm_pool import IPC_CONTROL_INLINE_MAX_BYTES
+from nerva.observability.timing import AsyncTimingSink
 from nerva.worker.ipc import (
     AckStatus,
     Descriptor,
@@ -73,9 +69,7 @@ class _WorkerLoop:
         self._socket: zmq.asyncio.Socket | None = None
         self._model_name: str = ""
         self._timing_log_dir = timing_log_dir
-        self._timing_fp: IO[str] | None = None
-        self._timing_queue: asyncio.Queue[str | None] = asyncio.Queue()
-        self._timing_writer_task: asyncio.Task[None] | None = None
+        self._timing_sink: AsyncTimingSink | None = None
 
     # -- public entry -------------------------------------------------------
 
@@ -87,10 +81,8 @@ class _WorkerLoop:
         self._socket.connect(f"ipc://{self._socket_path}")
         self._running = True
         if self._timing_log_dir is not None:
-            os.makedirs(self._timing_log_dir, exist_ok=True)
-            fp_path = os.path.join(self._timing_log_dir, f"nerva_worker_{os.getpid()}.log")
-            self._timing_fp = open(fp_path, "a")  # noqa: SIM115
-            self._timing_writer_task = asyncio.create_task(self._timing_writer_loop())
+            self._timing_sink = AsyncTimingSink()
+            await self._timing_sink.start(self._timing_log_dir, f"nerva_worker_{os.getpid()}.log")
 
         try:
             # Announce readiness.
@@ -137,34 +129,6 @@ class _WorkerLoop:
         def _cb(_t: asyncio.Task[None]) -> None:
             self._inflight.pop(request_id, None)
         return _cb
-
-    # -- timing helpers -----------------------------------------------------
-
-    def _write_timing(self, data: dict[str, Any]) -> None:
-        """Enqueue a timing JSON line (non-blocking; written by background task)."""
-        if self._timing_writer_task is not None:
-            self._timing_queue.put_nowait(json.dumps(data) + "\n")
-
-    async def _timing_writer_loop(self) -> None:
-        """Background task: drain timing queue and write to file via thread pool."""
-        assert self._timing_fp is not None
-        fp = self._timing_fp
-        while True:
-            line = await self._timing_queue.get()
-            if line is None:
-                break
-            # Drain all currently available lines to batch the write.
-            batch = [line]
-            while True:
-                try:
-                    nxt = self._timing_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if nxt is None:
-                    await asyncio.to_thread(fp.write, "".join(batch))
-                    return
-                batch.append(nxt)
-            await asyncio.to_thread(fp.write, "".join(batch))
 
     # -- message handlers ---------------------------------------------------
 
@@ -246,13 +210,14 @@ class _WorkerLoop:
                     timeout=context.deadline_ms / 1000.0,
                 )
                 t_infer_end = time.perf_counter()
-                self._write_timing({
-                    "event": "infer_timing",
-                    "request_id": request_id,
-                    "model": self._model_name,
-                    "worker_deser_ms": round((t_infer_start - t_recv) * 1000, 3),
-                    "backend_infer_ms": round((t_infer_end - t_infer_start) * 1000, 3),
-                })
+                if self._timing_sink is not None:
+                    self._timing_sink.write({
+                        "event": "infer_timing",
+                        "request_id": request_id,
+                        "model": self._model_name,
+                        "worker_deser_ms": round((t_infer_start - t_recv) * 1000, 3),
+                        "backend_infer_ms": round((t_infer_end - t_infer_start) * 1000, 3),
+                    })
             except TimeoutError:
                 context.cancelled = True
                 await self._send({
@@ -527,14 +492,9 @@ class _WorkerLoop:
             self._ctx = None
 
         # Stop timing writer and close file.
-        if self._timing_writer_task is not None:
-            self._timing_queue.put_nowait(None)  # sentinel — signal writer to stop
-            with contextlib.suppress(Exception):
-                await self._timing_writer_task
-            self._timing_writer_task = None
-        if self._timing_fp is not None:
-            self._timing_fp.close()
-            self._timing_fp = None
+        if self._timing_sink is not None:
+            await self._timing_sink.stop()
+            self._timing_sink = None
 
 
 # ---------------------------------------------------------------------------

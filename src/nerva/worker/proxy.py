@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import time
@@ -20,6 +19,7 @@ import zmq
 import zmq.asyncio
 
 from nerva.engine.shm_pool import IPC_CONTROL_INLINE_MAX_BYTES, ShmPoolExhausted
+from nerva.observability.timing import AsyncTimingSink
 from nerva.worker.ipc import (
     AckStatus,
     Descriptor,
@@ -29,8 +29,6 @@ from nerva.worker.ipc import (
 )
 
 if TYPE_CHECKING:
-    from typing import IO
-
     from nerva.backends.base import InferContext
     from nerva.engine.shm_pool import ShmPool, ShmSlot
 
@@ -68,9 +66,7 @@ class WorkerProxy:
 
         # Per-instance IPC timing log (enabled via NERVA_TIMING_LOG_DIR env var).
         self._model_name: str = ""
-        self._timing_fp: IO[str] | None = None
-        self._timing_queue: asyncio.Queue[str | None] = asyncio.Queue()
-        self._timing_writer_task: asyncio.Task[None] | None = None
+        self._timing_sink: AsyncTimingSink | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -111,44 +107,9 @@ class WorkerProxy:
             self._ctx.term()
             self._ctx = None
 
-        if self._timing_writer_task is not None:
-            self._timing_queue.put_nowait(None)  # sentinel — signal writer to stop
-            with contextlib.suppress(Exception):
-                await self._timing_writer_task
-            self._timing_writer_task = None
-        if self._timing_fp is not None:
-            self._timing_fp.close()
-            self._timing_fp = None
-
-    # ------------------------------------------------------------------
-    # Timing helpers
-    # ------------------------------------------------------------------
-
-    def _write_timing(self, data: dict[str, Any]) -> None:
-        """Enqueue a timing JSON line (non-blocking; written by background task)."""
-        if self._timing_writer_task is not None:
-            self._timing_queue.put_nowait(json.dumps(data) + "\n")
-
-    async def _timing_writer_loop(self) -> None:
-        """Background task: drain timing queue and write to file via thread pool."""
-        assert self._timing_fp is not None
-        fp = self._timing_fp
-        while True:
-            line = await self._timing_queue.get()
-            if line is None:
-                break
-            # Drain all currently available lines to batch the write.
-            batch = [line]
-            while True:
-                try:
-                    nxt = self._timing_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if nxt is None:
-                    await asyncio.to_thread(fp.write, "".join(batch))
-                    return
-                batch.append(nxt)
-            await asyncio.to_thread(fp.write, "".join(batch))
+        if self._timing_sink is not None:
+            await self._timing_sink.stop()
+            self._timing_sink = None
 
     # ------------------------------------------------------------------
     # RPC methods
@@ -193,11 +154,9 @@ class WorkerProxy:
 
         self._model_name = model_name
         timing_log_dir = os.environ.get("NERVA_TIMING_LOG_DIR")
-        if timing_log_dir and self._timing_writer_task is None:
-            os.makedirs(timing_log_dir, exist_ok=True)
-            fp_path = os.path.join(timing_log_dir, f"nerva_proxy_{model_name}.log")
-            self._timing_fp = open(fp_path, "a")  # noqa: SIM115
-            self._timing_writer_task = asyncio.create_task(self._timing_writer_loop())
+        if timing_log_dir and self._timing_sink is None:
+            self._timing_sink = AsyncTimingSink()
+            await self._timing_sink.start(timing_log_dir, f"nerva_proxy_{model_name}.log")
 
     async def infer(
         self,
@@ -294,14 +253,15 @@ class WorkerProxy:
         t_des_start = time.perf_counter()
         result = self._decode_output(out_descriptor, request_id)
         proxy_deserialize_ms = round((time.perf_counter() - t_des_start) * 1000, 3)
-        self._write_timing({
-            "event": "ipc_timing",
-            "request_id": request_id,
-            "model": self._model_name,
-            "ipc_round_trip_ms": ipc_round_trip_ms,
-            "proxy_serialize_ms": proxy_serialize_ms,
-            "proxy_deserialize_ms": proxy_deserialize_ms,
-        })
+        if self._timing_sink is not None:
+            self._timing_sink.write({
+                "event": "ipc_timing",
+                "request_id": request_id,
+                "model": self._model_name,
+                "ipc_round_trip_ms": ipc_round_trip_ms,
+                "proxy_serialize_ms": proxy_serialize_ms,
+                "proxy_deserialize_ms": proxy_deserialize_ms,
+            })
         return result
 
     async def cancel(self, request_id: str, reason: str = "") -> None:
