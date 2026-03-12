@@ -6,6 +6,7 @@ Entry point: ``worker_entry(socket_path)`` is passed to ``multiprocessing.Proces
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -71,11 +72,10 @@ class _WorkerLoop:
         self._ctx: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
         self._model_name: str = ""
+        self._timing_log_dir = timing_log_dir
         self._timing_fp: IO[str] | None = None
-        if timing_log_dir is not None:
-            os.makedirs(timing_log_dir, exist_ok=True)
-            fp_path = os.path.join(timing_log_dir, f"nerva_worker_{os.getpid()}.log")
-            self._timing_fp = open(fp_path, "a", buffering=1)  # noqa: SIM115
+        self._timing_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._timing_writer_task: asyncio.Task[None] | None = None
 
     # -- public entry -------------------------------------------------------
 
@@ -86,6 +86,11 @@ class _WorkerLoop:
         self._socket = self._ctx.socket(zmq.PAIR)
         self._socket.connect(f"ipc://{self._socket_path}")
         self._running = True
+        if self._timing_log_dir is not None:
+            os.makedirs(self._timing_log_dir, exist_ok=True)
+            fp_path = os.path.join(self._timing_log_dir, f"nerva_worker_{os.getpid()}.log")
+            self._timing_fp = open(fp_path, "a")  # noqa: SIM115
+            self._timing_writer_task = asyncio.create_task(self._timing_writer_loop())
 
         try:
             # Announce readiness.
@@ -136,9 +141,30 @@ class _WorkerLoop:
     # -- timing helpers -----------------------------------------------------
 
     def _write_timing(self, data: dict[str, Any]) -> None:
-        """Write a timing JSON line to the per-worker timing file (no-op if not configured)."""
-        if self._timing_fp is not None:
-            self._timing_fp.write(json.dumps(data) + "\n")
+        """Enqueue a timing JSON line (non-blocking; written by background task)."""
+        if self._timing_writer_task is not None:
+            self._timing_queue.put_nowait(json.dumps(data) + "\n")
+
+    async def _timing_writer_loop(self) -> None:
+        """Background task: drain timing queue and write to file via thread pool."""
+        assert self._timing_fp is not None
+        fp = self._timing_fp
+        while True:
+            line = await self._timing_queue.get()
+            if line is None:
+                break
+            # Drain all currently available lines to batch the write.
+            batch = [line]
+            while True:
+                try:
+                    nxt = self._timing_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if nxt is None:
+                    await asyncio.to_thread(fp.write, "".join(batch))
+                    return
+                batch.append(nxt)
+            await asyncio.to_thread(fp.write, "".join(batch))
 
     # -- message handlers ---------------------------------------------------
 
@@ -500,7 +526,12 @@ class _WorkerLoop:
             self._ctx.term()
             self._ctx = None
 
-        # Close timing file.
+        # Stop timing writer and close file.
+        if self._timing_writer_task is not None:
+            self._timing_queue.put_nowait(None)  # sentinel — signal writer to stop
+            with contextlib.suppress(Exception):
+                await self._timing_writer_task
+            self._timing_writer_task = None
         if self._timing_fp is not None:
             self._timing_fp.close()
             self._timing_fp = None

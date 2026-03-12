@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import uvicorn
 
+import nerva.observability.timing as _timing
 from nerva.backends.base import InferContext
 from nerva.core.model import get_model_handle
 from nerva.engine.executor import Executor
@@ -294,12 +295,16 @@ def build_nerva_app(pipelines: dict[str, Graph]) -> NervaASGIApp:
     live_model_info: list[dict[str, Any]] = []
 
     async def _on_startup() -> None:
+        timing_log_dir = os.environ.get("NERVA_TIMING_LOG_DIR")
+        if timing_log_dir:
+            await _timing.setup(timing_log_dir)
         execs, info = await _build_pipelines(pipelines, manager)
         live_executors.update(execs)
         live_model_info.extend(info)
 
     async def _on_shutdown() -> None:
         await manager.shutdown_all()
+        await _timing.teardown()
         live_executors.clear()
         live_model_info.clear()
 

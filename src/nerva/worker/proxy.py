@@ -69,6 +69,8 @@ class WorkerProxy:
         # Per-instance IPC timing log (enabled via NERVA_TIMING_LOG_DIR env var).
         self._model_name: str = ""
         self._timing_fp: IO[str] | None = None
+        self._timing_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._timing_writer_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -109,6 +111,11 @@ class WorkerProxy:
             self._ctx.term()
             self._ctx = None
 
+        if self._timing_writer_task is not None:
+            self._timing_queue.put_nowait(None)  # sentinel — signal writer to stop
+            with contextlib.suppress(Exception):
+                await self._timing_writer_task
+            self._timing_writer_task = None
         if self._timing_fp is not None:
             self._timing_fp.close()
             self._timing_fp = None
@@ -118,9 +125,30 @@ class WorkerProxy:
     # ------------------------------------------------------------------
 
     def _write_timing(self, data: dict[str, Any]) -> None:
-        """Write a timing JSON line to the per-proxy timing file (no-op if not configured)."""
-        if self._timing_fp is not None:
-            self._timing_fp.write(json.dumps(data) + "\n")
+        """Enqueue a timing JSON line (non-blocking; written by background task)."""
+        if self._timing_writer_task is not None:
+            self._timing_queue.put_nowait(json.dumps(data) + "\n")
+
+    async def _timing_writer_loop(self) -> None:
+        """Background task: drain timing queue and write to file via thread pool."""
+        assert self._timing_fp is not None
+        fp = self._timing_fp
+        while True:
+            line = await self._timing_queue.get()
+            if line is None:
+                break
+            # Drain all currently available lines to batch the write.
+            batch = [line]
+            while True:
+                try:
+                    nxt = self._timing_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if nxt is None:
+                    await asyncio.to_thread(fp.write, "".join(batch))
+                    return
+                batch.append(nxt)
+            await asyncio.to_thread(fp.write, "".join(batch))
 
     # ------------------------------------------------------------------
     # RPC methods
@@ -165,10 +193,11 @@ class WorkerProxy:
 
         self._model_name = model_name
         timing_log_dir = os.environ.get("NERVA_TIMING_LOG_DIR")
-        if timing_log_dir and self._timing_fp is None:
+        if timing_log_dir and self._timing_writer_task is None:
             os.makedirs(timing_log_dir, exist_ok=True)
             fp_path = os.path.join(timing_log_dir, f"nerva_proxy_{model_name}.log")
-            self._timing_fp = open(fp_path, "a", buffering=1)  # noqa: SIM115
+            self._timing_fp = open(fp_path, "a")  # noqa: SIM115
+            self._timing_writer_task = asyncio.create_task(self._timing_writer_loop())
 
     async def infer(
         self,
@@ -178,6 +207,7 @@ class WorkerProxy:
     ) -> dict[str, Any]:
         """Serialize inputs, send INFER_SUBMIT, wait for INFER_ACK, return output."""
         request_id = context.request_id
+        t_ser_start = time.perf_counter()
         raw_bytes_input = self._extract_raw_bytes_input(inputs)
         if raw_bytes_input is None:
             input_key = None
@@ -186,6 +216,7 @@ class WorkerProxy:
         else:
             input_key, input_bytes = raw_bytes_input
             payload_codec = "raw_bytes_v1"
+        proxy_serialize_ms = round((time.perf_counter() - t_ser_start) * 1000, 3)
         shm_slot = None
 
         if len(input_bytes) <= IPC_CONTROL_INLINE_MAX_BYTES or shm_pool is None:
@@ -229,12 +260,7 @@ class WorkerProxy:
             })
 
             ack = await asyncio.wait_for(fut, timeout=self._submit_timeout)
-            self._write_timing({
-                "event": "ipc_timing",
-                "request_id": request_id,
-                "model": self._model_name,
-                "ipc_round_trip_ms": round((time.perf_counter() - t_send) * 1000, 3),
-            })
+            ipc_round_trip_ms = round((time.perf_counter() - t_send) * 1000, 3)
         except TimeoutError:
             self._pending.pop(request_id, None)
             self._release_output_slot(request_id)
@@ -265,7 +291,18 @@ class WorkerProxy:
 
         # Deserialize output from descriptor.
         out_descriptor = Descriptor.from_dict(ack["descriptor"])
-        return self._decode_output(out_descriptor, request_id)
+        t_des_start = time.perf_counter()
+        result = self._decode_output(out_descriptor, request_id)
+        proxy_deserialize_ms = round((time.perf_counter() - t_des_start) * 1000, 3)
+        self._write_timing({
+            "event": "ipc_timing",
+            "request_id": request_id,
+            "model": self._model_name,
+            "ipc_round_trip_ms": ipc_round_trip_ms,
+            "proxy_serialize_ms": proxy_serialize_ms,
+            "proxy_deserialize_ms": proxy_deserialize_ms,
+        })
+        return result
 
     async def cancel(self, request_id: str, reason: str = "") -> None:
         """Send CANCEL (best-effort)."""

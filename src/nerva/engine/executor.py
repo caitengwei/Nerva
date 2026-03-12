@@ -9,10 +9,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 import uuid
 from dataclasses import replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, Protocol
+
+import nerva.observability.timing as _timing
 
 if TYPE_CHECKING:
     from nerva.backends.base import InferContext
@@ -85,6 +88,7 @@ class Executor:
             RuntimeError: If any node fails (fail-fast).
             KeyError: If a required proxy is missing.
         """
+        t_execute_start = time.perf_counter()
         graph = self._graph
         if not graph.nodes:
             return inputs
@@ -106,6 +110,7 @@ class Executor:
         done_queue: asyncio.Queue[str | BaseException] = asyncio.Queue()
         running: dict[str, asyncio.Task[None]] = {}
         failed: BaseException | None = None
+        node_timings: list[dict[str, Any]] = []
 
         async def _run_node(node_id: str) -> None:
             try:
@@ -115,7 +120,13 @@ class Executor:
                 if node.node_type == "call":
                     proxy = self._proxies[node.model_name]
                     node_ctx = self._make_node_context(node_id)
+                    t_node = time.perf_counter()
                     result = await proxy.infer(node_inputs, node_ctx)
+                    node_timings.append({
+                        "node_id": node_id,
+                        "model": node.model_name,
+                        "infer_ms": round((time.perf_counter() - t_node) * 1000, 3),
+                    })
                 elif node.node_type == "parallel":
                     result = await self._execute_parallel(node, node_inputs)
                 elif node.node_type == "cond":
@@ -175,7 +186,21 @@ class Executor:
         # Return the output of the last node in topological order.
         topo = graph.topological_sort()
         last_node_id = topo[-1].id
-        return completed[last_node_id]
+        result = completed[last_node_id]
+
+        if node_timings:
+            total_execute_ms = round((time.perf_counter() - t_execute_start) * 1000, 3)
+            total_infer_ms = round(sum(t["infer_ms"] for t in node_timings), 3)
+            _timing.write({
+                "event": "executor_timing",
+                "request_id": self._context.request_id,
+                "total_execute_ms": total_execute_ms,
+                "total_infer_ms": total_infer_ms,
+                "scheduler_overhead_ms": round(total_execute_ms - total_infer_ms, 3),
+                "nodes": node_timings,
+            })
+
+        return result
 
     def _make_node_context(self, node_id: str) -> InferContext:
         """Create a per-node InferContext with a unique request_id."""
