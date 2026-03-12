@@ -87,3 +87,17 @@ Call chain: trace() → Graph → Executor → WorkerProxy → Worker → Backen
 ## Roadmap
 
 See [`docs/plans/2026-02-25-mvp-roadmap.md`](docs/plans/2026-02-25-mvp-roadmap.md) for full details.
+
+## 压测注意事项
+
+详细检查清单见 [`docs/bench/bench-preflight-checklist.md`](docs/bench/bench-preflight-checklist.md)。关键坑：
+
+1. **代理变量**：本机 `all_proxy=socks5://...` 会导致 httpx 对 localhost 也走代理，error_rate=1.0 且 latency 异常低（~17ms）。压测命令必须加 `env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY`；`no_proxy` 对 httpx 无效。
+
+2. **Triton 侧必须用真实 tritonserver**：`--allow-mock` 是单函数 HTTP handler，绕过 ensemble 和 Python backend，pipeline 深度与 Nerva 不对等，对比结论无意义。正确做法：`prepare_triton_repo.py --cpu-mock` 生成 model repo，podman 起真实容器。
+
+3. **macOS podman 用 `-p` 不用 `--network host`**：podman 跑在 Linux VM 内，`--network host` 是 VM 的网络，容器端口不可达。
+
+4. **worktree 首次跑前执行 `uv sync --all-extras`**：新 worktree 的 `.venv` 缺少 httpx/msgpack 等运行时依赖。
+
+5. **第一组结果出来后先校验**：error_rate 应为 0，p50 应接近 mock_sleep（256×0.5ms=128ms），QPS ≈ concurrency/p50。任何偏差先排查再继续。

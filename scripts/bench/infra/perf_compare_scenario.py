@@ -4,6 +4,8 @@ import math
 from dataclasses import dataclass
 
 DEFAULT_CONCURRENCY_LEVELS = [1, 32, 128, 512, 1000]
+DEFAULT_CPU_MOCK_CONCURRENCY_LEVELS = [1, 2, 4, 8, 16, 32]
+DEFAULT_CPU_MOCK_TOKEN_LATENCY_MS = 0.5
 DEFAULT_VLLM_IMAGE = "vllm/vllm-openai:v0.6.0"
 DEFAULT_TRITON_IMAGE = "nvcr.io/nvidia/tritonserver:24.08-py3"
 DEFAULT_VLLM_URL = "http://127.0.0.1:8001"
@@ -234,5 +236,121 @@ def build_linux_gpu_perf_compare_scenario(
         vllm_container_cmd=vllm_container_cmd,
         triton_prepare_cmd=triton_prepare_cmd,
         triton_container_cmd=triton_container_cmd,
+        benchmark_cmd_by_target=benchmark_cmd_by_target,
+    )
+
+
+def build_cpu_mock_perf_compare_scenario(
+    *,
+    triton_model_repo: str = "/tmp/triton_cpu_mock_repo",
+    workload: str = "mm_vllm",
+    concurrency_levels: list[int] | None = None,
+    warmup_seconds: int = 10,
+    sample_seconds: int = 30,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P,
+    token_latency_ms: float = DEFAULT_CPU_MOCK_TOKEN_LATENCY_MS,
+) -> PerfCompareScenario:
+    """Build a CPU-only mock scenario for Nerva vs Triton e2e comparison.
+
+    Neither Nerva nor Triton requires GPU or vLLM.  Both sides simulate LLM
+    token-generation latency via asyncio.sleep(max_tokens * token_latency_ms).
+
+    Start servers manually before running the benchmark:
+
+        # Terminal 1 — Nerva
+        MOCK_TOKEN_LATENCY_MS=0.5 uv run uvicorn \\
+            examples.mm_vllm_cpu_mock_server:app --host 127.0.0.1 --port 8080
+
+        # Terminal 2 — Triton mock
+        uv run python scripts/bench/infra/start_triton_server.py \\
+            --allow-mock --model-repo /tmp/triton_cpu_mock_repo \\
+            --mock-token-latency-ms 0.5
+
+        # Terminal 3 — benchmark
+        uv run python scripts/bench/run_bench.py \\
+            --target nerva --target triton \\
+            --config scripts/bench/configs/cpu_mock_bench.json
+    """
+    if warmup_seconds <= 0:
+        raise ValueError("warmup_seconds must be > 0")
+    if sample_seconds <= 0:
+        raise ValueError("sample_seconds must be > 0")
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be > 0")
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("temperature must be finite and >= 0")
+    if not math.isfinite(top_p) or top_p <= 0 or top_p > 1:
+        raise ValueError("top_p must be finite and in (0, 1]")
+    if not math.isfinite(token_latency_ms) or token_latency_ms < 0:
+        raise ValueError("token_latency_ms must be finite and >= 0")
+
+    if concurrency_levels is None:
+        levels = list(DEFAULT_CPU_MOCK_CONCURRENCY_LEVELS)
+    else:
+        levels = list(concurrency_levels)
+    _validate_positive_levels(levels)
+
+    level_arg = ",".join(str(level) for level in levels)
+
+    nerva_server_cmd = [
+        "env",
+        f"MOCK_TOKEN_LATENCY_MS={token_latency_ms}",
+        "uv",
+        "run",
+        "uvicorn",
+        "examples.mm_vllm_cpu_mock_server:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8080",
+    ]
+    triton_server_cmd = [
+        "uv",
+        "run",
+        "python",
+        "scripts/bench/infra/start_triton_server.py",
+        "--allow-mock",
+        "--model-repo",
+        triton_model_repo,
+        "--mock-token-latency-ms",
+        str(token_latency_ms),
+    ]
+    benchmark_cmd_by_target = {
+        "nerva": _build_benchmark_cmd(
+            targets=["nerva"],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            vllm_model_name="",
+            vllm_url="http://127.0.0.1:8001",
+            workload=workload,
+            level_arg=level_arg,
+            warmup_seconds=warmup_seconds,
+            sample_seconds=sample_seconds,
+            require_real_backend=False,
+        ),
+        "triton": _build_benchmark_cmd(
+            targets=["triton"],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            vllm_model_name="",
+            vllm_url="http://127.0.0.1:8001",
+            workload=workload,
+            level_arg=level_arg,
+            warmup_seconds=warmup_seconds,
+            sample_seconds=sample_seconds,
+            require_real_backend=False,
+        ),
+    }
+    # vllm_container_cmd / triton_container_cmd not needed for CPU mock;
+    # triton_prepare_cmd is replaced by triton_server_cmd.
+    return PerfCompareScenario(
+        nerva_server_cmd=nerva_server_cmd,
+        vllm_container_cmd=[],
+        triton_prepare_cmd=triton_server_cmd,
+        triton_container_cmd=[],
         benchmark_cmd_by_target=benchmark_cmd_by_target,
     )
