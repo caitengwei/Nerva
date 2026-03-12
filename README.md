@@ -1,26 +1,21 @@
 # Nerva
 
-Nerva is a Python-native model inference serving framework focused on low-latency, high-throughput workloads.  
-It provides graph-based pipeline composition, process-isolated model workers, and a binary RPC serving path over HTTP.
+High-performance model inference serving framework for Python.
 
-## Highlights
+Nerva lets ML engineers define multi-model pipelines as plain Python functions, then serves them over a binary RPC protocol with process-isolated workers — no YAML configs, no C++ plugins, no leaving the Python ecosystem.
 
-- Graph tracing API (`trace`, `cond`, `parallel`) for pipeline orchestration.
-- Worker-process isolation with explicit lifecycle management.
-- Binary RPC protocol with msgpack payloads.
-- Two serving entry points:
-  - `build_nerva_app(...)` for ASGI hosts (`uvicorn`, tests).
-  - `serve(...)` for direct blocking startup.
-- Built-in endpoints:
-  - `POST /rpc/{pipeline_name}`
-  - `GET /v1/health`
-  - `GET /v1/models`
-  - `GET /metrics`
+## Why Nerva
+
+Existing serving frameworks (Triton, TorchServe) require learning framework-specific configuration, have limited DAG orchestration support, and make Python-native development difficult. Nerva takes a different approach:
+
+- **Pipeline = Python function.** Define arbitrarily complex DAGs with `trace()`, `cond()`, and `parallel()` — the framework infers the computation graph automatically.
+- **Process isolation by default.** Each model runs in its own worker process with a dedicated CUDA context. One model crashing or OOM-ing doesn't take down the service.
+- **IPC designed for ML payloads.** Small tensors inline via ZeroMQ; large payloads (images, embeddings) go through shared memory with near-zero copy overhead.
 
 ## Requirements
 
 - Python 3.11+
-- `uv` recommended for environment and dependency management.
+- [`uv`](https://docs.astral.sh/uv/) for environment and dependency management.
 
 ## Installation
 
@@ -28,22 +23,22 @@ It provides graph-based pipeline composition, process-isolated model workers, an
 uv sync --dev
 ```
 
-Optional extras:
+Optional backend extras:
 
 ```bash
 uv sync --dev --extra pytorch
 uv sync --dev --extra vllm
 ```
 
-## Quick Start: End-to-End Echo Server
+## Quick Start
 
-Terminal 1 (start server):
+**Terminal 1** — start an echo server:
 
 ```bash
 uv run uvicorn examples.echo_server:app --host 127.0.0.1 --port 8080
 ```
 
-Terminal 2 (send request):
+**Terminal 2** — send a request:
 
 ```bash
 uv run python scripts/demo_client.py --url http://127.0.0.1:8080 --pipeline echo --value "hello"
@@ -56,7 +51,7 @@ Calling http://127.0.0.1:8080/rpc/echo ...
 Result: {'echo': 'hello'}
 ```
 
-Optional checks:
+Health and model listing:
 
 ```bash
 curl http://127.0.0.1:8080/v1/health
@@ -65,11 +60,12 @@ curl http://127.0.0.1:8080/v1/models
 
 ## Core API
 
-### ASGI factory (recommended for hosting)
+### Define a model
+
+Subclass `Model` and implement `load()` + `infer()`:
 
 ```python
 from typing import Any
-
 from nerva import Model, build_nerva_app, model, trace
 
 
@@ -79,81 +75,122 @@ class EchoModel(Model):
 
     async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
         return {"echo": inputs["value"]}
-
-
-echo = model("echo", EchoModel, backend="pytorch", device="cpu")
-graph = trace(lambda inp: echo(inp))
-app = build_nerva_app({"echo": graph})
 ```
 
-Run it:
+### Build and serve a pipeline
+
+```python
+echo = model("echo", EchoModel, backend="pytorch", device="cpu")
+graph = trace(lambda inp: echo(inp))
+
+# Option 1: ASGI factory (recommended — works with uvicorn, tests, etc.)
+app = build_nerva_app({"echo": graph})
+
+# Option 2: Blocking startup
+# from nerva import serve
+# serve({"echo": graph}, host="0.0.0.0", port=8080)
+```
+
+Run the ASGI app:
 
 ```bash
 uv run uvicorn your_module:app --port 8080
 ```
 
-### Blocking startup
+### Multi-model DAG with control flow
 
 ```python
-from nerva import serve
+from nerva import cond, model, parallel, trace
 
-serve({"echo": graph}, host="0.0.0.0", port=8080)
+text_enc = model("text_enc", TextEncoder, backend="pytorch", device="cpu")
+img_enc  = model("img_enc", ImageEncoder, backend="pytorch", device="cuda:0")
+fusion   = model("fusion", Fusion, backend="pytorch", device="cuda:1")
+
+def pipeline(inp):
+    t, i = parallel(
+        lambda: text_enc({"text": inp["text"]}),
+        lambda: img_enc({"image": inp["image"]}),
+    )
+    return fusion({"text_feat": t["features"], "img_feat": i["features"]})
+
+graph = trace(pipeline)
+app = build_nerva_app({"mm": graph})
 ```
 
-## Lifecycle Notes
+### Built-in endpoints
 
-- With ASGI lifespan support (for example `uvicorn`), workers are started on startup and closed on shutdown.
-- For hosts that do not send lifespan (for example `httpx.ASGITransport`), Nerva lazily starts workers on first request.
-- In no-lifespan test scenarios, call `await app.shutdown()` after requests for deterministic cleanup.
-- A best-effort GC cleanup path is included for no-lifespan usage.
-- Parent-process watchdog is enabled by default: if launcher parent exits unexpectedly (for example `uv run ...` process is killed), the serving process self-terminates to avoid orphan processes.
+| Endpoint | Method | Description |
+|---|---|---|
+| `/rpc/{pipeline_name}` | POST | Binary RPC inference |
+| `/v1/health` | GET | Health check |
+| `/v1/models` | GET | List loaded models |
+| `/metrics` | GET | Prometheus metrics |
+
+## Worker Lifecycle
+
+- **With ASGI lifespan** (e.g. `uvicorn`): workers start on app startup and shut down on app shutdown.
+- **Without lifespan** (e.g. `httpx.ASGITransport` in tests): workers start lazily on first request. Call `await app.shutdown()` after use for deterministic cleanup.
+- **Parent-process watchdog**: if the parent process exits unexpectedly, workers self-terminate to prevent orphan processes.
 
 ## Examples
 
-- `examples/echo_server.py`: minimal runnable E2E server.
-- `examples/01_single_model.py`: single-model serving flow.
-- `examples/02_multi_model_pipeline.py`: multi-stage pipeline.
-- `examples/03_parallel_dag.py`: `parallel` / `cond` flow composition.
-- `examples/phase7_multimodal_vllm_server.py`: phase7 multimodal + vLLM benchmark DAG service.
-- `scripts/demo_client.py`: standalone Binary RPC client script.
+| File | Description |
+|---|---|
+| `examples/echo_server.py` | Minimal runnable E2E server |
+| `examples/01_single_model.py` | Single-model serving flow |
+| `examples/02_multi_model_pipeline.py` | Multi-stage pipeline |
+| `examples/03_parallel_dag.py` | `parallel` / `cond` flow composition |
+| `examples/mm_vllm_server.py` | Multimodal + vLLM benchmark DAG service |
+| `scripts/demo_client.py` | Standalone Binary RPC client |
 
-## Benchmark Quick Start (Phase 7)
+## Benchmarking
 
-- Runbook: `docs/plans/2026-03-02-phase7-e2e-benchmark-runbook.md`
-- 默认口径：真实 vLLM / Triton 二进制。启动脚本在缺失依赖时会 fail-fast。
-- `--allow-mock` 仅用于本地联调，不可用于正式对照数据采集。
+Full runbook: [`docs/plans/2026-03-02-phase7-e2e-benchmark-runbook.md`](docs/plans/2026-03-02-phase7-e2e-benchmark-runbook.md)
+
+Benchmarks compare Nerva against native vLLM and Triton on the same workload.
+Startup scripts fail-fast if real backend dependencies are missing.
 
 ```bash
-# Start native vLLM (real backend by default)
+# Start Nerva
+MM_VLLM_MODEL_PATH=<MODEL_PATH> \
+uv run uvicorn examples.mm_vllm_server:app --host 127.0.0.1 --port 8080
+
+# Start vLLM
 uv run python scripts/bench/infra/start_vllm_server.py --model <MODEL_PATH> --host 127.0.0.1 --port 8001
 uv run python scripts/bench/infra/wait_service_ready.py --kind vllm --url http://127.0.0.1:8001/health --timeout-seconds 120
 
-# Start Triton (real backend by default)
-uv run python scripts/bench/infra/prepare_triton_repo.py --output /tmp/phase7-triton-repo
-uv run python scripts/bench/infra/start_triton_server.py --model-repo /tmp/phase7-triton-repo --http-port 8002 --grpc-port 8003 --metrics-port 8004
-uv run python scripts/bench/infra/wait_service_ready.py --kind triton --url http://127.0.0.1:8002/v2/health/ready --timeout-seconds 120
+# Start Triton (embeds vLLM in-process, no separate vLLM needed)
+uv run python scripts/bench/infra/prepare_triton_repo.py --output /tmp/mm_vllm-triton-repo --vllm-model <MODEL_PATH>
+uv run python scripts/bench/infra/start_triton_server.py --model-repo /tmp/mm_vllm-triton-repo --http-port 8002 --grpc-port 8003 --metrics-port 8004
+uv run python scripts/bench/infra/wait_service_ready.py --kind triton --url http://127.0.0.1:8002/v2/health/ready --timeout-seconds 300
 
-# Benchmark matrix (includes concurrency 1000)
-uv run python scripts/bench/run_phase7.py --target nerva --target vllm --target triton --concurrency-levels 1,32,128,512,1000 --warmup-seconds 60 --sample-seconds 300
+# Run benchmark matrix
+uv run python scripts/bench/run_bench.py \
+  --target nerva --target vllm --target triton \
+  --concurrency-levels 1,32,128,512,1000 \
+  --warmup-seconds 60 --sample-seconds 300 \
+  --require-real-backend
 ```
+
+See [`docs/design/性能测试指南.md`](docs/design/性能测试指南.md) for detailed execution steps, result interpretation, and metrics-based bottleneck diagnosis.
 
 ## Development
 
-Common checks:
-
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-uv run ruff check src/ tests/ examples/ scripts/
-uv run mypy
-uv run pytest tests/ -v
+uv run ruff check src/ tests/ examples/ scripts/   # lint
+uv run mypy                                         # type check
+uv run pytest tests/ -v                             # test
 ```
 
 ## Documentation
 
-- Collaboration-friendly Chinese design/test docs: `docs/design/`
-- Implementation plans and design notes: `docs/plans/`
-- Spikes and benchmark reports: `docs/spikes/`
+| Directory | Content |
+|---|---|
+| [`docs/design/`](docs/design/) | Architecture, module design, testing and benchmarking guides (Chinese) |
+| [`docs/plans/`](docs/plans/) | Implementation plans, ADRs, protocol specs, roadmap |
+| [`docs/spikes/`](docs/spikes/) | Technical spike reports (IPC benchmarks, trace prototype, batcher benchmarks) |
 
 ## License
 
-See `LICENSE`.
+See [`LICENSE`](LICENSE).
