@@ -2279,7 +2279,6 @@ dev = [
 ]
 perf = [
     { name = "httptools" },
-    { name = "uvloop", marker = "sys_platform != 'win32'" },
 ]
 pytorch = [
     { name = "torch" },
@@ -2305,7 +2304,6 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.0" },
     { name = "torch", marker = "extra == 'pytorch'", specifier = ">=2.0" },
     { name = "uvicorn", specifier = ">=0.30" },
-    { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'perf'", specifier = ">=0.21" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.6" },
 ]
 provides-extras = ["pytorch", "vllm", "perf", "dev"]

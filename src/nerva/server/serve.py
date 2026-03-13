@@ -318,16 +318,6 @@ def build_nerva_app(pipelines: dict[str, Graph]) -> NervaASGIApp:
     return _NervaASGIApp(starlette_app, _on_startup, _on_shutdown)
 
 
-def _has_uvloop() -> bool:
-    """Return True if uvloop is importable."""
-    try:
-        import uvloop as _uvloop  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
 def _has_httptools() -> bool:
     """Return True if httptools is importable."""
     try:
@@ -349,9 +339,13 @@ def serve(
     Scans all Graphs for model declarations, auto-spawns worker processes,
     builds the ASGI application, and starts uvicorn.
 
-    When ``uvloop`` and/or ``httptools`` are installed (``pip install nerva[perf]``),
-    they are used automatically for lower-latency event-loop scheduling and
-    HTTP parsing.
+    When ``httptools`` is installed (``pip install nerva[perf]``), it is used
+    automatically for faster HTTP parsing.
+
+    Note: uvloop is intentionally not auto-enabled here because on macOS its
+    libuv-based fd polling interferes with ZMQ asyncio's ipc:// socket
+    monitoring under high concurrency, causing p99 regressions.  On Linux,
+    uvloop can be enabled by the caller via ``uvicorn --loop uvloop``.
 
     Args:
         pipelines: Mapping from pipeline name to traced Graph.
@@ -359,10 +353,7 @@ def serve(
         port: Bind port.
     """
     app = build_nerva_app(pipelines)
-    loop_impl = "uvloop" if _has_uvloop() else "auto"
     http_impl = "httptools" if _has_httptools() else "auto"
-    if loop_impl != "auto":
-        logger.info("Using uvloop event loop for lower-latency scheduling")
     if http_impl != "auto":
         logger.info("Using httptools HTTP parser")
-    uvicorn.run(app, host=host, port=port, log_level="info", loop=loop_impl, http=http_impl)
+    uvicorn.run(app, host=host, port=port, log_level="info", http=http_impl)
