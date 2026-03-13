@@ -15,7 +15,7 @@ import uvicorn
 import nerva.observability.timing as _timing
 from nerva.backends.base import InferContext
 from nerva.core.model import get_model_handle
-from nerva.engine.executor import Executor
+from nerva.engine.executor import Executor, PrecomputedGraph
 from nerva.server.app import build_app
 from nerva.worker.manager import WorkerManager
 
@@ -106,12 +106,15 @@ async def _build_pipelines(
 class _PipelineExecutor:
     """Wraps Graph + proxies to provide execute(inputs) for the RPC handler.
 
-    Creates a fresh Executor with a per-request InferContext on each call.
+    Pre-computes graph analysis once; creates a lightweight per-request Executor
+    that reuses the cached analysis (avoids rebuilding adjacency structures,
+    topological sort, and input strategies on every request).
     """
 
     def __init__(self, graph: Graph, proxies: dict[str, InferableProxy]) -> None:
         self._graph = graph
         self._proxies = proxies
+        self._precomputed = PrecomputedGraph.from_graph(graph)
 
     async def execute(
         self, inputs: Any, *, deadline_ms: int = 30000, request_id: str = ""
@@ -120,7 +123,9 @@ class _PipelineExecutor:
         if not request_id:
             request_id = str(uuid.uuid4())
         ctx = InferContext(request_id=request_id, deadline_ms=deadline_ms)
-        executor = Executor(self._graph, self._proxies, ctx)
+        executor = Executor(
+            self._graph, self._proxies, ctx, _precomputed=self._precomputed
+        )
         return await executor.execute(inputs)
 
 
@@ -313,6 +318,26 @@ def build_nerva_app(pipelines: dict[str, Graph]) -> NervaASGIApp:
     return _NervaASGIApp(starlette_app, _on_startup, _on_shutdown)
 
 
+def _has_uvloop() -> bool:
+    """Return True if uvloop is importable."""
+    try:
+        import uvloop as _uvloop  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def _has_httptools() -> bool:
+    """Return True if httptools is importable."""
+    try:
+        import httptools as _httptools  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
 def serve(
     pipelines: dict[str, Graph],
     *,
@@ -324,10 +349,20 @@ def serve(
     Scans all Graphs for model declarations, auto-spawns worker processes,
     builds the ASGI application, and starts uvicorn.
 
+    When ``uvloop`` and/or ``httptools`` are installed (``pip install nerva[perf]``),
+    they are used automatically for lower-latency event-loop scheduling and
+    HTTP parsing.
+
     Args:
         pipelines: Mapping from pipeline name to traced Graph.
         host: Bind address.
         port: Bind port.
     """
     app = build_nerva_app(pipelines)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    loop_impl = "uvloop" if _has_uvloop() else "auto"
+    http_impl = "httptools" if _has_httptools() else "auto"
+    if loop_impl != "auto":
+        logger.info("Using uvloop event loop for lower-latency scheduling")
+    if http_impl != "auto":
+        logger.info("Using httptools HTTP parser")
+    uvicorn.run(app, host=host, port=port, log_level="info", loop=loop_impl, http=http_impl)

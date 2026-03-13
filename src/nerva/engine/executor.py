@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import time
-import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from enum import IntEnum
 from functools import reduce
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -22,6 +23,9 @@ if TYPE_CHECKING:
     from nerva.core.graph import Edge, Graph, Node
 
 logger = logging.getLogger(__name__)
+
+# Process-wide atomic counter for per-node context IDs (replaces uuid4).
+_node_ctx_counter = itertools.count()
 
 
 class InferableProxy(Protocol):
@@ -44,6 +48,91 @@ def resolve_field_path(output: Any, field_path: tuple[str, ...]) -> Any:
     return reduce(lambda d, k: d[k], field_path, output)
 
 
+# ---------------------------------------------------------------------------
+# Pre-computed graph analysis (shared across requests for same pipeline)
+# ---------------------------------------------------------------------------
+
+
+class _InputStrategy(IntEnum):
+    """Pre-computed strategy for assembling a node's inputs."""
+
+    SOURCE = 0  # No incoming edges → use pipeline_inputs
+    SINGLE_PASSTHROUGH = 1  # One edge, no dst_input_key
+    KEYED_DICT = 2  # All edges have dst_input_key → build dict
+    MULTI_LIST = 3  # Multiple edges without keys → build list
+
+
+@dataclass(frozen=True, slots=True)
+class PrecomputedGraph:
+    """Immutable cache of graph analysis — computed once, reused per request."""
+
+    node_map: dict[str, Node]
+    successors: dict[str, list[str]]
+    incoming: dict[str, list[Edge]]
+    base_in_degree: dict[str, int]
+    source_node_ids: list[str]
+    last_node_id: str | None
+    input_strategies: dict[str, _InputStrategy]
+
+    @classmethod
+    def from_graph(cls, graph: Graph) -> PrecomputedGraph:
+        node_map: dict[str, Node] = {n.id: n for n in graph.nodes}
+        successors: dict[str, list[str]] = {n.id: [] for n in graph.nodes}
+        incoming: dict[str, list[Edge]] = {n.id: [] for n in graph.nodes}
+        for e in graph.edges:
+            successors.setdefault(e.src, []).append(e.dst)
+            incoming.setdefault(e.dst, []).append(e)
+
+        base_in_degree: dict[str, int] = {}
+        source_node_ids: list[str] = []
+        for node in graph.nodes:
+            deg = len(incoming.get(node.id, []))
+            base_in_degree[node.id] = deg
+            if deg == 0:
+                source_node_ids.append(node.id)
+
+        # Pre-compute last node ID (avoids topological_sort per request).
+        # If the graph is cyclic, topological_sort() raises ValueError; we set
+        # last_node_id = None in that case — execute() will detect "no source nodes"
+        # and raise RuntimeError before last_node_id is ever used.
+        if graph.nodes:
+            try:
+                topo = graph.topological_sort()
+                last_node_id = topo[-1].id
+            except ValueError:
+                last_node_id = None
+        else:
+            last_node_id = None
+
+        # Pre-compute input assembly strategy per node.
+        input_strategies: dict[str, _InputStrategy] = {}
+        for node in graph.nodes:
+            edges = incoming.get(node.id, [])
+            if not edges:
+                input_strategies[node.id] = _InputStrategy.SOURCE
+            elif all(e.dst_input_key is not None for e in edges):
+                input_strategies[node.id] = _InputStrategy.KEYED_DICT
+            elif len(edges) == 1:
+                input_strategies[node.id] = _InputStrategy.SINGLE_PASSTHROUGH
+            else:
+                input_strategies[node.id] = _InputStrategy.MULTI_LIST
+
+        return cls(
+            node_map=node_map,
+            successors=successors,
+            incoming=incoming,
+            base_in_degree=base_in_degree,
+            source_node_ids=source_node_ids,
+            last_node_id=last_node_id,
+            input_strategies=input_strategies,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Executor
+# ---------------------------------------------------------------------------
+
+
 class Executor:
     """Event-driven DAG executor.
 
@@ -55,6 +144,7 @@ class Executor:
         graph: The computation Graph to execute.
         proxies: Mapping from model_name to an InferableProxy.
         context: InferContext for the entire pipeline execution.
+        _precomputed: Optional pre-computed graph analysis (avoids rebuild per request).
     """
 
     def __init__(
@@ -62,18 +152,22 @@ class Executor:
         graph: Graph,
         proxies: dict[str, InferableProxy],
         context: InferContext,
+        *,
+        _precomputed: PrecomputedGraph | None = None,
     ) -> None:
         self._graph = graph
         self._proxies = proxies
         self._context = context
 
-        # Pre-compute adjacency structures to avoid repeated O(E) scans.
-        self._node_map: dict[str, Node] = {n.id: n for n in graph.nodes}
-        self._successors: dict[str, list[str]] = {n.id: [] for n in graph.nodes}
-        self._incoming: dict[str, list[Edge]] = {n.id: [] for n in graph.nodes}
-        for e in graph.edges:
-            self._successors.setdefault(e.src, []).append(e.dst)
-            self._incoming.setdefault(e.dst, []).append(e)
+        if _precomputed is not None:
+            self._pc = _precomputed
+        else:
+            self._pc = PrecomputedGraph.from_graph(graph)
+
+        # Aliases for backward compatibility with internal references.
+        self._node_map = self._pc.node_map
+        self._successors = self._pc.successors
+        self._incoming = self._pc.incoming
 
     async def execute(self, inputs: Any = None) -> Any:
         """Execute the DAG and return the output of the last node.
@@ -89,6 +183,7 @@ class Executor:
             KeyError: If a required proxy is missing.
         """
         t_execute_start = time.perf_counter()
+        pc = self._pc
         graph = self._graph
         if not graph.nodes:
             return inputs
@@ -101,10 +196,8 @@ class Executor:
                     f"Available: {list(self._proxies.keys())}"
                 )
 
-        # Build in-degree table from pre-computed incoming edges.
-        in_degree: dict[str, int] = {}
-        for node in graph.nodes:
-            in_degree[node.id] = len(self._incoming.get(node.id, []))
+        # Shallow copy of pre-computed in-degree table (O(N) dict copy vs O(N+E) rebuild).
+        in_degree: dict[str, int] = dict(pc.base_in_degree)
 
         completed: dict[str, Any] = {}
         done_queue: asyncio.Queue[str | BaseException] = asyncio.Queue()
@@ -143,11 +236,10 @@ class Executor:
             except BaseException as exc:
                 await done_queue.put(exc)
 
-        # Start all source nodes (in-degree == 0).
-        for node in graph.nodes:
-            if in_degree[node.id] == 0:
-                task = asyncio.create_task(_run_node(node.id))
-                running[node.id] = task
+        # Start all source nodes (in-degree == 0) from pre-computed list.
+        for node_id in pc.source_node_ids:
+            task = asyncio.create_task(_run_node(node_id))
+            running[node_id] = task
 
         if not running:
             raise RuntimeError(
@@ -183,9 +275,9 @@ class Executor:
                     await task
             raise RuntimeError(f"DAG execution failed: {failed}") from failed
 
-        # Return the output of the last node in topological order.
-        topo = graph.topological_sort()
-        last_node_id = topo[-1].id
+        # Use pre-computed last_node_id (avoids topological_sort per request).
+        last_node_id = pc.last_node_id
+        assert last_node_id is not None
         result = completed[last_node_id]
 
         if node_timings:
@@ -203,11 +295,14 @@ class Executor:
         return result
 
     def _make_node_context(self, node_id: str) -> InferContext:
-        """Create a per-node InferContext with a unique request_id."""
-        short_id = uuid.uuid4().hex[:8]
+        """Create a per-node InferContext with a unique request_id.
+
+        Uses a process-wide atomic counter instead of uuid4 (~50ns vs ~2μs).
+        """
+        ctx_id = next(_node_ctx_counter)
         return replace(
             self._context,
-            request_id=f"{self._context.request_id}:{node_id}:{short_id}",
+            request_id=f"{self._context.request_id}:{node_id}:{ctx_id}",
         )
 
     def _build_node_inputs(
@@ -216,38 +311,43 @@ class Executor:
         completed: dict[str, Any],
         pipeline_inputs: Any,
     ) -> Any:
-        """Assemble inputs for a node from completed outputs and pipeline inputs."""
-        incoming = self._incoming.get(node_id, [])
+        """Assemble inputs for a node using pre-computed strategy."""
+        strategy = self._pc.input_strategies[node_id]
 
-        if not incoming:
-            # Source node — use pipeline inputs.
+        if strategy == _InputStrategy.SOURCE:
             return pipeline_inputs
 
-        # Check if all edges have dst_input_key → build dict.
-        all_have_key = all(e.dst_input_key is not None for e in incoming)
-        if all_have_key:
+        incoming = self._incoming[node_id]
+
+        if strategy == _InputStrategy.KEYED_DICT:
             result: dict[str, Any] = {}
             for edge in incoming:
                 output = completed[edge.src]
-                value = resolve_field_path(output, edge.src_field_path) if edge.src_field_path else output
-                # dst_input_key is guaranteed non-None by the all_have_key check above.
+                value = (
+                    resolve_field_path(output, edge.src_field_path)
+                    if edge.src_field_path
+                    else output
+                )
+                # dst_input_key is guaranteed non-None by the KEYED_DICT strategy.
                 result[edge.dst_input_key] = value  # type: ignore[index]
             return result
 
-        # Single edge without key — pass-through (with optional field_path).
-        if len(incoming) == 1:
+        if strategy == _InputStrategy.SINGLE_PASSTHROUGH:
             edge = incoming[0]
             output = completed[edge.src]
             if edge.src_field_path:
                 return resolve_field_path(output, edge.src_field_path)
             return output
 
-        # Multiple edges without keys — shouldn't happen in well-formed graphs,
-        # but pass as a list for robustness.
+        # MULTI_LIST: multiple edges without keys.
         results = []
         for edge in incoming:
             output = completed[edge.src]
-            value = resolve_field_path(output, edge.src_field_path) if edge.src_field_path else output
+            value = (
+                resolve_field_path(output, edge.src_field_path)
+                if edge.src_field_path
+                else output
+            )
             results.append(value)
         return results
 
