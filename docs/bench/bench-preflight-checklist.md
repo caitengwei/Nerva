@@ -160,3 +160,60 @@ env -u http_proxy -u https_proxy -u all_proxy \
 # 6. 校验 error_rate（应全为 0）
 grep -h error_rate /tmp/bench-results/mm_vllm/*/*/*/*/summary.json
 ```
+
+---
+
+## Nerva 单侧压测（含 timing 埋点）
+
+不含 Triton 对比的最小命令集，适合框架开销分析和优化验证。
+
+```bash
+# 1. 装依赖（含 httptools 等 perf extras）
+uv sync --extra dev --extra perf
+
+# 2. 清端口 + 启动带 timing 埋点的服务器
+lsof -ti :8080 2>/dev/null | xargs kill -9 2>/dev/null
+mkdir -p /tmp/nerva_timing
+NERVA_TIMING_LOG_DIR=/tmp/nerva_timing MOCK_TOKEN_LATENCY_MS=0.5 \
+  uv run uvicorn examples.mm_vllm_cpu_mock_server:app \
+    --host 127.0.0.1 --port 8080 &
+
+# 3. 等待就绪
+for i in $(seq 1 30); do
+  curl -sf http://127.0.0.1:8080/v1/health && break; sleep 2
+done
+
+# 4. 压测（unset 代理）
+env -u http_proxy -u https_proxy -u all_proxy \
+    -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+  uv run python scripts/bench/run_bench.py \
+    --target nerva --concurrency-levels 1,4,16 \
+    --warmup-seconds 5 --sample-seconds 15
+
+# 5. 分析 timing 明细（各层开销 p50/p95/p99）
+uv run python scripts/bench/analyze_timing_log.py --log-dir /tmp/nerva_timing
+
+# 6. 校验 error_rate（应全为 0）
+grep error_rate bench-results/mm_vllm/*/*/nerva/*/summary.json
+```
+
+### Linux 上验证 uvloop（可选）
+
+macOS 上 uvloop 与 ZMQ asyncio ipc:// 不兼容（见分析报告第七章），Linux 上需单独验证：
+
+```bash
+uv pip install uvloop
+NERVA_TIMING_LOG_DIR=/tmp/nerva_timing MOCK_TOKEN_LATENCY_MS=0.5 \
+  uv run uvicorn examples.mm_vllm_cpu_mock_server:app \
+    --host 127.0.0.1 --port 8080 --loop uvloop &
+```
+
+### 结果合理性快速校验
+
+| 检查项 | 预期值 | 异常排查 |
+|---|---|---|
+| `error_rate` | 0 | 非 0 → 查代理变量、端口、服务健康 |
+| e2e p50 | 128ms ± 15ms | 远低 → 请求未到达；远高 → Worker 积压 |
+| rpc_body_read p50 | < 1ms | > 3ms → asyncio 调度瓶颈 |
+| ipc_transport p50/stage | < 1ms | > 2ms → ZMQ 或 Worker 进程调度问题 |
+| executor_scheduler p50 | < 1ms | > 2ms → 事件循环过载 |

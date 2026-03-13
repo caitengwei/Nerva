@@ -120,3 +120,64 @@ env -u http_proxy -u https_proxy -u all_proxy \
 # 分析完整埋点
 uv run python scripts/bench/analyze_timing_log.py --log-dir /tmp/nerva_timing
 ```
+
+---
+
+## 七、优化实施结果（2026-03-13，branch: dev_perf_enhance）
+
+### 实施的优化
+
+| 优化项 | 文件 | 说明 |
+|---|---|---|
+| httptools HTTP 解析器 | `pyproject.toml`, `serve.py` | `[perf]` optional extras，`serve()` 自动检测传给 uvicorn |
+| Executor `PrecomputedGraph` | `executor.py` | 预计算 adjacency/in-degree/last_node_id/source_nodes/input 策略，每 pipeline 计算一次 |
+| Node input 策略预计算 | `executor.py` | `_InputStrategy` IntEnum 替代运行时 `all()`/`len()` 判断 |
+| Node context ID 加速 | `executor.py` | `itertools.count` (~50ns) 替代 `uuid4` (~2μs) |
+| RPC 帧单遍分类 | `rpc.py` | `_classify_frames()` 替代 3 次 list comprehension |
+
+### 回撤的尝试
+
+| 尝试 | 结论 |
+|---|---|
+| uvloop 事件循环 | macOS 上 uvloop 的 libuv fd-readiness 语义与 ZMQ asyncio PAIR socket 的 ipc:// 轮询不兼容。concurrency=16 时 e2e p99 从 153ms 退化至 **1779ms**，QPS 从 115 跌至 86。已从 `[perf]` extras 移除。Linux 环境需单独验证。 |
+
+### 优化后性能基准（concurrency=16）
+
+| 指标 | 优化前 (03-12) | 优化后 (03-13) | 变化 |
+|---|---|---|---|
+| e2e p50 | 138.9ms | 137.9ms | -0.7% |
+| e2e p99 | 156.8ms | 153.4ms | **-2.2%** |
+| QPS | 113.8 | 115.0 | +1.1% |
+
+### 优化后框架各层开销明细
+
+| 层级 | p50（前→后） | p99（前→后） |
+|---|---|---|
+| **RPC body_read** | 1.56 → **0.79ms** (-49%) | 13.2 → **8.3ms** (-37%) |
+| **Executor 调度** | 0.51 → **0.55ms** (±) | 3.1 → **3.4ms** (±) |
+| ZMQ ipc_transport (mm_preprocess) | ~0.75ms | ~4 → **6.8ms** |
+| ZMQ ipc_transport (mm_mock_llm) | ~0.75ms | ~4 → **8.9ms** |
+| ZMQ ipc_transport (mm_postprocess) | ~0.75ms | ~4 → **15.2ms** |
+| 序列化/反序列化（全链路） | ~0.05ms | ~0.05ms |
+| worker_deser | ~0.012ms | ~0.012ms |
+
+### 关键分析结论
+
+**e2e p99 (153.4ms) − 设计推理时延 (128ms) = 25ms，但并非全部是框架开销：**
+
+1. **asyncio.sleep 调度抖动 ≈ 14ms**：`mm_mock_llm` backend_infer p99 = 142.6ms（设计值 128ms），差值来自 macOS 上 asyncio.sleep() 的调度精度限制，生产 GPU 推理不存在此问题。
+
+2. **纯框架开销 p99 ≈ 10-12ms**：
+   - rpc_body_read p99 = 8.3ms（最大单项，仍占框架 p99 的 ~70%）
+   - executor_scheduler p99 = 3.4ms
+   - ZMQ ipc_transport 尾延迟（mm_postprocess p99=15ms，但和 rpc_body_read 通常不在同一请求上叠加）
+
+3. **rpc_body_read 的 8.3ms p99 来源**仍是 asyncio 调度抖动（`await request.body()` 的 ASGI `receive()` 调用在高并发下排队等待事件循环调度），uvloop 方案因 ZMQ 兼容性已排除，后续可考虑绕过 Starlette 的 body 读取路径或在 ASGI 中间件层预读 body。
+
+### 剩余优化方向
+
+| 优先级 | 方向 | 预期收益 | 备注 |
+|---|---|---|---|
+| 中 | 诊断 rpc_body_read p99 8.3ms 根因 | p99 → <5ms | 对比 Starlette body() vs 直接 ASGI receive vs request.stream() |
+| 中 | ZMQ mm_postprocess ipc_transport p99=15ms | p99 → <8ms | 排查 send_lock 竞争、fd polling、worker 进程调度 |
+| 低 | Linux 环境验证 uvloop | 可能 p99 全面改善 | macOS libuv/kqueue 问题在 Linux epoll 上可能不存在 |

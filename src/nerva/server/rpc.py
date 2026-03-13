@@ -64,6 +64,25 @@ def _parse_frames(data: bytes) -> list[Frame]:
     return frames
 
 
+def _classify_frames(
+    frames: list[Frame],
+) -> tuple[Frame | None, Frame | None, Frame | None]:
+    """Single-pass classification: return (open, data, end) first-of-each."""
+    open_frame: Frame | None = None
+    data_frame: Frame | None = None
+    end_frame: Frame | None = None
+    for f in frames:
+        if open_frame is None and f.frame_type == FrameType.OPEN:
+            open_frame = f
+        elif data_frame is None and f.frame_type == FrameType.DATA:
+            data_frame = f
+        elif end_frame is None and f.frame_type == FrameType.END:
+            end_frame = f
+        if open_frame is not None and data_frame is not None and end_frame is not None:
+            break
+    return open_frame, data_frame, end_frame
+
+
 class RpcHandler:
     """Handles binary RPC requests for a set of pipelines.
 
@@ -179,9 +198,10 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
 
-        # Validate OPEN frame exists and pipeline name matches URL path.
-        open_frames = [f for f in frames if f.frame_type == FrameType.OPEN]
-        if not open_frames:
+        # Single-pass frame classification (avoids 3 list comprehensions).
+        open_frame, data_frame, end_frame = _classify_frames(frames)
+
+        if open_frame is None:
             return Response(
                 content=_error_frame(
                     request_id, ErrorCode.INVALID_ARGUMENT, "no OPEN frame received"
@@ -189,7 +209,7 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
         try:
-            open_meta = msgpack.unpackb(open_frames[0].payload, raw=False)
+            open_meta = msgpack.unpackb(open_frame.payload, raw=False)
         except Exception:
             return Response(
                 content=_error_frame(
@@ -208,9 +228,7 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
 
-        # Validate END frame presence (unary protocol: OPEN + DATA + END).
-        end_frames = [f for f in frames if f.frame_type == FrameType.END]
-        if not end_frames:
+        if end_frame is None:
             return Response(
                 content=_error_frame(
                     request_id, ErrorCode.INVALID_ARGUMENT, "no END frame received"
@@ -218,9 +236,7 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
 
-        # Extract DATA payload (first DATA frame; MVP only uses one).
-        data_frames = [f for f in frames if f.frame_type == FrameType.DATA]
-        if not data_frames:
+        if data_frame is None:
             return Response(
                 content=_error_frame(
                     request_id, ErrorCode.INVALID_ARGUMENT, "no DATA frame received"
@@ -230,7 +246,7 @@ class RpcHandler:
 
         try:
             t_parse_start = time.perf_counter()
-            inputs: dict[str, Any] = msgpack.unpackb(data_frames[0].payload, raw=False)
+            inputs: dict[str, Any] = msgpack.unpackb(data_frame.payload, raw=False)
             rpc_parse_ms = round((time.perf_counter() - t_parse_start) * 1000, 3)
             rpc_body_read_ms = round((t_body_end - t_body_start) * 1000, 3)
         except Exception:

@@ -2277,6 +2277,9 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+perf = [
+    { name = "httptools" },
+]
 pytorch = [
     { name = "torch" },
 ]
@@ -2288,6 +2291,7 @@ vllm = [
 requires-dist = [
     { name = "coverage", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httptools", marker = "extra == 'perf'", specifier = ">=0.6" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.1" },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
@@ -2302,7 +2306,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.6" },
 ]
-provides-extras = ["pytorch", "vllm", "dev"]
+provides-extras = ["pytorch", "vllm", "perf", "dev"]
 
 [[package]]
 name = "networkx"
