@@ -64,50 +64,61 @@ class _InputStrategy(IntEnum):
 
 @dataclass(frozen=True, slots=True)
 class PrecomputedGraph:
-    """Immutable cache of graph analysis — computed once, reused per request."""
+    """Per-pipeline graph analysis computed once and reused across requests.
+
+    All fields are read-only after construction. Dict values use tuples
+    (not lists) so callers cannot accidentally mutate shared state.
+    """
 
     node_map: dict[str, Node]
-    successors: dict[str, list[str]]
-    incoming: dict[str, list[Edge]]
+    successors: dict[str, tuple[str, ...]]
+    incoming: dict[str, tuple[Edge, ...]]
     base_in_degree: dict[str, int]
-    source_node_ids: list[str]
+    source_node_ids: tuple[str, ...]
     last_node_id: str | None
     input_strategies: dict[str, _InputStrategy]
 
     @classmethod
     def from_graph(cls, graph: Graph) -> PrecomputedGraph:
         node_map: dict[str, Node] = {n.id: n for n in graph.nodes}
-        successors: dict[str, list[str]] = {n.id: [] for n in graph.nodes}
-        incoming: dict[str, list[Edge]] = {n.id: [] for n in graph.nodes}
+
+        # Build as lists first (for append), then freeze to tuples.
+        _succ_build: dict[str, list[str]] = {n.id: [] for n in graph.nodes}
+        _inc_build: dict[str, list[Edge]] = {n.id: [] for n in graph.nodes}
         for e in graph.edges:
-            successors.setdefault(e.src, []).append(e.dst)
-            incoming.setdefault(e.dst, []).append(e)
+            _succ_build.setdefault(e.src, []).append(e.dst)
+            _inc_build.setdefault(e.dst, []).append(e)
+        successors: dict[str, tuple[str, ...]] = {k: tuple(v) for k, v in _succ_build.items()}
+        incoming: dict[str, tuple[Edge, ...]] = {k: tuple(v) for k, v in _inc_build.items()}
 
         base_in_degree: dict[str, int] = {}
-        source_node_ids: list[str] = []
+        _source_ids: list[str] = []
         for node in graph.nodes:
-            deg = len(incoming.get(node.id, []))
+            deg = len(incoming.get(node.id, ()))
             base_in_degree[node.id] = deg
             if deg == 0:
-                source_node_ids.append(node.id)
+                _source_ids.append(node.id)
+        source_node_ids: tuple[str, ...] = tuple(_source_ids)
 
         # Pre-compute last node ID (avoids topological_sort per request).
-        # If the graph is cyclic, topological_sort() raises ValueError; we set
-        # last_node_id = None in that case — execute() will detect "no source nodes"
-        # and raise RuntimeError before last_node_id is ever used.
+        # Raises immediately if the graph is cyclic — fail-fast at pipeline
+        # setup rather than deadlocking at request time.
         if graph.nodes:
             try:
                 topo = graph.topological_sort()
-                last_node_id = topo[-1].id
-            except ValueError:
-                last_node_id = None
+                last_node_id: str | None = topo[-1].id
+            except ValueError as exc:
+                raise RuntimeError(
+                    "Graph contains a cycle and cannot be executed. "
+                    "Nerva pipelines must be directed acyclic graphs (DAGs)."
+                ) from exc
         else:
             last_node_id = None
 
         # Pre-compute input assembly strategy per node.
         input_strategies: dict[str, _InputStrategy] = {}
         for node in graph.nodes:
-            edges = incoming.get(node.id, [])
+            edges = incoming.get(node.id, ())
             if not edges:
                 input_strategies[node.id] = _InputStrategy.SOURCE
             elif all(e.dst_input_key is not None for e in edges):
@@ -260,7 +271,7 @@ class Executor:
             running.pop(done_id, None)
 
             # Schedule successors.
-            for succ_id in self._successors.get(done_id, []):
+            for succ_id in self._successors.get(done_id, ()):
                 in_degree[succ_id] -= 1
                 if in_degree[succ_id] == 0:
                     task = asyncio.create_task(_run_node(succ_id))
@@ -277,7 +288,10 @@ class Executor:
 
         # Use pre-computed last_node_id (avoids topological_sort per request).
         last_node_id = pc.last_node_id
-        assert last_node_id is not None
+        if last_node_id is None:
+            raise RuntimeError(
+                "Cannot determine final node: graph is empty or topology is invalid."
+            )
         result = completed[last_node_id]
 
         if node_timings:

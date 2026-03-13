@@ -78,6 +78,8 @@ def _classify_frames(
             data_frame = f
         elif end_frame is None and f.frame_type == FrameType.END:
             end_frame = f
+        if open_frame is not None and data_frame is not None and end_frame is not None:
+            break
     return open_frame, data_frame, end_frame
 
 

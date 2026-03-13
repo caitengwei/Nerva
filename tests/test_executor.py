@@ -302,7 +302,12 @@ class TestExecutorErrors:
         result = await executor.execute({"input": 1})
         assert result == {"input": 1}
 
-    async def test_no_source_nodes_raises(self) -> None:
+    def test_cyclic_graph_raises(self) -> None:
+        """Cyclic graphs must be rejected at construction time, not at execute() time.
+
+        Failing fast prevents partial-cycle graphs (with source nodes + cyclic
+        nodes) from deadlocking the event loop at request time.
+        """
         g = Graph()
         g.add_node(Node(id="a_1", model_name="a"))
         g.add_node(Node(id="b_1", model_name="b"))
@@ -313,10 +318,8 @@ class TestExecutorErrors:
         proxy_b = make_mock_proxy(return_value={"y": 2})
 
         ctx = make_context()
-        executor = Executor(g, {"a": proxy_a, "b": proxy_b}, ctx)
-
-        with pytest.raises(RuntimeError, match="Graph has no source nodes"):
-            await executor.execute({"input": 1})
+        with pytest.raises(RuntimeError, match="cycle"):
+            Executor(g, {"a": proxy_a, "b": proxy_b}, ctx)
 
         proxy_a.infer.assert_not_called()
         proxy_b.infer.assert_not_called()
