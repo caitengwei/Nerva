@@ -46,9 +46,10 @@ async def _connect_dealer(
     timeout: float = 5.0,
 ) -> zmq.asyncio.Socket:
     """Wait for worker to bind its ROUTER socket, then connect a DEALER and handshake."""
-    deadline = asyncio.get_event_loop().time() + timeout
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     while not os.path.exists(sock_path):
-        if asyncio.get_event_loop().time() >= deadline:
+        if loop.time() >= deadline:
             raise RuntimeError(f"Timed out waiting for worker socket: {sock_path}")
         await asyncio.sleep(0.05)
 
@@ -72,6 +73,7 @@ class TestWorkerLoadModel:
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
+            socket = None
             try:
                 socket = await _connect_dealer(ctx, sock_path)
 
@@ -90,12 +92,13 @@ class TestWorkerLoadModel:
                 assert ack["status"] == AckStatus.OK.value
                 assert ack["model_name"] == "echo"
             finally:
-                await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                if socket is not None:
+                    await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                    socket.close(linger=0)
                 proc.join(timeout=5)
                 if proc.is_alive():
                     proc.kill()
                     proc.join(timeout=2)
-                socket.close(linger=0)
                 ctx.term()
 
 
@@ -176,6 +179,7 @@ class TestWorkerInfer:
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
+            socket = None
             try:
                 socket = await _connect_dealer(ctx, sock_path)
 
@@ -220,12 +224,13 @@ class TestWorkerInfer:
                 output = msgpack.unpackb(out_desc.inline_data, raw=False)
                 assert output == {"echo": 42}
             finally:
-                await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                if socket is not None:
+                    await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                    socket.close(linger=0)
                 proc.join(timeout=5)
                 if proc.is_alive():
                     proc.kill()
                     proc.join(timeout=2)
-                socket.close(linger=0)
                 ctx.term()
 
     async def test_infer_raw_bytes_descriptor(self) -> None:
@@ -235,6 +240,7 @@ class TestWorkerInfer:
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
+            socket = None
             try:
                 socket = await _connect_dealer(ctx, sock_path)
 
@@ -276,12 +282,13 @@ class TestWorkerInfer:
                 output = msgpack.unpackb(out_desc.inline_data, raw=False)
                 assert output == {"echo": payload}
             finally:
-                await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                if socket is not None:
+                    await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                    socket.close(linger=0)
                 proc.join(timeout=5)
                 if proc.is_alive():
                     proc.kill()
                     proc.join(timeout=2)
-                socket.close(linger=0)
                 ctx.term()
 
 
@@ -295,6 +302,7 @@ class TestWorkerHealthCheck:
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
+            socket = None
             try:
                 socket = await _connect_dealer(ctx, sock_path)
 
@@ -321,12 +329,13 @@ class TestWorkerHealthCheck:
                 assert status["type"] == MessageType.HEALTH_STATUS.value
                 assert status["healthy"] is True
             finally:
-                await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                if socket is not None:
+                    await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                    socket.close(linger=0)
                 proc.join(timeout=5)
                 if proc.is_alive():
                     proc.kill()
                     proc.join(timeout=2)
-                socket.close(linger=0)
                 ctx.term()
 
 
@@ -340,6 +349,7 @@ class TestWorkerDecodeRobustness:
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
+            socket = None
             try:
                 socket = await _connect_dealer(ctx, sock_path)
 
@@ -353,12 +363,13 @@ class TestWorkerDecodeRobustness:
                 assert status["type"] == MessageType.HEALTH_STATUS.value
                 assert status["healthy"] is False
             finally:
-                await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                if socket is not None:
+                    await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                    socket.close(linger=0)
                 proc.join(timeout=5)
                 if proc.is_alive():
                     proc.kill()
                     proc.join(timeout=2)
-                socket.close(linger=0)
                 ctx.term()
 
 
@@ -372,6 +383,7 @@ class TestWorkerShutdown:
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
+            socket = None
             try:
                 socket = await _connect_dealer(ctx, sock_path)
 
@@ -386,5 +398,6 @@ class TestWorkerShutdown:
                 if proc.is_alive():
                     proc.kill()
                     proc.join(timeout=2)
-                socket.close(linger=0)
+                if socket is not None:
+                    socket.close(linger=0)
                 ctx.term()

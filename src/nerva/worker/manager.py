@@ -104,6 +104,13 @@ class WorkerManager:
         timing_log_dir = os.environ.get("NERVA_TIMING_LOG_DIR") or None
 
         # Determine whether we are the spawner using an atomic lock file.
+        # Limitation (MVP): lock is deleted after startup, so dynamic scaling
+        # (uvicorn adding a new worker after initial startup) can cause a new
+        # caller to become a second spawner and unlink the existing socket.
+        # This design targets static deployments where all workers start together.
+        # Also: if the spawner crashes between lock creation and deletion, the lock
+        # becomes stale and non-spawners will time out in proxy.start(). In that
+        # case, manual cleanup of the lock file is required.
         spawned = False
         proc: multiprocessing.Process | None = None
         try:
