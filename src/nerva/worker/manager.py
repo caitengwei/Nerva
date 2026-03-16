@@ -44,9 +44,10 @@ class _WorkerEntry:
     """Internal bookkeeping for a single managed worker."""
 
     handle: ModelHandle
-    process: multiprocessing.Process
+    process: multiprocessing.Process | None  # None when we only connected (not spawned)
     proxy: WorkerProxy
     socket_path: str
+    spawned: bool  # True if this instance spawned the process; False if it only connected
     state: WorkerState = WorkerState.STARTING
     restart_count: int = 0
 
@@ -59,8 +60,17 @@ class WorkerManager:
     """
 
     def __init__(self, metrics: NervaMetrics | None = None) -> None:
-        self._tmpdir = tempfile.mkdtemp(prefix="nerva-mgr-")
-        self._pid = os.getpid()
+        # Socket directory is shared across all uvicorn workers forked from the
+        # same parent process (os.getppid() is identical for all forks).
+        # Override with NERVA_SOCKET_DIR to isolate multiple server instances.
+        socket_dir_env = os.environ.get("NERVA_SOCKET_DIR")
+        if socket_dir_env:
+            self._socket_dir = socket_dir_env
+        else:
+            self._socket_dir = os.path.join(
+                tempfile.gettempdir(), f"nerva-sockets-{os.getppid()}"
+            )
+        os.makedirs(self._socket_dir, exist_ok=True)
         self._workers: dict[str, _WorkerEntry] = {}
         self._metrics = metrics
 
@@ -69,13 +79,18 @@ class WorkerManager:
     # ------------------------------------------------------------------
 
     async def start_worker(self, handle: ModelHandle) -> WorkerProxy:
-        """Spawn a worker process, connect proxy, load model, return proxy.
+        """Connect to (or spawn) a worker process, load model if spawned, return proxy.
+
+        Multiple uvicorn workers call this concurrently.  Only the first caller
+        (determined by an atomic lock file) spawns the Nerva worker process and
+        sends LOAD_MODEL.  Subsequent callers just connect a new DEALER to the
+        already-running ROUTER and skip the load step.
 
         Args:
             handle: The ModelHandle describing the model to load.
 
         Returns:
-            A connected and model-loaded WorkerProxy.
+            A connected WorkerProxy (model already loaded).
         """
         worker_id = handle.name
         if worker_id in self._workers:
@@ -84,45 +99,65 @@ class WorkerManager:
                 "Use restart_worker() to recreate it."
             )
 
-        os.makedirs(self._tmpdir, exist_ok=True)
-        socket_path = os.path.join(self._tmpdir, f"nerva-{self._pid}-{worker_id}.sock")
+        socket_path = os.path.join(self._socket_dir, f"nerva-{worker_id}.sock")
+        lock_path = socket_path + ".spawning"
+        timing_log_dir = os.environ.get("NERVA_TIMING_LOG_DIR") or None
 
-        # Clean stale socket file if it exists.
-        if os.path.exists(socket_path):
-            os.unlink(socket_path)
+        # Determine whether we are the spawner using an atomic lock file.
+        spawned = False
+        proc: multiprocessing.Process | None = None
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(lock_fd)
+            spawned = True
+        except FileExistsError:
+            spawned = False  # another uvicorn worker is spawning (or already done)
 
         proxy = WorkerProxy(socket_path)
-        timing_log_dir = os.environ.get("NERVA_TIMING_LOG_DIR") or None
-        proc = multiprocessing.Process(
-            target=worker_entry,
-            args=(socket_path,),
-            kwargs={"timing_log_dir": timing_log_dir},
-            daemon=False,
-        )
-
         entry = _WorkerEntry(
             handle=handle,
-            process=proc,
+            process=None,
             proxy=proxy,
             socket_path=socket_path,
+            spawned=spawned,
             state=WorkerState.STARTING,
         )
 
         process_started = False
         try:
-            proc.start()
-            process_started = True
+            if spawned:
+                # Remove stale socket from a previous run if present.
+                if os.path.exists(socket_path):
+                    os.unlink(socket_path)
+
+                proc = multiprocessing.Process(
+                    target=worker_entry,
+                    args=(socket_path,),
+                    kwargs={"timing_log_dir": timing_log_dir},
+                    daemon=False,
+                )
+                proc.start()
+                process_started = True
+                entry.process = proc
+
+            # Connect DEALER to the ROUTER (proxy.start() waits for socket file).
             await proxy.start()
 
-            entry.state = WorkerState.LOADING
-            model_class_path = class_to_import_path(handle.model_class)
-            await proxy.load_model(
-                model_name=handle.name,
-                model_class_path=model_class_path,
-                backend=handle.backend,
-                device=handle.device,
-                options=handle.options,
-            )
+            if spawned:
+                # Only the spawner sends LOAD_MODEL.
+                entry.state = WorkerState.LOADING
+                model_class_path = class_to_import_path(handle.model_class)
+                await proxy.load_model(
+                    model_name=handle.name,
+                    model_class_path=model_class_path,
+                    backend=handle.backend,
+                    device=handle.device,
+                    options=handle.options,
+                    async_infer=handle.async_infer,
+                )
+            else:
+                # Non-spawner: model is already loaded by the spawner.
+                logger.info("worker_connected_existing", worker_id=worker_id)
 
             entry.state = WorkerState.READY
             self._workers[worker_id] = entry
@@ -134,13 +169,18 @@ class WorkerManager:
             return proxy
         except Exception:
             logger.exception("worker_start_failed", worker_id=worker_id)
-            if process_started:
+            if process_started and proc is not None:
                 with contextlib.suppress(Exception):
                     await self._close_worker(entry)
             else:
                 with contextlib.suppress(Exception):
                     await proxy.close()
             raise
+        finally:
+            # Release spawn lock regardless of outcome.
+            if spawned:
+                with contextlib.suppress(OSError):
+                    os.unlink(lock_path)
 
     async def restart_worker(self, worker_id: str) -> WorkerProxy:
         """Restart a worker: close old process, start fresh, increment restart count.
@@ -190,40 +230,38 @@ class WorkerManager:
             except Exception:
                 logger.exception("worker_shutdown_error", worker_id=worker_id)
 
-        self._workers.clear()
+        # Clean up socket files left by workers we spawned.
+        for entry in self._workers.values():
+            if entry.spawned:
+                with contextlib.suppress(OSError):
+                    os.unlink(entry.socket_path)
 
-        # Cleanup tmpdir.
-        try:
-            for fname in os.listdir(self._tmpdir):
-                fpath = os.path.join(self._tmpdir, fname)
-                if os.path.isfile(fpath):
-                    os.unlink(fpath)
-            os.rmdir(self._tmpdir)
-        except OSError:
-            logger.debug("tmpdir_cleanup_failed", tmpdir=self._tmpdir)
+        self._workers.clear()
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
     async def _close_worker(self, entry: _WorkerEntry) -> None:
-        """Send SHUTDOWN, join process, close proxy."""
+        """Close this manager's proxy connection.  If we spawned the worker,
+        also send SHUTDOWN and terminate the process."""
         entry.state = WorkerState.STOPPING
         if self._metrics:
             self._metrics.worker_status.labels(
                 model=entry.handle.name, device=entry.handle.device
             ).set(0)
 
-        # Best-effort SHUTDOWN with timeout — peer may already be dead.
-        try:
-            await asyncio.wait_for(entry.proxy.shutdown(), timeout=3.0)
-        except (TimeoutError, Exception):
-            logger.debug("worker_shutdown_send_failed", worker=entry.handle.name)
+        if entry.spawned and entry.process is not None:
+            # Best-effort SHUTDOWN with timeout — peer may already be dead.
+            try:
+                await asyncio.wait_for(entry.proxy.shutdown(), timeout=3.0)
+            except (TimeoutError, Exception):
+                logger.debug("worker_shutdown_send_failed", worker=entry.handle.name)
 
-        entry.process.join(timeout=5)
-        if entry.process.is_alive():
-            entry.process.kill()
-            entry.process.join(timeout=2)
+            entry.process.join(timeout=5)
+            if entry.process.is_alive():
+                entry.process.kill()
+                entry.process.join(timeout=2)
 
         await entry.proxy.close()
         entry.state = WorkerState.STOPPED

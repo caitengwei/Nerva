@@ -65,12 +65,12 @@ Call chain: trace() → Graph → Executor → WorkerProxy → Worker → Backen
 - **trace()** — builds Graph by tracing user pipeline function
 - **cond()/parallel()** — control flow primitives (sub-graph embedding)
 - **Executor** — event-driven DAG executor (in-degree table + done_queue)
-- **WorkerProxy** — async RPC wrapper for Worker subprocess (ZeroMQ PAIR)
-- **WorkerManager** — spawns/restarts/shuts down Worker processes
+- **WorkerProxy** — async RPC wrapper for Worker subprocess (ZeroMQ DEALER, connects to Worker ROUTER)
+- **WorkerManager** — spawns/restarts/shuts down Worker processes; spawn-once lock file allows multiple uvicorn workers to share one Nerva worker process
 
 ## Design Decisions (from Design Review)
 
-- IPC: ZeroMQ PAIR over ipc:// (Phase 1), SHM for data >8KB
+- IPC: ZeroMQ ROUTER/DEALER over ipc:// (Phase 1→2 migration), SHM for data >8KB; Worker binds ROUTER, each uvicorn worker connects a DEALER; spawn-once lock file prevents duplicate spawning
 - Trace: restricted trace as default + explicit DAG fallback
 - Batching: no padding, group by size-matching; default delay 10ms
 - serve(): separated from transform chain; Pipeline independently executable

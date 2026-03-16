@@ -29,35 +29,53 @@ def _make_socket_path(tmp_dir: str) -> str:
 
 
 async def _recv_msg(socket: zmq.asyncio.Socket, timeout: float = 5.0) -> dict[str, Any]:
-    """Receive and decode a message with timeout."""
-    raw: bytes = await asyncio.wait_for(socket.recv(), timeout=timeout)
+    """Receive and decode a DEALER message [b"", payload]."""
+    parts: list[bytes] = await asyncio.wait_for(socket.recv_multipart(), timeout=timeout)
+    raw = parts[1] if len(parts) >= 2 else parts[0]
     return decode_message(raw)
 
 
 async def _send_msg(socket: zmq.asyncio.Socket, msg: dict[str, Any]) -> None:
-    """Encode and send a message."""
-    await socket.send(encode_message(msg))
+    """Send a DEALER message [b"", payload]."""
+    await socket.send_multipart([b"", encode_message(msg)])
+
+
+async def _connect_dealer(
+    ctx: zmq.asyncio.Context,
+    sock_path: str,
+    timeout: float = 5.0,
+) -> zmq.asyncio.Socket:
+    """Wait for worker to bind its ROUTER socket, then connect a DEALER and handshake."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not os.path.exists(sock_path):
+        if asyncio.get_event_loop().time() >= deadline:
+            raise RuntimeError(f"Timed out waiting for worker socket: {sock_path}")
+        await asyncio.sleep(0.05)
+
+    socket: zmq.asyncio.Socket = ctx.socket(zmq.DEALER)
+    socket.connect(f"ipc://{sock_path}")
+
+    # Perform WORKER_CONNECT / WORKER_READY handshake.
+    await _send_msg(socket, {"type": MessageType.WORKER_CONNECT.value})
+    msg = await _recv_msg(socket, timeout=timeout)
+    assert msg["type"] == MessageType.WORKER_READY.value, f"Expected WORKER_READY, got {msg}"
+    return socket
 
 
 class TestWorkerLoadModel:
-    """Spawn worker, verify WORKER_READY + LOAD_MODEL + ACK."""
+    """Spawn worker, verify WORKER_CONNECT/WORKER_READY + LOAD_MODEL + ACK."""
 
     async def test_load_model_ack(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             sock_path = _make_socket_path(tmp_dir)
             ctx = zmq.asyncio.Context()
-            socket = ctx.socket(zmq.PAIR)
-            socket.bind(f"ipc://{sock_path}")
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
             try:
-                # 1. Receive WORKER_READY.
-                msg = await _recv_msg(socket)
-                assert msg["type"] == MessageType.WORKER_READY.value
-                assert "worker_id" in msg
+                socket = await _connect_dealer(ctx, sock_path)
 
-                # 2. Send LOAD_MODEL.
+                # Send LOAD_MODEL.
                 await _send_msg(socket, {
                     "type": MessageType.LOAD_MODEL.value,
                     "model_name": "echo",
@@ -66,7 +84,7 @@ class TestWorkerLoadModel:
                     "device": "cpu",
                 })
 
-                # 3. Receive LOAD_MODEL_ACK.
+                # Receive LOAD_MODEL_ACK.
                 ack = await _recv_msg(socket)
                 assert ack["type"] == MessageType.LOAD_MODEL_ACK.value
                 assert ack["status"] == AckStatus.OK.value
@@ -110,10 +128,13 @@ class TestWorkerLoadModelOptions:
 
         _CaptureOptionsBackend.last_config = None
         sent: list[dict[str, Any]] = []
+        sent_client_ids: list[bytes] = []
 
         loop = _WorkerLoop(socket_path="/tmp/unused.sock")
+        fake_client_id = b"test-client"
 
-        async def _fake_send(msg: dict[str, Any]) -> None:
+        async def _fake_send_to(client_id: bytes, msg: dict[str, Any]) -> None:
+            sent_client_ids.append(client_id)
             sent.append(msg)
 
         monkeypatch.setattr("nerva.worker.process.import_path_to_class", lambda _p: object)
@@ -121,16 +142,19 @@ class TestWorkerLoadModelOptions:
             "nerva.worker.process.get_backend",
             lambda _name: _CaptureOptionsBackend,
         )
-        monkeypatch.setattr(loop, "_send", _fake_send)
+        monkeypatch.setattr(loop, "_send_to", _fake_send_to)
 
-        await loop._handle_load_model({
-            "type": MessageType.LOAD_MODEL.value,
-            "model_name": "echo",
-            "model_class": "tests.helpers:EchoModel",
-            "backend": "capture",
-            "device": "cpu",
-            "options": {"max_batch": 32, "timeout_ms": 2000},
-        })
+        await loop._handle_load_model(
+            {
+                "type": MessageType.LOAD_MODEL.value,
+                "model_name": "echo",
+                "model_class": "tests.helpers:EchoModel",
+                "backend": "capture",
+                "device": "cpu",
+                "options": {"max_batch": 32, "timeout_ms": 2000},
+            },
+            fake_client_id,
+        )
 
         assert _CaptureOptionsBackend.last_config is not None
         assert _CaptureOptionsBackend.last_config.backend_options == {
@@ -139,6 +163,7 @@ class TestWorkerLoadModelOptions:
         }
         assert sent[0]["type"] == MessageType.LOAD_MODEL_ACK.value
         assert sent[0]["status"] == AckStatus.OK.value
+        assert sent_client_ids[0] == fake_client_id
 
 
 class TestWorkerInfer:
@@ -148,15 +173,11 @@ class TestWorkerInfer:
         with tempfile.TemporaryDirectory() as tmp_dir:
             sock_path = _make_socket_path(tmp_dir)
             ctx = zmq.asyncio.Context()
-            socket = ctx.socket(zmq.PAIR)
-            socket.bind(f"ipc://{sock_path}")
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
             try:
-                # Wait for WORKER_READY.
-                msg = await _recv_msg(socket)
-                assert msg["type"] == MessageType.WORKER_READY.value
+                socket = await _connect_dealer(ctx, sock_path)
 
                 # Load model.
                 await _send_msg(socket, {
@@ -211,14 +232,11 @@ class TestWorkerInfer:
         with tempfile.TemporaryDirectory() as tmp_dir:
             sock_path = _make_socket_path(tmp_dir)
             ctx = zmq.asyncio.Context()
-            socket = ctx.socket(zmq.PAIR)
-            socket.bind(f"ipc://{sock_path}")
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
             try:
-                msg = await _recv_msg(socket)
-                assert msg["type"] == MessageType.WORKER_READY.value
+                socket = await _connect_dealer(ctx, sock_path)
 
                 await _send_msg(socket, {
                     "type": MessageType.LOAD_MODEL.value,
@@ -274,15 +292,11 @@ class TestWorkerHealthCheck:
         with tempfile.TemporaryDirectory() as tmp_dir:
             sock_path = _make_socket_path(tmp_dir)
             ctx = zmq.asyncio.Context()
-            socket = ctx.socket(zmq.PAIR)
-            socket.bind(f"ipc://{sock_path}")
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
             try:
-                # Wait for WORKER_READY.
-                msg = await _recv_msg(socket)
-                assert msg["type"] == MessageType.WORKER_READY.value
+                socket = await _connect_dealer(ctx, sock_path)
 
                 # Health check before model load — should be unhealthy.
                 await _send_msg(socket, {"type": MessageType.HEALTH_CHECK.value})
@@ -323,17 +337,14 @@ class TestWorkerDecodeRobustness:
         with tempfile.TemporaryDirectory() as tmp_dir:
             sock_path = _make_socket_path(tmp_dir)
             ctx = zmq.asyncio.Context()
-            socket = ctx.socket(zmq.PAIR)
-            socket.bind(f"ipc://{sock_path}")
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
             try:
-                msg = await _recv_msg(socket)
-                assert msg["type"] == MessageType.WORKER_READY.value
+                socket = await _connect_dealer(ctx, sock_path)
 
-                # 0xC1 is a reserved byte in MessagePack and always invalid.
-                await socket.send(b"\xc1")
+                # Send malformed payload (0xC1 is always invalid msgpack).
+                await socket.send_multipart([b"", b"\xc1"])
                 await asyncio.sleep(0.1)
                 assert proc.is_alive()
 
@@ -358,15 +369,11 @@ class TestWorkerShutdown:
         with tempfile.TemporaryDirectory() as tmp_dir:
             sock_path = _make_socket_path(tmp_dir)
             ctx = zmq.asyncio.Context()
-            socket = ctx.socket(zmq.PAIR)
-            socket.bind(f"ipc://{sock_path}")
 
             proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
             proc.start()
             try:
-                # Wait for WORKER_READY.
-                msg = await _recv_msg(socket)
-                assert msg["type"] == MessageType.WORKER_READY.value
+                socket = await _connect_dealer(ctx, sock_path)
 
                 # Send SHUTDOWN.
                 await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
