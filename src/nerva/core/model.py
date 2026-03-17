@@ -81,6 +81,7 @@ class ModelHandle:
     options: dict[str, Any] = field(default_factory=dict)
     batch_config: BatchConfig | None = None
     async_infer: bool = False
+    instances: int = 1
 
     def __call__(self, inputs: Any) -> Any:
         """Invoke the model.
@@ -139,6 +140,7 @@ def model(
     device: str = "cpu",
     batch_config: BatchConfig | None = None,
     async_infer: bool = False,
+    instances: int = 1,
     **options: Any,
 ) -> ModelHandle:
     """Declare a model for use in a pipeline.
@@ -162,6 +164,8 @@ def model(
         raise TypeError(
             f"model_class must be a subclass of nerva.Model, got {model_class}"
         )
+    if instances < 1:
+        raise ValueError(f"instances must be >= 1, got {instances}")
     handle = ModelHandle(
         name=name,
         model_class=model_class,
@@ -170,6 +174,7 @@ def model(
         options=options,
         batch_config=batch_config,
         async_infer=async_infer,
+        instances=instances,
     )
     if name in _model_registry:
         logger.warning("overwriting existing model handle for '%s'", name)

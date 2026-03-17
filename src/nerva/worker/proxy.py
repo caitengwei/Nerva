@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import os
 import time
@@ -539,3 +540,53 @@ class WorkerProxy:
         while len(self._recently_completed) > MAX_RECENT_COMPLETED_REQUESTS:
             old = self._recently_completed.popleft()
             self._recently_completed_set.discard(old)
+
+
+# ---------------------------------------------------------------------------
+# MultiInstanceProxy
+# ---------------------------------------------------------------------------
+
+
+class MultiInstanceProxy:
+    """Load-balancing proxy wrapping multiple WorkerProxy instances.
+
+    Implements the InferableProxy protocol. The Executor treats it exactly
+    like a single WorkerProxy — multi-instance dispatch is transparent.
+
+    Dispatches infer() calls via round-robin across N WorkerProxy instances,
+    each backed by an independent Worker subprocess.
+    """
+
+    def __init__(self, proxies: list[WorkerProxy]) -> None:
+        if not proxies:
+            raise ValueError("MultiInstanceProxy requires at least one proxy")
+        self._proxies = proxies
+        self._counter = itertools.count()
+
+    async def infer(
+        self,
+        inputs: dict[str, Any],
+        context: InferContext,
+        shm_pool: ShmPool | None = None,
+    ) -> dict[str, Any]:
+        """Round-robin dispatch to one of the underlying WorkerProxy instances."""
+        idx = next(self._counter) % len(self._proxies)
+        return await self._proxies[idx].infer(inputs, context, shm_pool)
+
+    async def health_check(self, timeout: float = 3.0) -> bool:
+        """Return True if any instance is healthy."""
+        results = await asyncio.gather(
+            *(p.health_check(timeout=timeout) for p in self._proxies),
+            return_exceptions=True,
+        )
+        return any(r is True for r in results)
+
+    async def shutdown(self) -> None:
+        """Broadcast SHUTDOWN to all instances."""
+        for p in self._proxies:
+            await p.shutdown()
+
+    async def close(self) -> None:
+        """Close all underlying proxies."""
+        for p in self._proxies:
+            await p.close()
