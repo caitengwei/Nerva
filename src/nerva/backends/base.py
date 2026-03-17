@@ -102,6 +102,15 @@ class Backend(ABC):
         return True
 
     @property
+    def is_async_native(self) -> bool:
+        """Whether infer() is truly async (non-blocking on event loop).
+
+        True: Worker dispatches directly on event loop (no ThreadPool).
+        False: Worker wraps in asyncio.to_thread() to avoid blocking.
+        """
+        return False
+
+    @property
     def is_loaded(self) -> bool:
         """Whether a model is currently loaded."""
         return False

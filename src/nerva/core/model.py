@@ -80,6 +80,7 @@ class ModelHandle:
     device: str
     options: dict[str, Any] = field(default_factory=dict)
     batch_config: BatchConfig | None = None
+    async_infer: bool = False
 
     def __call__(self, inputs: Any) -> Any:
         """Invoke the model.
@@ -137,6 +138,7 @@ def model(
     backend: str = "pytorch",
     device: str = "cpu",
     batch_config: BatchConfig | None = None,
+    async_infer: bool = False,
     **options: Any,
 ) -> ModelHandle:
     """Declare a model for use in a pipeline.
@@ -167,6 +169,7 @@ def model(
         device=device,
         options=options,
         batch_config=batch_config,
+        async_infer=async_infer,
     )
     if name in _model_registry:
         logger.warning("overwriting existing model handle for '%s'", name)

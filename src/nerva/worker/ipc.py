@@ -31,6 +31,7 @@ class MessageType(StrEnum):
     HEALTH_STATUS = "HEALTH_STATUS"
     SHUTDOWN = "SHUTDOWN"
     WORKER_READY = "WORKER_READY"
+    WORKER_CONNECT = "WORKER_CONNECT"
 
 
 class AckStatus(StrEnum):

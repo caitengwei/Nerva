@@ -48,6 +48,10 @@ class VLLMBackend(Backend):
         self._config: ModelConfig | None = None
 
     @property
+    def is_async_native(self) -> bool:
+        return True
+
+    @property
     def is_loaded(self) -> bool:
         return self._engine is not None
 

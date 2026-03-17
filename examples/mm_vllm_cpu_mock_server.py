@@ -84,18 +84,21 @@ mm_preprocess = model(
     MMPreprocessModel,
     backend="pytorch",
     device="cpu",
+    async_infer=True,
 )
 mm_mock_llm = model(
     "mm_mock_llm",
     MockCPULLMModel,
     backend="pytorch",
     device="cpu",
+    async_infer=True,
 )
 mm_postprocess = model(
     "mm_postprocess",
     MMPostprocessModel,
     backend="pytorch",
     device="cpu",
+    async_infer=True,
 )
 
 

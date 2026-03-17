@@ -1,4 +1,8 @@
-"""Worker subprocess — runs in a separate process, connects to Master via ZeroMQ PAIR.
+"""Worker subprocess — runs in a separate process, binds a ZeroMQ ROUTER socket.
+
+Multiple WorkerProxy instances (from different uvicorn workers) can connect to the
+same Nerva worker via DEALER sockets.  The ROUTER socket routes replies back to the
+correct DEALER using the identity frame injected automatically by ZMQ.
 
 Entry point: ``worker_entry(socket_path)`` is passed to ``multiprocessing.Process(target=...)``.
 """
@@ -9,6 +13,7 @@ import asyncio
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any
 
@@ -59,7 +64,10 @@ class _WorkerLoop:
     ) -> None:
         self._socket_path = socket_path
         self._shm_alloc_timeout_s = shm_alloc_timeout_s
+        self._worker_id = str(uuid.uuid4())  # stable across all WORKER_CONNECT replies
         self._backend: Backend | None = None
+        self._async_dispatch = False
+        self._thread_executor: ThreadPoolExecutor | None = None
         self._running = False
         self._inflight: dict[str, asyncio.Task[None]] = {}
         self._contexts: dict[str, InferContext] = {}
@@ -74,27 +82,37 @@ class _WorkerLoop:
     # -- public entry -------------------------------------------------------
 
     async def run(self) -> None:
-        """Connect to master, send WORKER_READY, and enter the recv loop."""
+        """Bind ROUTER socket and enter the recv loop.
+
+        Each connecting WorkerProxy sends WORKER_CONNECT; the worker responds
+        with WORKER_READY addressed to that specific proxy's DEALER identity.
+        Multiple proxies (from different uvicorn workers) may connect concurrently.
+        """
         self._send_lock = asyncio.Lock()
         self._ctx = zmq.asyncio.Context()
-        self._socket = self._ctx.socket(zmq.PAIR)
-        self._socket.connect(f"ipc://{self._socket_path}")
+        self._socket = self._ctx.socket(zmq.ROUTER)
+        self._socket.bind(f"ipc://{self._socket_path}")
         self._running = True
         if self._timing_log_dir is not None:
             self._timing_sink = AsyncTimingSink()
             await self._timing_sink.start(self._timing_log_dir, f"nerva_worker_{os.getpid()}.log")
 
         try:
-            # Announce readiness.
-            await self._send(
-                {"type": MessageType.WORKER_READY.value, "worker_id": str(uuid.uuid4())}
-            )
-
             while self._running:
                 try:
-                    raw: bytes = await asyncio.wait_for(self._socket.recv(), timeout=1.0)
+                    # ROUTER receives [client_identity, b"", payload]
+                    parts: list[bytes] = await asyncio.wait_for(
+                        self._socket.recv_multipart(), timeout=1.0
+                    )
                 except TimeoutError:
                     continue
+
+                if len(parts) < 3:
+                    logger.warning("malformed_router_frame", nparts=len(parts))
+                    continue
+
+                client_id = parts[0]
+                raw = parts[2]
 
                 try:
                     msg = decode_message(raw)
@@ -103,17 +121,22 @@ class _WorkerLoop:
                     continue
                 msg_type = msg.get("type", "")
 
-                if msg_type == MessageType.LOAD_MODEL.value:
-                    await self._handle_load_model(msg)
+                if msg_type == MessageType.WORKER_CONNECT.value:
+                    await self._send_to(
+                        client_id,
+                        {"type": MessageType.WORKER_READY.value, "worker_id": self._worker_id},
+                    )
+                elif msg_type == MessageType.LOAD_MODEL.value:
+                    await self._handle_load_model(msg, client_id)
                 elif msg_type == MessageType.INFER_SUBMIT.value:
-                    task = asyncio.create_task(self._handle_infer(msg))
                     request_id = msg.get("request_id", "")
+                    task = asyncio.create_task(self._handle_infer(msg, client_id))
                     self._inflight[request_id] = task
                     task.add_done_callback(self._make_cleanup_cb(request_id))
                 elif msg_type == MessageType.SHM_ALLOC_RESPONSE.value:
                     self._handle_shm_alloc_response(msg)
                 elif msg_type == MessageType.HEALTH_CHECK.value:
-                    await self._handle_health_check(msg)
+                    await self._handle_health_check(msg, client_id)
                 elif msg_type == MessageType.CANCEL.value:
                     self._handle_cancel(msg)
                 elif msg_type == MessageType.SHUTDOWN.value:
@@ -132,7 +155,7 @@ class _WorkerLoop:
 
     # -- message handlers ---------------------------------------------------
 
-    async def _handle_load_model(self, msg: dict[str, Any]) -> None:
+    async def _handle_load_model(self, msg: dict[str, Any], client_id: bytes) -> None:
         """Import model class, create Backend, load model, send ACK."""
         model_name: str = msg.get("model_name", "unknown")
         try:
@@ -157,7 +180,30 @@ class _WorkerLoop:
             self._backend = backend
             self._model_name = model_name
 
-            await self._send({
+            # Determine dispatch mode: backend signal OR user declaration
+            self._async_dispatch = (
+                getattr(self._backend, "is_async_native", False)
+                or msg.get("async_infer", False)
+            )
+
+            # Shut down any previous executor (e.g., model reload or dispatch mode change).
+            if self._thread_executor is not None:
+                self._thread_executor.shutdown(wait=False)
+                self._thread_executor = None
+
+            if not self._async_dispatch:
+                try:
+                    max_threads = int(os.environ.get("NERVA_WORKER_MAX_THREADS", "0")) or None
+                except ValueError:
+                    logger.warning(
+                        "invalid_nerva_worker_max_threads",
+                        value=os.environ.get("NERVA_WORKER_MAX_THREADS"),
+                    )
+                    max_threads = None
+                if max_threads:
+                    self._thread_executor = ThreadPoolExecutor(max_workers=max_threads)
+
+            await self._send_to(client_id, {
                 "type": MessageType.LOAD_MODEL_ACK.value,
                 "model_name": model_name,
                 "status": AckStatus.OK.value,
@@ -165,14 +211,14 @@ class _WorkerLoop:
             logger.info("model_loaded", model=model_name)
         except Exception as exc:
             logger.exception("load_model_failed", model=model_name)
-            await self._send({
+            await self._send_to(client_id, {
                 "type": MessageType.LOAD_MODEL_ACK.value,
                 "model_name": model_name,
                 "status": AckStatus.INTERNAL.value,
                 "error": str(exc),
             })
 
-    async def _handle_infer(self, msg: dict[str, Any]) -> None:
+    async def _handle_infer(self, msg: dict[str, Any], client_id: bytes) -> None:
         """Deserialize inputs, run inference, send INFER_ACK."""
         request_id: str = msg.get("request_id", "")
         context: InferContext | None = None
@@ -194,7 +240,7 @@ class _WorkerLoop:
             self._contexts[request_id] = context
 
             if context.deadline_ms <= 0:
-                await self._send({
+                await self._send_to(client_id, {
                     "type": MessageType.INFER_ACK.value,
                     "request_id": request_id,
                     "status": AckStatus.DEADLINE_EXCEEDED.value,
@@ -203,24 +249,67 @@ class _WorkerLoop:
                 return
 
             try:
-                t_infer_start = time.perf_counter()
-                # Run inference in a thread to avoid blocking the event loop.
-                output = await asyncio.wait_for(
-                    asyncio.to_thread(self._run_infer_sync, inputs, context),
-                    timeout=context.deadline_ms / 1000.0,
-                )
-                t_infer_end = time.perf_counter()
-                if self._timing_sink is not None:
-                    self._timing_sink.write({
-                        "event": "infer_timing",
-                        "request_id": request_id,
-                        "model": self._model_name,
-                        "worker_deser_ms": round((t_infer_start - t_recv) * 1000, 3),
-                        "backend_infer_ms": round((t_infer_end - t_infer_start) * 1000, 3),
-                    })
+                t_dispatch = time.perf_counter()
+
+                if self._async_dispatch:
+                    # ── Async path: direct await on Worker event loop ──
+                    output = await asyncio.wait_for(
+                        self._backend.infer(inputs, context),
+                        timeout=context.deadline_ms / 1000.0,
+                    )
+                    t_infer_end = time.perf_counter()
+                    if self._timing_sink is not None:
+                        self._timing_sink.write({
+                            "event": "infer_timing",
+                            "request_id": request_id,
+                            "model": self._model_name,
+                            "worker_deser_ms": round((t_dispatch - t_recv) * 1000, 3),
+                            "thread_queue_ms": 0.0,
+                            "backend_infer_ms": round(
+                                (t_infer_end - t_dispatch) * 1000, 3
+                            ),
+                        })
+                else:
+                    # ── Sync path: dispatch to ThreadPool ──
+                    _thread_ts: list[float] = []
+
+                    def _run_with_timing() -> dict[str, Any]:
+                        _thread_ts.append(time.perf_counter())
+                        return self._run_infer_sync(inputs, context)
+
+                    if self._thread_executor is not None:
+                        loop = asyncio.get_running_loop()
+                        output = await asyncio.wait_for(
+                            loop.run_in_executor(self._thread_executor, _run_with_timing),
+                            timeout=context.deadline_ms / 1000.0,
+                        )
+                    else:
+                        output = await asyncio.wait_for(
+                            asyncio.to_thread(_run_with_timing),
+                            timeout=context.deadline_ms / 1000.0,
+                        )
+                    t_infer_end = time.perf_counter()
+                    if self._timing_sink is not None:
+                        t_thread_start = (
+                            _thread_ts[0] if _thread_ts else t_dispatch
+                        )
+                        self._timing_sink.write({
+                            "event": "infer_timing",
+                            "request_id": request_id,
+                            "model": self._model_name,
+                            "worker_deser_ms": round(
+                                (t_dispatch - t_recv) * 1000, 3
+                            ),
+                            "thread_queue_ms": round(
+                                (t_thread_start - t_dispatch) * 1000, 3
+                            ),
+                            "backend_infer_ms": round(
+                                (t_infer_end - t_thread_start) * 1000, 3
+                            ),
+                        })
             except TimeoutError:
                 context.cancelled = True
-                await self._send({
+                await self._send_to(client_id, {
                     "type": MessageType.INFER_ACK.value,
                     "request_id": request_id,
                     "status": AckStatus.DEADLINE_EXCEEDED.value,
@@ -230,9 +319,9 @@ class _WorkerLoop:
 
             # Serialize output and choose inline/SHM output path.
             output_bytes = msgpack.packb(output, use_bin_type=True)
-            out_descriptor = await self._build_output_descriptor(request_id, output_bytes)
+            out_descriptor = await self._build_output_descriptor(request_id, output_bytes, client_id)
 
-            await self._send({
+            await self._send_to(client_id, {
                 "type": MessageType.INFER_ACK.value,
                 "request_id": request_id,
                 "status": AckStatus.OK.value,
@@ -241,7 +330,7 @@ class _WorkerLoop:
         except asyncio.CancelledError:
             if context is not None:
                 context.cancelled = True
-            await self._send({
+            await self._send_to(client_id, {
                 "type": MessageType.INFER_ACK.value,
                 "request_id": request_id,
                 "status": AckStatus.ABORTED.value,
@@ -250,7 +339,7 @@ class _WorkerLoop:
             return
         except _OutputShmAllocationError as exc:
             logger.exception("shm_alloc_failed", request_id=request_id)
-            await self._send({
+            await self._send_to(client_id, {
                 "type": MessageType.INFER_ACK.value,
                 "request_id": request_id,
                 "status": exc.status.value,
@@ -259,7 +348,7 @@ class _WorkerLoop:
             return
         except Exception as exc:
             logger.exception("infer_failed", request_id=request_id)
-            await self._send({
+            await self._send_to(client_id, {
                 "type": MessageType.INFER_ACK.value,
                 "request_id": request_id,
                 "status": AckStatus.INTERNAL.value,
@@ -324,10 +413,10 @@ class _WorkerLoop:
         finally:
             shm.close()
 
-    async def _handle_health_check(self, msg: dict[str, Any]) -> None:
+    async def _handle_health_check(self, msg: dict[str, Any], client_id: bytes) -> None:
         """Respond with HEALTH_STATUS."""
         healthy = self._backend.health_check() if self._backend is not None else False
-        await self._send({
+        await self._send_to(client_id, {
             "type": MessageType.HEALTH_STATUS.value,
             "healthy": healthy,
         })
@@ -357,17 +446,18 @@ class _WorkerLoop:
 
     # -- helpers ------------------------------------------------------------
 
-    async def _send(self, msg: dict[str, Any]) -> None:
-        """Thread-safe send via asyncio.Lock."""
+    async def _send_to(self, client_id: bytes, msg: dict[str, Any]) -> None:
+        """Route a reply to a specific DEALER client via the ROUTER socket."""
         assert self._send_lock is not None
         assert self._socket is not None
         async with self._send_lock:
-            await self._socket.send(encode_message(msg))
+            await self._socket.send_multipart([client_id, b"", encode_message(msg)])
 
     async def _build_output_descriptor(
         self,
         request_id: str,
         output_bytes: bytes,
+        client_id: bytes,
     ) -> Descriptor:
         """Build output descriptor. Large payloads request SHM from Master."""
         if len(output_bytes) <= IPC_CONTROL_INLINE_MAX_BYTES:
@@ -380,7 +470,7 @@ class _WorkerLoop:
             )
 
         try:
-            alloc = await self._request_output_slot(request_id, len(output_bytes))
+            alloc = await self._request_output_slot(request_id, len(output_bytes), client_id)
         except _OutputShmAllocationError as exc:
             if exc.status == AckStatus.UNAVAILABLE:
                 # No shm_pool associated with this request (e.g. Executor called
@@ -431,7 +521,9 @@ class _WorkerLoop:
             payload_codec="msgpack_dict_v1",
         )
 
-    async def _request_output_slot(self, request_id: str, size: int) -> dict[str, Any]:
+    async def _request_output_slot(
+        self, request_id: str, size: int, client_id: bytes
+    ) -> dict[str, Any]:
         """Ask Master to allocate an output SHM slot for this request."""
         if request_id in self._shm_alloc_futures:
             raise RuntimeError(f"Duplicate SHM allocation request for '{request_id}'")
@@ -440,7 +532,7 @@ class _WorkerLoop:
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._shm_alloc_futures[request_id] = fut
         try:
-            await self._send({
+            await self._send_to(client_id, {
                 "type": MessageType.SHM_ALLOC_REQUEST.value,
                 "request_id": request_id,
                 "size": size,
@@ -474,6 +566,11 @@ class _WorkerLoop:
             if not fut.done():
                 fut.set_exception(RuntimeError("Worker loop shutting down"))
         self._shm_alloc_futures.clear()
+
+        # Shutdown thread executor.
+        if self._thread_executor is not None:
+            self._thread_executor.shutdown(wait=False)
+            self._thread_executor = None
 
         # Unload backend.
         if self._backend is not None:

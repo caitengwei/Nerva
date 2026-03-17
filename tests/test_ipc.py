@@ -34,6 +34,7 @@ class TestMessageType:
             "HEALTH_STATUS",
             "SHUTDOWN",
             "WORKER_READY",
+            "WORKER_CONNECT",
         }
         actual = {m.name for m in MessageType}
         assert actual == expected

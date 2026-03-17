@@ -1,6 +1,9 @@
 """WorkerProxy — Master-side async RPC wrapper for a single Worker subprocess.
 
-Communicates with a Worker process over a ZeroMQ PAIR socket.
+Connects a ZeroMQ DEALER socket to the Worker's ROUTER socket, performs a
+WORKER_CONNECT/WORKER_READY handshake, and provides async methods for
+load_model, infer, health_check, cancel, and shutdown.  Multiple proxies
+(from different uvicorn workers) may connect to the same Worker ROUTER.
 """
 
 from __future__ import annotations
@@ -73,22 +76,44 @@ class WorkerProxy:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Bind PAIR socket, wait for WORKER_READY, start background recv loop."""
-        self._ctx = zmq.asyncio.Context()
-        self._socket = self._ctx.socket(zmq.PAIR)
-        self._socket.bind(f"ipc://{self._socket_path}")
+        """Connect DEALER socket to the worker's ROUTER, perform handshake.
 
-        # Wait for WORKER_READY.
-        raw: bytes = await asyncio.wait_for(self._socket.recv(), timeout=10.0)
-        msg = decode_message(raw)
-        if msg.get("type") != MessageType.WORKER_READY.value:
-            raise RuntimeError(f"Expected WORKER_READY, got {msg.get('type')}")
+        Waits for the worker's socket file to appear (the worker binds first),
+        then connects and sends WORKER_CONNECT.  The worker replies with
+        WORKER_READY addressed to this specific DEALER.
+        """
+        self._ctx = zmq.asyncio.Context()
+        self._socket = self._ctx.socket(zmq.DEALER)
+
+        # Wait for the worker to bind its ROUTER socket (socket file appears).
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10.0
+        while not os.path.exists(self._socket_path):
+            if loop.time() >= deadline:
+                raise RuntimeError(
+                    f"Timed out waiting for worker socket: {self._socket_path}"
+                )
+            await asyncio.sleep(0.05)
+
+        self._socket.connect(f"ipc://{self._socket_path}")
+
+        # Start background recv loop before sending the handshake so the reply
+        # is not lost.
+        self._recv_task = asyncio.create_task(self._recv_loop())
+
+        # Send WORKER_CONNECT and wait for WORKER_READY.
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._load_model_future = fut  # reuse one-shot future slot for handshake
+        try:
+            await self._send({"type": MessageType.WORKER_CONNECT.value})
+            msg = await asyncio.wait_for(fut, timeout=10.0)
+        finally:
+            if self._load_model_future is fut:
+                self._load_model_future = None
 
         worker_id = msg.get("worker_id", "unknown")
         logger.info("Worker %s connected", worker_id)
-
-        # Start background recv loop.
-        self._recv_task = asyncio.create_task(self._recv_loop())
 
     async def close(self) -> None:
         """Close socket, cancel recv loop, terminate ZMQ context."""
@@ -122,6 +147,7 @@ class WorkerProxy:
         backend: str = "pytorch",
         device: str = "cpu",
         options: dict[str, Any] | None = None,
+        async_infer: bool = False,
     ) -> None:
         """Send LOAD_MODEL, wait for ACK. Raise RuntimeError on failure."""
         if self._load_model_future is not None and not self._load_model_future.done():
@@ -139,6 +165,7 @@ class WorkerProxy:
                 "backend": backend,
                 "device": device,
                 "options": options or {},
+                "async_infer": async_infer,
             })
             ack = await asyncio.wait_for(fut, timeout=self._submit_timeout * 6)
         except TimeoutError:
@@ -303,17 +330,21 @@ class WorkerProxy:
     # ------------------------------------------------------------------
 
     async def _send(self, msg: dict[str, Any]) -> None:
-        """Thread-safe send via asyncio.Lock."""
+        """Thread-safe send via asyncio.Lock.  DEALER uses [b"", payload] framing."""
         assert self._socket is not None
         async with self._send_lock:
-            await self._socket.send(encode_message(msg))
+            await self._socket.send_multipart([b"", encode_message(msg)])
 
     async def _recv_loop(self) -> None:
-        """Background task: receive messages and dispatch to pending futures."""
+        """Background task: receive messages and dispatch to pending futures.
+
+        DEALER receives [b"", payload] from the ROUTER (empty delimiter + message).
+        """
         assert self._socket is not None
         while True:
             try:
-                raw: bytes = await self._socket.recv()
+                parts: list[bytes] = await self._socket.recv_multipart()
+                raw: bytes = parts[1] if len(parts) >= 2 else parts[0]
             except zmq.ZMQError:
                 logger.debug("ZMQ recv error in recv_loop, exiting")
                 self._fail_outstanding("Worker disconnected")
@@ -329,7 +360,12 @@ class WorkerProxy:
 
             msg_type = msg.get("type", "")
 
-            if msg_type == MessageType.LOAD_MODEL_ACK.value:
+            if msg_type == MessageType.WORKER_READY.value:
+                # Handshake reply to our WORKER_CONNECT (reuses _load_model_future slot).
+                if self._load_model_future is not None and not self._load_model_future.done():
+                    self._load_model_future.set_result(msg)
+
+            elif msg_type == MessageType.LOAD_MODEL_ACK.value:
                 if self._load_model_future is not None and not self._load_model_future.done():
                     self._load_model_future.set_result(msg)
 
