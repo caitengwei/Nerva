@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import multiprocessing
 import os
 import tempfile
@@ -27,6 +28,33 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 MAX_RESTARTS = 5
+
+
+def _refcount_incr(path: str) -> int:
+    """Atomically increment the refcount file and return the new value."""
+    with open(path, "a+b") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        count = int(f.read().strip() or "0") + 1
+        f.seek(0)
+        f.truncate()
+        f.write(str(count).encode())
+    return count
+
+
+def _refcount_decr(path: str) -> int:
+    """Atomically decrement the refcount file and return the new value (min 0)."""
+    try:
+        with open(path, "a+b") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.seek(0)
+            count = max(0, int(f.read().strip() or "1") - 1)
+            f.seek(0)
+            f.truncate()
+            f.write(str(count).encode())
+        return count
+    except FileNotFoundError:
+        return 0
 
 
 class WorkerState(StrEnum):
@@ -103,22 +131,39 @@ class WorkerManager:
         lock_path = socket_path + ".spawning"
         timing_log_dir = os.environ.get("NERVA_TIMING_LOG_DIR") or None
 
-        # Determine whether we are the spawner using an atomic lock file.
-        # Limitation (MVP): lock is deleted after startup, so dynamic scaling
-        # (uvicorn adding a new worker after initial startup) can cause a new
-        # caller to become a second spawner and unlink the existing socket.
-        # This design targets static deployments where all workers start together.
-        # Also: if the spawner crashes between lock creation and deletion, the lock
-        # becomes stale and non-spawners will time out in proxy.start(). In that
-        # case, manual cleanup of the lock file is required.
+        # Determine whether we are the spawner.
+        #
+        # Fast path: if the socket file already exists the worker is (likely)
+        # already running — connect as a non-spawner without touching the lock.
+        #
+        # Slow path: no socket yet → try to create the lock file atomically.
+        # The lock file contains the spawner's PID so stale locks (spawner
+        # crashed before deleting the lock) can be detected and cleaned up.
         spawned = False
         proc: multiprocessing.Process | None = None
-        try:
-            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.close(lock_fd)
-            spawned = True
-        except FileExistsError:
-            spawned = False  # another uvicorn worker is spawning (or already done)
+        if not os.path.exists(socket_path):
+            for _attempt in range(2):
+                try:
+                    lock_fd = os.open(
+                        lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                    )
+                    os.write(lock_fd, str(os.getpid()).encode())
+                    os.close(lock_fd)
+                    spawned = True
+                    break
+                except FileExistsError:
+                    # Check whether the lock is stale (spawner process died).
+                    try:
+                        with open(lock_path) as _lf:
+                            _pid = int(_lf.read().strip())
+                        os.kill(_pid, 0)  # raises if process is not alive
+                        break  # spawner alive → we are a non-spawner
+                    except (ValueError, ProcessLookupError):
+                        # Stale lock: remove and retry once.
+                        with contextlib.suppress(OSError):
+                            os.unlink(lock_path)
+                    except PermissionError:
+                        break  # process alive but owned by another uid
 
         proxy = WorkerProxy(socket_path)
         entry = _WorkerEntry(
@@ -178,6 +223,7 @@ class WorkerManager:
 
             entry.state = WorkerState.READY
             self._workers[worker_id] = entry
+            _refcount_incr(socket_path + ".refcount")
             if self._metrics:
                 self._metrics.worker_status.labels(
                     model=handle.name, device=handle.device
@@ -247,11 +293,13 @@ class WorkerManager:
             except Exception:
                 logger.exception("worker_shutdown_error", worker_id=worker_id)
 
-        # Clean up socket files left by workers we spawned.
+        # Clean up socket and refcount files left by workers we spawned.
         for entry in self._workers.values():
             if entry.spawned:
                 with contextlib.suppress(OSError):
                     os.unlink(entry.socket_path)
+                with contextlib.suppress(OSError):
+                    os.unlink(entry.socket_path + ".refcount")
 
         self._workers.clear()
 
@@ -260,25 +308,43 @@ class WorkerManager:
     # ------------------------------------------------------------------
 
     async def _close_worker(self, entry: _WorkerEntry) -> None:
-        """Close this manager's proxy connection.  If we spawned the worker,
-        also send SHUTDOWN and terminate the process."""
+        """Close this manager's proxy connection.
+
+        Decrements the shared refcount for this worker.  Only when the count
+        reaches zero (i.e. every connected uvicorn worker has disconnected)
+        is SHUTDOWN sent and the worker process terminated.  This prevents the
+        spawner uvicorn worker from killing the shared Nerva worker while
+        other uvicorn workers are still serving requests.
+        """
         entry.state = WorkerState.STOPPING
         if self._metrics:
             self._metrics.worker_status.labels(
                 model=entry.handle.name, device=entry.handle.device
             ).set(0)
 
-        if entry.spawned and entry.process is not None:
-            # Best-effort SHUTDOWN with timeout — peer may already be dead.
+        refcount_path = entry.socket_path + ".refcount"
+        remaining = _refcount_decr(refcount_path)
+
+        if remaining == 0:
+            # Last proxy to disconnect: gracefully shut down the Nerva worker.
             try:
                 await asyncio.wait_for(entry.proxy.shutdown(), timeout=3.0)
             except (TimeoutError, Exception):
                 logger.debug("worker_shutdown_send_failed", worker=entry.handle.name)
 
-            entry.process.join(timeout=5)
-            if entry.process.is_alive():
-                entry.process.kill()
-                entry.process.join(timeout=2)
+            if entry.process is not None:
+                entry.process.join(timeout=5)
+                if entry.process.is_alive():
+                    entry.process.kill()
+                    entry.process.join(timeout=2)
+
+            # Remove socket so a future start_worker() doesn't mistake it for
+            # a running worker (would cause the "socket exists → non-spawner" fast
+            # path to time out waiting for a dead worker).
+            with contextlib.suppress(OSError):
+                os.unlink(entry.socket_path)
+            with contextlib.suppress(OSError):
+                os.unlink(refcount_path)
 
         await entry.proxy.close()
         entry.state = WorkerState.STOPPED

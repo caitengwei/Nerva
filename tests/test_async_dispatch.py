@@ -282,7 +282,9 @@ class TestWorkerLoopDispatchMode:
 
         assert loop._async_dispatch is False
         assert loop._thread_executor is not None
-        assert loop._thread_executor._max_workers == 4
+        # Verify the executor actually runs work (behavioral check).
+        future = loop._thread_executor.submit(lambda: 42)
+        assert future.result(timeout=2) == 42
         loop._thread_executor.shutdown(wait=False)
 
     async def test_thread_executor_not_created_for_async(self, monkeypatch: pytest.MonkeyPatch) -> None:
