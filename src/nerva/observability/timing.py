@@ -1,8 +1,9 @@
-"""Shared async timing sink for main-process components.
+"""Shared timing sink for main-process and worker components.
 
-Provides a module-level AsyncTimingSink initialized from NERVA_TIMING_LOG_DIR.
-Components (RpcHandler, Executor) call ``write()`` which is non-blocking.
-The background writer task flushes to disk via asyncio.to_thread().
+Provides a module-level TimingSink initialized from NERVA_TIMING_LOG_DIR.
+Components (RpcHandler, Executor, Worker) call ``write()`` which is non-blocking.
+The background writer runs in a dedicated OS thread — zero asyncio event loop
+overhead, so high-concurrency profiling does not perturb measurements.
 
 Usage:
     # Server startup (inside running event loop):
@@ -18,65 +19,77 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import json
 import os
+import queue
+import threading
 from typing import IO, Any
 
 _sink: AsyncTimingSink | None = None
 
+_SENTINEL = object()
+
 
 class AsyncTimingSink:
-    """Queue-backed async writer. Hot path is a single put_nowait() call."""
+    """Queue-backed writer using a dedicated OS thread.
+
+    Hot path: ``write()`` does a single non-blocking ``queue.put_nowait()``.
+    The OS-thread writer drains the queue and flushes to disk without
+    touching the asyncio event loop — critical for accurate profiling under
+    burst load where asyncio.to_thread callbacks add unwanted overhead.
+    """
 
     def __init__(self) -> None:
         self._fp: IO[str] | None = None
-        self._queue: asyncio.Queue[str | None] = asyncio.Queue()
-        self._task: asyncio.Task[None] | None = None
+        self._queue: queue.SimpleQueue[Any] = queue.SimpleQueue()
+        self._thread: threading.Thread | None = None
 
     async def start(self, log_dir: str, filename: str) -> None:
-        """Open log file and start background writer task."""
+        """Open log file and start background writer thread."""
         os.makedirs(log_dir, exist_ok=True)
         self._fp = open(os.path.join(log_dir, filename), "a")  # noqa: SIM115
-        self._task = asyncio.create_task(self._writer_loop())
+        self._thread = threading.Thread(
+            target=self._writer_loop, daemon=True, name=f"timing-writer-{filename}"
+        )
+        self._thread.start()
 
     async def stop(self) -> None:
         """Flush pending writes and close."""
-        if self._task is not None:
-            self._queue.put_nowait(None)
-            with contextlib.suppress(Exception):
-                await self._task
-            self._task = None
+        if self._thread is not None:
+            self._queue.put(_SENTINEL)
+            self._thread.join(timeout=5.0)
+            self._thread = None
         if self._fp is not None:
             self._fp.close()
             self._fp = None
 
     def write(self, data: dict[str, Any]) -> None:
         """Non-blocking enqueue. No-op if sink not started."""
-        if self._task is not None:
+        if self._thread is not None:
             self._queue.put_nowait(json.dumps(data) + "\n")
 
-    async def _writer_loop(self) -> None:
+    def _writer_loop(self) -> None:
         assert self._fp is not None
         fp = self._fp
         while True:
-            line = await self._queue.get()
-            if line is None:
-                break
-            batch = [line]
+            item = self._queue.get()  # blocks until data available
+            if item is _SENTINEL:
+                fp.flush()
+                return
+            batch = [item]
+            # drain any items already queued
             while True:
                 try:
                     nxt = self._queue.get_nowait()
-                except asyncio.QueueEmpty:
+                except queue.Empty:
                     break
-                if nxt is None:
-                    await asyncio.to_thread(fp.write, "".join(batch))
-                    await asyncio.to_thread(fp.flush)
+                if nxt is _SENTINEL:
+                    fp.write("".join(batch))
+                    fp.flush()
                     return
                 batch.append(nxt)
-            await asyncio.to_thread(fp.write, "".join(batch))
-            await asyncio.to_thread(fp.flush)
+            fp.write("".join(batch))
+            fp.flush()
 
 
 # ---------------------------------------------------------------------------

@@ -258,17 +258,6 @@ class _WorkerLoop:
                         timeout=context.deadline_ms / 1000.0,
                     )
                     t_infer_end = time.perf_counter()
-                    if self._timing_sink is not None:
-                        self._timing_sink.write({
-                            "event": "infer_timing",
-                            "request_id": request_id,
-                            "model": self._model_name,
-                            "worker_deser_ms": round((t_dispatch - t_recv) * 1000, 3),
-                            "thread_queue_ms": 0.0,
-                            "backend_infer_ms": round(
-                                (t_infer_end - t_dispatch) * 1000, 3
-                            ),
-                        })
                 else:
                     # ── Sync path: dispatch to ThreadPool ──
                     _thread_ts: list[float] = []
@@ -289,24 +278,6 @@ class _WorkerLoop:
                             timeout=context.deadline_ms / 1000.0,
                         )
                     t_infer_end = time.perf_counter()
-                    if self._timing_sink is not None:
-                        t_thread_start = (
-                            _thread_ts[0] if _thread_ts else t_dispatch
-                        )
-                        self._timing_sink.write({
-                            "event": "infer_timing",
-                            "request_id": request_id,
-                            "model": self._model_name,
-                            "worker_deser_ms": round(
-                                (t_dispatch - t_recv) * 1000, 3
-                            ),
-                            "thread_queue_ms": round(
-                                (t_thread_start - t_dispatch) * 1000, 3
-                            ),
-                            "backend_infer_ms": round(
-                                (t_infer_end - t_thread_start) * 1000, 3
-                            ),
-                        })
             except TimeoutError:
                 context.cancelled = True
                 await self._send_to(client_id, {
@@ -319,6 +290,7 @@ class _WorkerLoop:
 
             # Serialize output and choose inline/SHM output path.
             output_bytes = msgpack.packb(output, use_bin_type=True)
+            t_post_infer_start = time.perf_counter()
             out_descriptor = await self._build_output_descriptor(request_id, output_bytes, client_id)
 
             await self._send_to(client_id, {
@@ -327,6 +299,30 @@ class _WorkerLoop:
                 "status": AckStatus.OK.value,
                 "descriptor": out_descriptor.to_dict(),
             })
+            t_send_done = time.perf_counter()
+
+            if self._timing_sink is not None:
+                if self._async_dispatch:
+                    self._timing_sink.write({
+                        "event": "infer_timing",
+                        "request_id": request_id,
+                        "model": self._model_name,
+                        "worker_deser_ms": round((t_dispatch - t_recv) * 1000, 3),
+                        "thread_queue_ms": 0.0,
+                        "backend_infer_ms": round((t_infer_end - t_dispatch) * 1000, 3),
+                        "worker_post_infer_ms": round((t_send_done - t_post_infer_start) * 1000, 3),
+                    })
+                else:
+                    t_thread_start = _thread_ts[0] if _thread_ts else t_dispatch
+                    self._timing_sink.write({
+                        "event": "infer_timing",
+                        "request_id": request_id,
+                        "model": self._model_name,
+                        "worker_deser_ms": round((t_dispatch - t_recv) * 1000, 3),
+                        "thread_queue_ms": round((t_thread_start - t_dispatch) * 1000, 3),
+                        "backend_infer_ms": round((t_infer_end - t_thread_start) * 1000, 3),
+                        "worker_post_infer_ms": round((t_send_done - t_post_infer_start) * 1000, 3),
+                    })
         except asyncio.CancelledError:
             if context is not None:
                 context.cancelled = True
