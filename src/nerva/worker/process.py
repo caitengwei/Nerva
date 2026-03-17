@@ -64,6 +64,7 @@ class _WorkerLoop:
     ) -> None:
         self._socket_path = socket_path
         self._shm_alloc_timeout_s = shm_alloc_timeout_s
+        self._worker_id = str(uuid.uuid4())  # stable across all WORKER_CONNECT replies
         self._backend: Backend | None = None
         self._async_dispatch = False
         self._thread_executor: ThreadPoolExecutor | None = None
@@ -123,7 +124,7 @@ class _WorkerLoop:
                 if msg_type == MessageType.WORKER_CONNECT.value:
                     await self._send_to(
                         client_id,
-                        {"type": MessageType.WORKER_READY.value, "worker_id": str(uuid.uuid4())},
+                        {"type": MessageType.WORKER_READY.value, "worker_id": self._worker_id},
                     )
                 elif msg_type == MessageType.LOAD_MODEL.value:
                     await self._handle_load_model(msg, client_id)

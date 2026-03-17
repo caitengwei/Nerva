@@ -193,7 +193,26 @@ class WorkerManager:
                 entry.process = proc
 
             # Connect DEALER to the ROUTER (proxy.start() waits for socket file).
-            await proxy.start()
+            # If the socket file exists but the worker is dead (stale socket from a
+            # crash), proxy.start() will time out on the WORKER_CONNECT handshake.
+            # Detect that case: remove the stale socket+refcount and retry as spawner.
+            try:
+                await proxy.start()
+            except TimeoutError:
+                if not spawned and os.path.exists(socket_path):
+                    logger.warning("stale_socket_detected", worker_id=worker_id,
+                                   socket_path=socket_path)
+                    with contextlib.suppress(OSError):
+                        os.unlink(socket_path)
+                    with contextlib.suppress(OSError):
+                        os.unlink(socket_path + ".refcount")
+                    await proxy.close()
+                    # Re-raise so start_worker() surfaces the error; callers can retry.
+                    raise RuntimeError(
+                        f"Worker '{worker_id}' socket was stale and has been removed. "
+                        "Retry start_worker() to spawn a fresh worker."
+                    ) from None
+                raise
 
             if spawned:
                 # Only the spawner sends LOAD_MODEL.
@@ -248,6 +267,15 @@ class WorkerManager:
     async def restart_worker(self, worker_id: str) -> WorkerProxy:
         """Restart a worker: close old process, start fresh, increment restart count.
 
+        Note: with the shared refcount model, this method only terminates the
+        underlying Nerva worker process when this manager holds the *last*
+        active proxy connection (refcount drops to zero).  If other uvicorn
+        workers are still connected, only this manager's proxy is recycled; the
+        Nerva worker process continues running and the new proxy reconnects to it.
+        For a guaranteed process restart, all connected WorkerManagers must call
+        restart_worker() concurrently, or the worker process must be killed
+        externally before calling restart_worker().
+
         Args:
             worker_id: The name of the worker (same as ModelHandle.name).
 
@@ -293,14 +321,8 @@ class WorkerManager:
             except Exception:
                 logger.exception("worker_shutdown_error", worker_id=worker_id)
 
-        # Clean up socket and refcount files left by workers we spawned.
-        for entry in self._workers.values():
-            if entry.spawned:
-                with contextlib.suppress(OSError):
-                    os.unlink(entry.socket_path)
-                with contextlib.suppress(OSError):
-                    os.unlink(entry.socket_path + ".refcount")
-
+        # Socket and refcount files are unlinked by _close_worker() when the
+        # refcount reaches zero.  No extra cleanup needed here.
         self._workers.clear()
 
     # ------------------------------------------------------------------
