@@ -56,9 +56,9 @@ def _infer_model_config(model_name: str) -> str:
         f'name: "{model_name}"\n'
         'backend: "python"\n'
         'max_batch_size: 0\n'
-        'model_transaction_policy {\n'
-        '  decoupled: true\n'
-        '}\n'
+        "model_transaction_policy {\n"
+        "  decoupled: true\n"
+        "}\n"
         'input [\n'
         '  { name: "PROMPT" data_type: TYPE_STRING dims: [ 1 ] },\n'
         '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] },\n'
@@ -77,7 +77,7 @@ def _ensemble_config(model_name: str) -> str:
     input_entries = ",\n".join(
         [
             '  { name: "TEXT" data_type: TYPE_STRING dims: [ 1 ] }',
-            '  { name: "IMAGE_BYTES" data_type: TYPE_BYTES dims: [ 1 ] }',
+            '  { name: "IMAGE_BYTES" data_type: TYPE_STRING dims: [ 1 ] }',
             '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] }',
             '  { name: "TEMPERATURE" data_type: TYPE_FP32 dims: [ 1 ] }',
             '  { name: "TOP_P" data_type: TYPE_FP32 dims: [ 1 ] }',
@@ -97,9 +97,9 @@ def _ensemble_config(model_name: str) -> str:
         # Keep batching disabled for full-e2e comparability and to match the scalar
         # request handling implemented in generated Python backend stages.
         'max_batch_size: 0\n'
-        'model_transaction_policy {\n'
-        '  decoupled: true\n'
-        '}\n'
+        "model_transaction_policy {\n"
+        "  decoupled: true\n"
+        "}\n"
         'input [\n'
         f"{input_entries}\n"
         ']\n'
@@ -495,7 +495,7 @@ def prepare_triton_repo(
             PREPROCESS_MODEL,
             inputs=[
                 ("TEXT", "TYPE_STRING"),
-                ("IMAGE_BYTES", "TYPE_BYTES"),
+                ("IMAGE_BYTES", "TYPE_STRING"),
                 ("MAX_TOKENS", "TYPE_INT32"),
                 ("TEMPERATURE", "TYPE_FP32"),
                 ("TOP_P", "TYPE_FP32"),
@@ -512,13 +512,15 @@ def prepare_triton_repo(
     )
     _write_python_model(preprocess_root, source=_preprocess_model_py())
 
-    (infer_root / "config.pbtxt").write_text(_infer_model_config(INFER_MODEL))
-    infer_source = (
-        _infer_model_py_cpu_mock(token_latency_ms=mock_token_latency_ms)
-        if cpu_mock
-        else _infer_model_py(vllm_model_name=vllm_model_name)
-    )
-    _write_python_model(infer_root, source=infer_source)
+    if cpu_mock:
+        (infer_root / "config.pbtxt").write_text(_infer_model_config(INFER_MODEL))
+        _write_python_model(
+            infer_root,
+            source=_infer_model_py_cpu_mock(token_latency_ms=mock_token_latency_ms),
+        )
+    else:
+        (infer_root / "config.pbtxt").write_text(_infer_model_config(INFER_MODEL))
+        _write_python_model(infer_root, source=_infer_model_py(vllm_model_name=vllm_model_name))
 
     (postprocess_root / "config.pbtxt").write_text(
         _python_backend_config(
