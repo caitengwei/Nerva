@@ -367,16 +367,17 @@ def _infer_model_py(*, vllm_model_name: str) -> str:
 def _infer_model_py_cpu_mock(*, token_latency_ms: float = 0.5) -> str:
     """Generate mm_infer model.py that simulates LLM latency without vLLM/GPU.
 
-    Preserves the decoupled sender pattern of the real mm_infer so the ensemble
-    routing and response-handling path stay identical to production.
+    Non-decoupled (returns response list) so the Triton HTTP /v2/.../infer endpoint
+    works — decoupled models are gRPC-only in Triton.
+    Each Triton instance blocks for the simulated duration; set instance_count
+    to match target concurrency.
     Delay = max_tokens * token_latency_ms milliseconds.
     """
     latency_literal = repr(float(token_latency_ms))
     return (
         "from __future__ import annotations\n"
         "\n"
-        "import asyncio\n"
-        "import threading\n"
+        "import time\n"
         "\n"
         "import numpy as np\n"
         "import triton_python_backend_utils as pb_utils\n"
@@ -387,49 +388,53 @@ def _infer_model_py_cpu_mock(*, token_latency_ms: float = 0.5) -> str:
         "class TritonPythonModel:\n"
         "    def initialize(self, args):\n"
         "        del args\n"
-        "        self._loop = asyncio.new_event_loop()\n"
-        "        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)\n"
-        "        self._thread.start()\n"
-        "\n"
-        "    def finalize(self):\n"
-        "        loop = getattr(self, '_loop', None)\n"
-        "        thread = getattr(self, '_thread', None)\n"
-        "        self._loop = None\n"
-        "        self._thread = None\n"
-        "        if loop is not None:\n"
-        "            try:\n"
-        "                loop.call_soon_threadsafe(loop.stop)\n"
-        "            except Exception:\n"
-        "                pass\n"
-        "        if (\n"
-        "            thread is not None\n"
-        "            and thread.is_alive()\n"
-        "            and thread is not threading.current_thread()\n"
-        "        ):\n"
-        "            thread.join(timeout=5.0)\n"
         "\n"
         "    def execute(self, requests):\n"
+        "        responses = []\n"
         "        for request in requests:\n"
-        "            sender = request.get_response_sender()\n"
-        "            asyncio.run_coroutine_threadsafe(self._handle(request, sender), self._loop)\n"
-        "        return None\n"
-        "\n"
-        "    async def _handle(self, request, sender):\n"
-        "        try:\n"
         "            max_tokens_t = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
         "            max_tokens = max(int(max_tokens_t.as_numpy().reshape(-1)[0]), 1)\n"
-        "            await asyncio.sleep(max_tokens * _TOKEN_LATENCY_MS / 1000.0)\n"
+        "            time.sleep(max_tokens * _TOKEN_LATENCY_MS / 1000.0)\n"
         "            text = ' '.join(['tok'] * max_tokens)\n"
         "            out = pb_utils.Tensor('TEXT', np.array([text], dtype=object))\n"
-        "            sender.send(\n"
-        "                pb_utils.InferenceResponse(output_tensors=[out]),\n"
-        "                flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
-        "            )\n"
-        "        except Exception as exc:\n"
-        "            sender.send(\n"
-        "                pb_utils.InferenceResponse(error=pb_utils.TritonError(str(exc))),\n"
-        "                flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
-        "            )\n"
+        "            responses.append(pb_utils.InferenceResponse(output_tensors=[out]))\n"
+        "        return responses\n"
+    )
+
+
+# Number of mm_infer instances for CPU mock.  Each instance blocks for the
+# simulated sleep duration, so effective Triton throughput = instance_count / delay_s.
+# 20 is safe for the macOS podman VM (6 CPU, ~4 GB RAM); 64 caused OOM.
+_CPU_MOCK_INSTANCE_COUNT = 20
+
+
+def _infer_model_config_cpu_mock(model_name: str) -> str:
+    """Config for the non-decoupled CPU mock mm_infer.
+
+    Omits model_transaction_policy so the Triton HTTP endpoint accepts the model.
+    Sets instance_group to _CPU_MOCK_INSTANCE_COUNT for concurrent request handling.
+    """
+    instance_group = (
+        "instance_group [\n"
+        f"  {{ kind: KIND_CPU count: {_CPU_MOCK_INSTANCE_COUNT} }}\n"
+        "]\n"
+    )
+    return (
+        f'name: "{model_name}"\n'
+        'backend: "python"\n'
+        'max_batch_size: 0\n'
+        f"{instance_group}"
+        'input [\n'
+        '  { name: "PROMPT" data_type: TYPE_STRING dims: [ 1 ] },\n'
+        '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] },\n'
+        '  { name: "TEMPERATURE" data_type: TYPE_FP32 dims: [ 1 ] },\n'
+        '  { name: "TOP_P" data_type: TYPE_FP32 dims: [ 1 ] },\n'
+        '  { name: "DEADLINE_MS" data_type: TYPE_INT32 dims: [ 1 ] },\n'
+        '  { name: "STREAM" data_type: TYPE_BOOL dims: [ 1 ] optional: true }\n'
+        ']\n'
+        'output [\n'
+        '  { name: "TEXT" data_type: TYPE_STRING dims: [ 1 ] }\n'
+        ']\n'
     )
 
 
@@ -513,7 +518,7 @@ def prepare_triton_repo(
     _write_python_model(preprocess_root, source=_preprocess_model_py())
 
     if cpu_mock:
-        (infer_root / "config.pbtxt").write_text(_infer_model_config(INFER_MODEL))
+        (infer_root / "config.pbtxt").write_text(_infer_model_config_cpu_mock(INFER_MODEL))
         _write_python_model(
             infer_root,
             source=_infer_model_py_cpu_mock(token_latency_ms=mock_token_latency_ms),
