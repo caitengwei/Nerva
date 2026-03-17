@@ -163,8 +163,18 @@ class WorkerManager:
                     async_infer=handle.async_infer,
                 )
             else:
-                # Non-spawner: model is already loaded by the spawner.
+                # Non-spawner: wait for the spawner's LOAD_MODEL to complete before
+                # returning READY.  Without this poll, infer requests arriving while
+                # the spawner is still loading would fail with "No model loaded".
                 logger.info("worker_connected_existing", worker_id=worker_id)
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 60.0
+                while not await proxy.health_check():
+                    if loop.time() >= deadline:
+                        raise RuntimeError(
+                            f"Timed out waiting for model '{worker_id}' to become healthy"
+                        )
+                    await asyncio.sleep(0.5)
 
             entry.state = WorkerState.READY
             self._workers[worker_id] = entry
@@ -228,7 +238,7 @@ class WorkerManager:
         return proxy
 
     async def shutdown_all(self) -> None:
-        """Gracefully shutdown all workers and cleanup tmpdir."""
+        """Gracefully close all proxies, terminate spawned worker processes, and unlink socket files."""
         for worker_id, entry in list(self._workers.items()):
             if entry.state in (WorkerState.STOPPING, WorkerState.STOPPED):
                 continue

@@ -77,8 +77,6 @@ class _WorkerLoop:
         self._model_name: str = ""
         self._timing_log_dir = timing_log_dir
         self._timing_sink: AsyncTimingSink | None = None
-        # client_id (DEALER identity) of the proxy owning each in-flight request.
-        self._inflight_clients: dict[str, bytes] = {}
 
     # -- public entry -------------------------------------------------------
 
@@ -131,7 +129,6 @@ class _WorkerLoop:
                     await self._handle_load_model(msg, client_id)
                 elif msg_type == MessageType.INFER_SUBMIT.value:
                     request_id = msg.get("request_id", "")
-                    self._inflight_clients[request_id] = client_id
                     task = asyncio.create_task(self._handle_infer(msg, client_id))
                     self._inflight[request_id] = task
                     task.add_done_callback(self._make_cleanup_cb(request_id))
@@ -153,7 +150,6 @@ class _WorkerLoop:
         """Return a done-callback that removes the task from _inflight."""
         def _cb(_t: asyncio.Task[None]) -> None:
             self._inflight.pop(request_id, None)
-            self._inflight_clients.pop(request_id, None)
         return _cb
 
     # -- message handlers ---------------------------------------------------
@@ -189,8 +185,20 @@ class _WorkerLoop:
                 or msg.get("async_infer", False)
             )
 
+            # Shut down any previous executor (e.g., model reload or dispatch mode change).
+            if self._thread_executor is not None:
+                self._thread_executor.shutdown(wait=False)
+                self._thread_executor = None
+
             if not self._async_dispatch:
-                max_threads = int(os.environ.get("NERVA_WORKER_MAX_THREADS", "0")) or None
+                try:
+                    max_threads = int(os.environ.get("NERVA_WORKER_MAX_THREADS", "0")) or None
+                except ValueError:
+                    logger.warning(
+                        "invalid_nerva_worker_max_threads",
+                        value=os.environ.get("NERVA_WORKER_MAX_THREADS"),
+                    )
+                    max_threads = None
                 if max_threads:
                     self._thread_executor = ThreadPoolExecutor(max_workers=max_threads)
 
