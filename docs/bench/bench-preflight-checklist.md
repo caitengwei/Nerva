@@ -120,45 +120,70 @@ podman run --rm -p 8002:8002 -p 8003:8003 -p 8004:8004 ...
 
 ---
 
+## 8. 并发度选取与稳定性边界（2026-03-17 实测）
+
+**关键发现**：Nerva 和 Triton 都存在饱和阈值，超过后结果剧烈抖动，两轮对比方向甚至可能反转。
+
+| 系统 | 稳定 C 上限 | 原因 |
+|------|-------------|------|
+| Nerva N-worker | `N × 4`（每 worker ≤4 并发）| asyncio event loop thundering herd，超过后超线性退化 |
+| Triton cpu_mock | `instance_count`（默认=20）| 每个 Python instance 同步阻塞，超过后排队 |
+| Triton HTTP 层 | 需 `--http-thread-count ≥ C` | 默认 8 线程会成为瓶颈，但增大会加剧 VM CPU 压力 |
+
+**建议对比并发度**：`C = min(N×4, instance_count)` = `min(3×4, 20) = 12`（3-worker Nerva）
+
+实测稳定结果（C=20，warmup=30s，sample=60s）：
+- Nerva (3-worker): QPS≈133, p50≈138ms
+- Triton (20 inst, http-thread-count=20): QPS≈127, p50≈149ms
+- Nerva 领先 7% p50，两轮抖动 <1%
+
+C=60 结果（仅供参考，不稳定）：两轮方向相反，不可作为结论性数据。
+
+**Triton `--http-thread-count` 设置**：设为 `instance_count`（如 20）而不是 C。HTTP 线程数过多会占 VM CPU 反而让所有服务变慢（macOS podman VM 只有 6 个核）。
+
+---
+
 ## 快速启动模板
 
 ```bash
 # 0. 清端口、装依赖
 lsof -ti :8080 :8002 :8003 :8004 2>/dev/null | xargs kill -9 2>/dev/null
-uv sync --all-extras
+uv sync --extra dev
 
 # 1. 生成 model repo（仅首次或参数变更时）
 uv run python scripts/bench/infra/prepare_triton_repo.py \
-    --output /tmp/triton_cpu_full_mock --cpu-mock --mock-token-latency-ms 0.5
+    --output /private/tmp/triton_cpu_mock --cpu-mock --mock-token-latency-ms 0.5
+# 注意：macOS 上 podman volume mount 需用 /private/tmp（不能用 /tmp 符号链接）
 
-# 2. 启动 Nerva
+# 2. 启动 Nerva（workers 数量按需调整）
 MOCK_TOKEN_LATENCY_MS=0.5 uv run uvicorn \
     examples.mm_vllm_cpu_mock_server:app \
-    --host 127.0.0.1 --port 8080 > /tmp/nerva.log 2>&1 &
+    --host 127.0.0.1 --port 8080 --workers 3 > /tmp/nerva.log 2>&1 &
 
-# 3. 启动 Triton
+# 3. 启动 Triton（http-thread-count 设为 instance_count=20，不要过大）
 podman run --rm \
     -p 8002:8002 -p 8003:8003 -p 8004:8004 \
-    -v /tmp/triton_cpu_full_mock:/models \
+    -v /private/tmp/triton_cpu_mock:/models \
     nvcr.io/nvidia/tritonserver:24.08-py3 \
     tritonserver --model-repository=/models \
       --http-port=8002 --grpc-port=8003 --metrics-port=8004 \
+      --http-thread-count=20 \
     > /tmp/triton.log 2>&1 &
 
 # 4. 等待就绪（见第 5 节）
 
-# 5. 压测（注意 unset 代理）
+# 5. 压测（stable C = workers×4; 注意 unset 代理）
 env -u http_proxy -u https_proxy -u all_proxy \
     -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
   uv run python scripts/bench/run_bench.py \
     --target nerva --target triton \
-    --concurrency-levels 1,4,16 \
-    --warmup-seconds 5 --sample-seconds 15 \
-    --deadline-ms 10000 \
+    --concurrency-levels 12,20 \
+    --warmup-seconds 30 --sample-seconds 60 \
+    --deadline-ms 30000 \
     --output-root /tmp/bench-results
 
 # 6. 校验 error_rate（应全为 0）
-grep -h error_rate /tmp/bench-results/mm_vllm/*/*/*/*/summary.json
+grep -rh error_rate /tmp/bench-results/mm_vllm/*/*/*/*/summary.json
 ```
 
 ---
