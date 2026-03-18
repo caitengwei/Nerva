@@ -1,6 +1,6 @@
 """Shared timing sink for main-process and worker components.
 
-Provides a module-level TimingSink initialized from NERVA_TIMING_LOG_DIR.
+Provides a module-level AsyncTimingSink initialized from NERVA_TIMING_LOG_DIR.
 Components (RpcHandler, Executor, Worker) call ``write()`` which is non-blocking.
 The background writer runs in a dedicated OS thread — zero asyncio event loop
 overhead, so high-concurrency profiling does not perturb measurements.

@@ -77,7 +77,7 @@ def _ensemble_config(model_name: str) -> str:
     input_entries = ",\n".join(
         [
             '  { name: "TEXT" data_type: TYPE_STRING dims: [ 1 ] }',
-            '  { name: "IMAGE_BYTES" data_type: TYPE_STRING dims: [ 1 ] }',
+            '  { name: "IMAGE_BYTES" data_type: TYPE_BYTES dims: [ 1 ] }',
             '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] }',
             '  { name: "TEMPERATURE" data_type: TYPE_FP32 dims: [ 1 ] }',
             '  { name: "TOP_P" data_type: TYPE_FP32 dims: [ 1 ] }',

@@ -289,8 +289,8 @@ class _WorkerLoop:
                 return
 
             # Serialize output and choose inline/SHM output path.
-            output_bytes = msgpack.packb(output, use_bin_type=True)
             t_post_infer_start = time.perf_counter()
+            output_bytes = msgpack.packb(output, use_bin_type=True)
             out_descriptor = await self._build_output_descriptor(request_id, output_bytes, client_id)
 
             await self._send_to(client_id, {
