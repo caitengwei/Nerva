@@ -23,7 +23,7 @@ from nerva.backends.base import InferContext
 from nerva.core.model import Model, ModelHandle, model
 from nerva.worker.manager import WorkerManager
 from nerva.worker.proxy import MultiInstanceProxy, WorkerProxy
-from tests.helpers import EchoModel
+from tests.helpers import EchoModel, PidModel
 
 
 # ---------------------------------------------------------------------------
@@ -289,10 +289,15 @@ class TestWorkerManagerMultiInstance:
         assert len(mgr._instance_groups) == 0
 
     async def test_requests_distributed_across_instances(self) -> None:
-        """Round-robin distributes N requests evenly across 2 instances."""
+        """Requests are distributed across both Worker instances (verified by PID).
+
+        Uses PidModel (returns os.getpid()) to confirm that at least two
+        distinct worker PIDs appear in the responses — proving that both
+        instances handled requests rather than all traffic going to one.
+        """
         mgr = WorkerManager()
         try:
-            handle = model("echo_dist", EchoModel, async_infer=True, instances=2)
+            handle = model("pid_dist", PidModel, async_infer=True, instances=2)
             proxy = await mgr.start_worker(handle)
 
             # Send 10 concurrent requests.
@@ -303,9 +308,12 @@ class TestWorkerManagerMultiInstance:
             results = await asyncio.gather(
                 *(proxy.infer({"value": i}, ctx_list[i]) for i in range(n))
             )
-            # All should succeed (EchoModel returns {"echo": value}).
-            for i, r in enumerate(results):
-                assert r == {"echo": i}
+
+            # Verify that both worker instances handled requests (distinct PIDs).
+            pids = {r["pid"] for r in results}
+            assert len(pids) == 2, (
+                f"Expected requests distributed across 2 worker PIDs, got: {pids}"
+            )
         finally:
             await mgr.shutdown_all()
 

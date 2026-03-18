@@ -329,13 +329,18 @@ class WorkerManager:
         externally before calling restart_worker().
 
         Args:
-            worker_id: The name of the worker (same as ModelHandle.name).
+            worker_id: The key in ``_workers`` for the worker to restart.
+                For ``instances=1`` models this is ``ModelHandle.name``.
+                For ``instances>1`` models the logical name is NOT a key;
+                use the per-instance suffixed ID instead (e.g. ``"echo-0"``,
+                ``"echo-1"``).  Available instance IDs are recorded in
+                ``_instance_groups[model_name]``.
 
         Returns:
             A new connected and model-loaded WorkerProxy.
 
         Raises:
-            KeyError: If worker_id is not found.
+            KeyError: If worker_id is not found in ``_workers``.
             RuntimeError: If max restart count exceeded.
         """
         entry = self._workers.get(worker_id)

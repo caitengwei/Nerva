@@ -54,14 +54,20 @@ class AsyncTimingSink:
         self._thread.start()
 
     async def stop(self) -> None:
-        """Flush pending writes and close."""
+        """Flush pending writes and close.
+
+        Sends a sentinel to the writer thread and waits up to 5 s for it to
+        exit.  The writer thread is responsible for closing the file (in its
+        finally block), so this method never calls fp.close() directly —
+        avoiding the race where join() times out but the thread is still
+        mid-write on the same file handle.
+        """
         if self._thread is not None:
             self._queue.put(_SENTINEL)
             self._thread.join(timeout=5.0)
             self._thread = None
-        if self._fp is not None:
-            self._fp.close()
-            self._fp = None
+        # fp is closed by _writer_loop's finally clause; null the reference.
+        self._fp = None
 
     def write(self, data: dict[str, Any]) -> None:
         """Non-blocking enqueue. No-op if sink not started."""
@@ -71,25 +77,31 @@ class AsyncTimingSink:
     def _writer_loop(self) -> None:
         assert self._fp is not None
         fp = self._fp
-        while True:
-            item = self._queue.get()  # blocks until data available
-            if item is _SENTINEL:
-                fp.flush()
-                return
-            batch = [item]
-            # drain any items already queued
+        try:
             while True:
-                try:
-                    nxt = self._queue.get_nowait()
-                except queue.Empty:
-                    break
-                if nxt is _SENTINEL:
-                    fp.write("".join(batch))
+                item = self._queue.get()  # blocks until data available
+                if item is _SENTINEL:
                     fp.flush()
                     return
-                batch.append(nxt)
-            fp.write("".join(batch))
-            fp.flush()
+                batch = [item]
+                # drain any items already queued
+                while True:
+                    try:
+                        nxt = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if nxt is _SENTINEL:
+                        fp.write("".join(batch))
+                        fp.flush()
+                        return
+                    batch.append(nxt)
+                fp.write("".join(batch))
+                fp.flush()
+        finally:
+            # Always close the file in the thread that owns it.  This avoids
+            # the race in stop() where join(timeout) may return while the thread
+            # is still mid-write, and stop() closes the file under it.
+            fp.close()
 
 
 # ---------------------------------------------------------------------------
