@@ -137,6 +137,18 @@ class BenchFusionModel(Model):
         return {"fused_features": [0.3] * dim}
 
 
+class PidModel(Model):
+    """Returns {"pid": os.getpid()} — lets callers identify which Worker process ran the request."""
+
+    def load(self) -> None:
+        pass
+
+    async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        import os
+
+        return {"pid": os.getpid()}
+
+
 class BenchClassifier(Model):
     """Benchmark model: simulates classification head.
 

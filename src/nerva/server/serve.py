@@ -93,6 +93,7 @@ async def _build_pipelines(
             "name": handle.name,
             "backend": handle.backend,
             "device": handle.device,
+            "instances": handle.instances,
         })
 
     # Build one executor per pipeline.

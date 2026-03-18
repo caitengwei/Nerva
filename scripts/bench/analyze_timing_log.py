@@ -117,8 +117,10 @@ def main() -> None:
     proxy_des: list[float] = []
     deser_all: list[float] = []
     infer_all: list[float] = []
+    post_infer_all: list[float] = []
     deser_by_model: dict[str, list[float]] = defaultdict(list)
     infer_by_model: dict[str, list[float]] = defaultdict(list)
+    post_infer_by_model: dict[str, list[float]] = defaultdict(list)
     ipc_transport_by_model: dict[str, list[float]] = defaultdict(list)
 
     for ev in ipc_events.values():
@@ -138,12 +140,16 @@ def main() -> None:
             model = str(ev.get("model", "unknown"))
             d = ev.get("worker_deser_ms")
             i = ev.get("backend_infer_ms")
+            p = ev.get("worker_post_infer_ms")
             if isinstance(d, (int, float)):
                 deser_all.append(float(d))
                 deser_by_model[model].append(float(d))
             if isinstance(i, (int, float)):
                 infer_all.append(float(i))
                 infer_by_model[model].append(float(i))
+            if isinstance(p, (int, float)):
+                post_infer_all.append(float(p))
+                post_infer_by_model[model].append(float(p))
 
     # Per-model IPC transport = ipc_round_trip - worker_deser - backend_infer
     for rid, ipc_ev in ipc_events.items():
@@ -189,10 +195,13 @@ def main() -> None:
     print("=" * 80)
     print("Worker-side breakdown (per stage)")
     print("=" * 80)
-    _print_row("worker_deser_ms   (all models)", deser_all)
-    _print_row("backend_infer_ms  (all models)", infer_all)
+    _print_row("worker_deser_ms      (all models)", deser_all)
+    _print_row("backend_infer_ms     (all models)", infer_all)
+    _print_row("worker_post_infer_ms (all models)", post_infer_all)
 
-    all_models = sorted(set(list(deser_by_model.keys()) + list(infer_by_model.keys())))
+    all_models = sorted(set(
+        list(deser_by_model.keys()) + list(infer_by_model.keys()) + list(post_infer_by_model.keys())
+    ))
     if all_models:
         print()
         print("=" * 80)
@@ -202,6 +211,7 @@ def main() -> None:
             print(f"\n  [{model}]")
             _print_row("  worker_deser_ms", deser_by_model.get(model, []))
             _print_row("  backend_infer_ms", infer_by_model.get(model, []))
+            _print_row("  worker_post_infer_ms", post_infer_by_model.get(model, []))
             _print_row("  ipc_transport_ms  (ZMQ round-trip overhead)", ipc_transport_by_model.get(model, []))
 
     print()

@@ -19,7 +19,7 @@ import structlog
 
 from nerva.worker.ipc import class_to_import_path
 from nerva.worker.process import worker_entry
-from nerva.worker.proxy import WorkerProxy
+from nerva.worker.proxy import MultiInstanceProxy, WorkerProxy
 
 if TYPE_CHECKING:
     from nerva.core.model import ModelHandle
@@ -80,6 +80,26 @@ class _WorkerEntry:
     restart_count: int = 0
 
 
+def _make_instance_handle(handle: ModelHandle, index: int) -> ModelHandle:
+    """Return a copy of *handle* with name suffixed by ``-{index}``.
+
+    Used to create per-instance ModelHandles for multi-instance models.
+    The suffixed name drives the socket path and _workers dict key while
+    the original name is used as the proxies dict key in _build_pipelines().
+    """
+    from nerva.core.model import ModelHandle as _ModelHandle  # local import to avoid cycle
+    return _ModelHandle(
+        name=f"{handle.name}-{index}",
+        model_class=handle.model_class,
+        backend=handle.backend,
+        device=handle.device,
+        options=dict(handle.options),
+        batch_config=handle.batch_config,
+        async_infer=handle.async_infer,
+        instances=1,  # each instance is a single worker; prevents recursion
+    )
+
+
 class WorkerManager:
     """Manages Worker subprocess lifecycles.
 
@@ -100,25 +120,66 @@ class WorkerManager:
             )
         os.makedirs(self._socket_dir, exist_ok=True)
         self._workers: dict[str, _WorkerEntry] = {}
+        # Maps logical model name → list of instance worker_ids (e.g. "mm_pre" → ["mm_pre-0", "mm_pre-1"])
+        # Only populated for models with instances > 1.
+        self._instance_groups: dict[str, list[str]] = {}
         self._metrics = metrics
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    async def start_worker(self, handle: ModelHandle) -> WorkerProxy:
-        """Connect to (or spawn) a worker process, load model if spawned, return proxy.
+    async def start_worker(
+        self, handle: ModelHandle
+    ) -> WorkerProxy | MultiInstanceProxy:
+        """Connect to (or spawn) worker process(es), load model, return proxy.
+
+        For handle.instances == 1: spawns a single Worker process and returns
+        a WorkerProxy (existing behaviour, unchanged).
+
+        For handle.instances > 1: spawns N independent Worker processes and
+        returns a MultiInstanceProxy that round-robins infer() calls across
+        all N instances.  Each instance has its own socket/lock/refcount file.
 
         Multiple uvicorn workers call this concurrently.  Only the first caller
-        (determined by an atomic lock file) spawns the Nerva worker process and
-        sends LOAD_MODEL.  Subsequent callers just connect a new DEALER to the
-        already-running ROUTER and skip the load step.
+        (determined by an atomic lock file per instance) spawns the Nerva worker
+        process and sends LOAD_MODEL.  Subsequent callers just connect a new
+        DEALER to the already-running ROUTER and skip the load step.
 
         Args:
             handle: The ModelHandle describing the model to load.
 
         Returns:
-            A connected WorkerProxy (model already loaded).
+            A connected WorkerProxy (instances=1) or MultiInstanceProxy (instances>1).
+        """
+        if handle.instances > 1:
+            proxies: list[WorkerProxy] = []
+            instance_ids: list[str] = []
+            for i in range(handle.instances):
+                instance_handle = _make_instance_handle(handle, i)
+                try:
+                    proxy = await self._start_single_worker(instance_handle)
+                except Exception:
+                    # Clean up any instances already started in this group before re-raising.
+                    for wid in instance_ids:
+                        entry = self._workers.pop(wid, None)
+                        if entry is not None:
+                            with contextlib.suppress(Exception):
+                                await self._close_worker(entry)
+                    raise
+                proxies.append(proxy)
+                instance_ids.append(instance_handle.name)
+            self._instance_groups[handle.name] = instance_ids
+            return MultiInstanceProxy(proxies)
+
+        return await self._start_single_worker(handle)
+
+    async def _start_single_worker(self, handle: ModelHandle) -> WorkerProxy:
+        """Internal: connect to (or spawn) one Worker process for handle.
+
+        This is the original start_worker() logic, extracted so it can be
+        called both for single-instance models and per-instance in multi-instance
+        models.
         """
         worker_id = handle.name
         if worker_id in self._workers:
@@ -277,13 +338,18 @@ class WorkerManager:
         externally before calling restart_worker().
 
         Args:
-            worker_id: The name of the worker (same as ModelHandle.name).
+            worker_id: The key in ``_workers`` for the worker to restart.
+                For ``instances=1`` models this is ``ModelHandle.name``.
+                For ``instances>1`` models the logical name is NOT a key;
+                use the per-instance suffixed ID instead (e.g. ``"echo-0"``,
+                ``"echo-1"``).  Available instance IDs are recorded in
+                ``_instance_groups[model_name]``.
 
         Returns:
             A new connected and model-loaded WorkerProxy.
 
         Raises:
-            KeyError: If worker_id is not found.
+            KeyError: If worker_id is not found in ``_workers``.
             RuntimeError: If max restart count exceeded.
         """
         entry = self._workers.get(worker_id)
@@ -299,10 +365,13 @@ class WorkerManager:
         await self._close_worker(entry)
         self._workers.pop(worker_id, None)
 
-        # Start fresh.
+        # Start fresh.  Use _start_single_worker directly: every entry in
+        # _workers is a single-instance handle (multi-instance models store
+        # per-instance handles like name-0, name-1), so bypass the
+        # instances>1 branch of start_worker() and keep the return type exact.
         old_restart_count = entry.restart_count
         handle = entry.handle
-        proxy = await self.start_worker(handle)
+        proxy = await self._start_single_worker(handle)
 
         # Preserve and increment restart count.
         new_entry = self._workers[worker_id]
@@ -324,6 +393,7 @@ class WorkerManager:
         # Socket and refcount files are unlinked by _close_worker() when the
         # refcount reaches zero.  No extra cleanup needed here.
         self._workers.clear()
+        self._instance_groups.clear()
 
     # ------------------------------------------------------------------
     # Internal
