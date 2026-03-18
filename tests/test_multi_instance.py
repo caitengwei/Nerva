@@ -25,7 +25,6 @@ from nerva.worker.manager import WorkerManager
 from nerva.worker.proxy import MultiInstanceProxy, WorkerProxy
 from tests.helpers import EchoModel, PidModel
 
-
 # ---------------------------------------------------------------------------
 # Unit tests: ModelHandle.instances
 # ---------------------------------------------------------------------------

@@ -550,7 +550,7 @@ def prepare_triton_repo(
             PREPROCESS_MODEL,
             inputs=[
                 ("TEXT", "TYPE_STRING"),
-                ("IMAGE_BYTES", "TYPE_STRING"),
+                ("IMAGE_BYTES", "TYPE_BYTES"),
                 ("MAX_TOKENS", "TYPE_INT32"),
                 ("TEMPERATURE", "TYPE_FP32"),
                 ("TOP_P", "TYPE_FP32"),

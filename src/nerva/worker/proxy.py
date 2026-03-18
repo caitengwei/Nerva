@@ -567,11 +567,11 @@ class MultiInstanceProxy:
         self,
         inputs: dict[str, Any],
         context: InferContext,
-        shm_pool: ShmPool | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Round-robin dispatch to one of the underlying WorkerProxy instances."""
         idx = next(self._counter) % len(self._proxies)
-        return await self._proxies[idx].infer(inputs, context, shm_pool)
+        return await self._proxies[idx].infer(inputs, context, **kwargs)
 
     async def health_check(self, timeout: float = 3.0) -> bool:
         """Return True if any instance is healthy."""

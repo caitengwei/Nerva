@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import queue
 import threading
 from typing import IO, Any
+
+logger = logging.getLogger(__name__)
 
 _sink: AsyncTimingSink | None = None
 
@@ -44,6 +47,7 @@ class AsyncTimingSink:
         self._fp: IO[str] | None = None
         self._queue: queue.SimpleQueue[Any] = queue.SimpleQueue()
         self._thread: threading.Thread | None = None
+        self._stopping: bool = False
 
     async def start(self, log_dir: str, filename: str) -> None:
         """Open log file and start background writer thread."""
@@ -64,15 +68,20 @@ class AsyncTimingSink:
         mid-write on the same file handle.
         """
         if self._thread is not None:
+            self._stopping = True  # prevent new writes before sentinel is consumed
             self._queue.put(_SENTINEL)
             await asyncio.to_thread(self._thread.join, 5.0)
+            if self._thread.is_alive():
+                logger.warning(
+                    "timing writer thread did not exit within 5 s; log entries may be lost"
+                )
             self._thread = None
         # fp is closed by _writer_loop's finally clause; null the reference.
         self._fp = None
 
     def write(self, data: dict[str, Any]) -> None:
-        """Non-blocking enqueue. No-op if sink not started or writer thread has died."""
-        if self._thread is not None and self._thread.is_alive():
+        """Non-blocking enqueue. No-op if sink not started, stopping, or writer thread has died."""
+        if self._thread is not None and not self._stopping and self._thread.is_alive():
             self._queue.put_nowait(json.dumps(data) + "\n")
 
     def _writer_loop(self) -> None:

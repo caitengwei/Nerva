@@ -221,6 +221,8 @@ def test_triton_mock_mode_uses_loopback_host(monkeypatch: pytest.MonkeyPatch) ->
         grpc_port=8003,
         metrics_port=8004,
         allow_mock=True,
+        container_cli="",
+        mock_token_latency_ms=0.0,
         dry_run=False,
     )
 
@@ -230,7 +232,7 @@ def test_triton_mock_mode_uses_loopback_host(monkeypatch: pytest.MonkeyPatch) ->
         del argv
         return args
 
-    def fake_run_mock_server(*, host: str, port: int, model_repo: str) -> int:
+    def fake_run_mock_server(*, host: str, port: int, model_repo: str, token_latency_ms: float = 0.0) -> int:
         called["host"] = host
         called["port"] = port
         called["model_repo"] = model_repo
