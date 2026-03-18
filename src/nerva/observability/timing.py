@@ -19,6 +19,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import queue
@@ -64,7 +65,7 @@ class AsyncTimingSink:
         """
         if self._thread is not None:
             self._queue.put(_SENTINEL)
-            self._thread.join(timeout=5.0)
+            await asyncio.to_thread(self._thread.join, 5.0)
             self._thread = None
         # fp is closed by _writer_loop's finally clause; null the reference.
         self._fp = None

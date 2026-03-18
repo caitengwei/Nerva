@@ -157,7 +157,16 @@ class WorkerManager:
             instance_ids: list[str] = []
             for i in range(handle.instances):
                 instance_handle = _make_instance_handle(handle, i)
-                proxy = await self._start_single_worker(instance_handle)
+                try:
+                    proxy = await self._start_single_worker(instance_handle)
+                except Exception:
+                    # Clean up any instances already started in this group before re-raising.
+                    for wid in instance_ids:
+                        entry = self._workers.pop(wid, None)
+                        if entry is not None:
+                            with contextlib.suppress(Exception):
+                                await self._close_worker(entry)
+                    raise
                 proxies.append(proxy)
                 instance_ids.append(instance_handle.name)
             self._instance_groups[handle.name] = instance_ids
