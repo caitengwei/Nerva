@@ -109,12 +109,15 @@ class MMPostprocessModel(Model):
         }
 
 
+_PRE_POST_INSTANCES = int(os.environ.get("NERVA_PRE_POST_INSTANCES", "3"))
+
 mm_preprocess = model(
     "mm_preprocess",
     MMPreprocessModel,
     backend="pytorch",
     device="cpu",
     async_infer=True,
+    instances=_PRE_POST_INSTANCES,
 )
 mm_mock_llm = model(
     "mm_mock_llm",
@@ -129,6 +132,7 @@ mm_postprocess = model(
     backend="pytorch",
     device="cpu",
     async_infer=True,
+    instances=_PRE_POST_INSTANCES,
 )
 
 

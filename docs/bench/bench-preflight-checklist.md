@@ -120,7 +120,38 @@ podman run --rm -p 8002:8002 -p 8003:8003 -p 8004:8004 ...
 
 ---
 
-## 8. 并发度选取与稳定性边界（2026-03-17 实测）
+## 8. Triton 端口映射（macOS podman）
+
+**问题**：`run_bench.py` 默认 `--triton-url http://127.0.0.1:8002`，但容器启动时
+`-p 8001:8000 -p 8002:8001 -p 8003:8002` 将宿主机 **8001 映射为 HTTP 推理端口**（容器内 8000），
+8002 是 gRPC 端口。用默认地址打 gRPC 端口会得到 error_rate=1.0。
+
+**症状**：error_rate=1.0，latency 约 115ms（协议错误耗时），QPS 虚高（快速失败）。
+
+**修复**：压测 Triton 时明确指定端口：
+
+```bash
+uv run python scripts/bench/run_bench.py \
+    --target triton \
+    --triton-url http://127.0.0.1:8001 \   # ← 显式指定 HTTP 端口
+    ...
+```
+
+**Triton 容器推荐启动命令**（明确端口约定）：
+
+```bash
+podman run --rm -d --name triton \
+    -p 8001:8000 \   # HTTP 推理
+    -p 8002:8001 \   # gRPC
+    -p 8003:8002 \   # Metrics
+    -v /private/tmp/triton_repo:/models:ro \
+    nvcr.io/nvidia/tritonserver:24.08-py3 \
+    tritonserver --model-repository=/models --http-thread-count=16
+```
+
+---
+
+## 9. 并发度选取与稳定性边界（2026-03-17 实测）
 
 **关键发现**：Nerva 和 Triton 都存在饱和阈值，超过后结果剧烈抖动，两轮对比方向甚至可能反转。
 

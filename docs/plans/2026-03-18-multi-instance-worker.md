@@ -354,3 +354,67 @@ Round-robin 在 Nerva 的场景下已经足够：
 
 - 当前 DAG 是静态拓扑，跳过节点需要图重写
 - 超出 MVP 范围，不引入复杂度
+
+---
+
+## 7. 实施状态与实测数据（2026-03-18）
+
+**状态：已完成并合并（PR #19）**
+
+### 7.1 实现变更
+
+| 文件 | 说明 |
+|------|------|
+| `src/nerva/core/model.py` | `ModelHandle.instances` 字段；`model()` 参数 + 校验 |
+| `src/nerva/worker/proxy.py` | `MultiInstanceProxy`（round-robin，any-healthy） |
+| `src/nerva/worker/manager.py` | 多实例 spawn 逻辑；`_instance_groups`；`restart_worker` 类型修复 |
+| `src/nerva/observability/timing.py` | `_writer_loop` finally 关闭文件，消除 race condition |
+| `examples/mm_vllm_cpu_mock_server.py` | `NERVA_PRE_POST_INSTANCES` 环境变量控制实例数（默认 3） |
+| `scripts/bench/infra/prepare_triton_repo.py` | 新增 pre/post latency 参数和 `--pre-post-instance-count` |
+| `scripts/bench/sweep_instances_concurrency.py` | **新建**：instance × C 参数扫描脚本 |
+| `tests/test_multi_instance.py` | 27 个测试（unit + integration + regression） |
+| `tests/helpers.py` | `PidModel`（用于分布验证） |
+
+### 7.2 Nerva vs Triton 对比压测（C=40，instances=3）
+
+**配置**（两侧完全一致）：
+- preprocess：5ms sleep + 10% jitter，3 实例
+- LLM mock：256×0.5ms = 128ms sleep，1 实例
+- postprocess：2ms sleep + 10% jitter，3 实例
+- 理论最低端到端延迟：~135ms
+
+| 指标 | Nerva | Triton | Nerva 优势 |
+|------|-------|--------|-----------|
+| QPS | **153.8** | 93.7 | +64% |
+| p50 | **259.7ms** | 400.6ms | -35% |
+| p95 | **303.4ms** | 684.9ms | -56% |
+| p99 | **338.2ms** | 795.9ms | -58% |
+| error_rate | 0.0 | 0.0 | — |
+
+**差距根因**：Triton Python backend 使用 `time.sleep()`（阻塞），`instance_count=3` 等价于
+最多 3 个并发 preprocess 请求；其余 37 个在 OS thread queue 排队。Nerva 使用
+`asyncio.sleep()`（`async_infer=True` 路径），Worker 事件循环非阻塞，3 个进程各自多路复用，
+无排队等待。
+
+### 7.3 Triton pre/post instance_count 扫描（C=40）
+
+| instance_count | QPS | p50 | p95 | p99 | error_rate |
+|---|---|---|---|---|---|
+| 1 | 43.9 | 845ms | 1452ms | 1698ms | 0.0 |
+| 2 | 43.0 | 881ms | 1235ms | 2602ms | 0.0 |
+| 3 | 93.7 | 401ms | 684ms | 796ms | 0.0 |
+
+instance=1→2 无显著提升（LLM 20 实例已足够，pre/post blocking thread 需要更多实例才能摊平）；
+instance=3 出现明显跃升，Triton 调度与 pipeline 流量匹配改善。
+
+### 7.4 可重复压测
+
+```bash
+# instance × concurrency 全量扫描
+uv run python scripts/bench/sweep_instances_concurrency.py \
+  --target nerva triton \
+  --instances 1 2 3 5 8 10 \
+  --concurrency-levels 1,4,8,16,32,64,100 \
+  --warmup-seconds 20 \
+  --sample-seconds 30
+```

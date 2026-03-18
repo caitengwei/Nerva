@@ -152,10 +152,32 @@ def _write_python_model(model_root: Path, *, source: str) -> None:
     (version_dir / "model.py").write_text(source)
 
 
-def _preprocess_model_py() -> str:
+def _preprocess_model_py(*, latency_ms: float = 0.0, jitter_frac: float = 0.0) -> str:
+    latency_literal = repr(float(latency_ms))
+    jitter_literal = repr(float(jitter_frac))
+    sleep_block = (
+        ""
+        if latency_ms <= 0.0
+        else (
+            "import random\n"
+            "import time\n"
+            f"_PREPROCESS_LATENCY_MS: float = {latency_literal}\n"
+            f"_PREPROCESS_JITTER_FRAC: float = {jitter_literal}\n"
+            "\n"
+            "\n"
+            "def _preprocess_sleep() -> None:\n"
+            "    delay_s = _PREPROCESS_LATENCY_MS / 1000.0\n"
+            "    if _PREPROCESS_JITTER_FRAC > 0:\n"
+            "        delay_s *= 1.0 + random.uniform(-_PREPROCESS_JITTER_FRAC, _PREPROCESS_JITTER_FRAC)\n"
+            "    time.sleep(max(delay_s, 0.0))\n"
+            "\n"
+        )
+    )
+    sleep_call = "            _preprocess_sleep()\n" if latency_ms > 0.0 else ""
     return (
         "from __future__ import annotations\n"
         "\n"
+        f"{sleep_block}"
         "import numpy as np\n"
         "import triton_python_backend_utils as pb_utils\n"
         "\n"
@@ -173,6 +195,7 @@ def _preprocess_model_py() -> str:
         "    def execute(self, requests):\n"
         "        responses = []\n"
         "        for request in requests:\n"
+        f"{sleep_call}"
         "            text_in = pb_utils.get_input_tensor_by_name(request, 'TEXT')\n"
         "            image_bytes_in = pb_utils.get_input_tensor_by_name(request, 'IMAGE_BYTES')\n"
         "            max_tokens_in = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
@@ -438,10 +461,32 @@ def _infer_model_config_cpu_mock(model_name: str) -> str:
     )
 
 
-def _postprocess_model_py() -> str:
+def _postprocess_model_py(*, latency_ms: float = 0.0, jitter_frac: float = 0.0) -> str:
+    latency_literal = repr(float(latency_ms))
+    jitter_literal = repr(float(jitter_frac))
+    sleep_block = (
+        ""
+        if latency_ms <= 0.0
+        else (
+            "import random\n"
+            "import time\n"
+            f"_POSTPROCESS_LATENCY_MS: float = {latency_literal}\n"
+            f"_POSTPROCESS_JITTER_FRAC: float = {jitter_literal}\n"
+            "\n"
+            "\n"
+            "def _postprocess_sleep() -> None:\n"
+            "    delay_s = _POSTPROCESS_LATENCY_MS / 1000.0\n"
+            "    if _POSTPROCESS_JITTER_FRAC > 0:\n"
+            "        delay_s *= 1.0 + random.uniform(-_POSTPROCESS_JITTER_FRAC, _POSTPROCESS_JITTER_FRAC)\n"
+            "    time.sleep(max(delay_s, 0.0))\n"
+            "\n"
+        )
+    )
+    sleep_call = "            _postprocess_sleep()\n" if latency_ms > 0.0 else ""
     return (
         "from __future__ import annotations\n"
         "\n"
+        f"{sleep_block}"
         "import numpy as np\n"
         "import triton_python_backend_utils as pb_utils\n"
         "\n"
@@ -459,6 +504,7 @@ def _postprocess_model_py() -> str:
         "    def execute(self, requests):\n"
         "        responses = []\n"
         "        for request in requests:\n"
+        f"{sleep_call}"
         "            text_in = pb_utils.get_input_tensor_by_name(request, 'TEXT')\n"
         "            text_raw = text_in.as_numpy().reshape(-1)[0]\n"
         "            raw_text = _to_str(text_raw)\n"
@@ -477,6 +523,10 @@ def prepare_triton_repo(
     vllm_model_name: str = "/models",
     cpu_mock: bool = False,
     mock_token_latency_ms: float = 0.5,
+    mock_preprocess_latency_ms: float = 0.0,
+    mock_postprocess_latency_ms: float = 0.0,
+    mock_latency_jitter_frac: float = 0.0,
+    pre_post_instance_count: int | None = None,
 ) -> Path:
     if model_name in {PREPROCESS_MODEL, INFER_MODEL, POSTPROCESS_MODEL}:
         raise ValueError(f"model_name '{model_name}' conflicts with reserved stage model names")
@@ -513,9 +563,16 @@ def prepare_triton_repo(
                 ("TOP_P", "TYPE_FP32"),
                 ("DEADLINE_MS", "TYPE_INT32"),
             ],
+            instance_count=pre_post_instance_count,
         )
     )
-    _write_python_model(preprocess_root, source=_preprocess_model_py())
+    _write_python_model(
+        preprocess_root,
+        source=_preprocess_model_py(
+            latency_ms=mock_preprocess_latency_ms,
+            jitter_frac=mock_latency_jitter_frac,
+        ),
+    )
 
     if cpu_mock:
         (infer_root / "config.pbtxt").write_text(_infer_model_config_cpu_mock(INFER_MODEL))
@@ -532,9 +589,16 @@ def prepare_triton_repo(
             POSTPROCESS_MODEL,
             inputs=[("TEXT", "TYPE_STRING")],
             outputs=[("OUTPUT_TEXT", "TYPE_STRING"), ("RAW", "TYPE_STRING")],
+            instance_count=pre_post_instance_count,
         )
     )
-    _write_python_model(postprocess_root, source=_postprocess_model_py())
+    _write_python_model(
+        postprocess_root,
+        source=_postprocess_model_py(
+            latency_ms=mock_postprocess_latency_ms,
+            jitter_frac=mock_latency_jitter_frac,
+        ),
+    )
 
     (ensemble_root / "config.pbtxt").write_text(_ensemble_config(model_name))
     # Ensemble model also needs a concrete version directory for Triton loading.
@@ -558,6 +622,30 @@ def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=0.5,
         help="per-token latency injected by the CPU mock mm_infer (ms, default: 0.5)",
     )
+    parser.add_argument(
+        "--mock-preprocess-latency-ms",
+        type=float,
+        default=0.0,
+        help="fixed latency added to mm_preprocess execute() via time.sleep (ms, default: 0 = no sleep)",
+    )
+    parser.add_argument(
+        "--mock-postprocess-latency-ms",
+        type=float,
+        default=0.0,
+        help="fixed latency added to mm_postprocess execute() via time.sleep (ms, default: 0 = no sleep)",
+    )
+    parser.add_argument(
+        "--mock-latency-jitter-frac",
+        type=float,
+        default=0.0,
+        help="uniform ±jitter fraction applied to pre/post latency (e.g. 0.1 = ±10%%, default: 0)",
+    )
+    parser.add_argument(
+        "--pre-post-instance-count",
+        type=int,
+        default=None,
+        help="Triton instance_group count for mm_preprocess and mm_postprocess (default: None = Triton default of 1)",
+    )
     return parser.parse_args(argv)
 
 
@@ -570,6 +658,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         vllm_model_name=args.vllm_model,
         cpu_mock=args.cpu_mock,
         mock_token_latency_ms=args.mock_token_latency_ms,
+        mock_preprocess_latency_ms=args.mock_preprocess_latency_ms,
+        mock_postprocess_latency_ms=args.mock_postprocess_latency_ms,
+        mock_latency_jitter_frac=args.mock_latency_jitter_frac,
+        pre_post_instance_count=args.pre_post_instance_count,
     )
     print(repo)
     return 0
