@@ -71,8 +71,8 @@ class AsyncTimingSink:
         self._fp = None
 
     def write(self, data: dict[str, Any]) -> None:
-        """Non-blocking enqueue. No-op if sink not started."""
-        if self._thread is not None:
+        """Non-blocking enqueue. No-op if sink not started or writer thread has died."""
+        if self._thread is not None and self._thread.is_alive():
             self._queue.put_nowait(json.dumps(data) + "\n")
 
     def _writer_loop(self) -> None:

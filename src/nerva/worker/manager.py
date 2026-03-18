@@ -93,7 +93,7 @@ def _make_instance_handle(handle: ModelHandle, index: int) -> ModelHandle:
         model_class=handle.model_class,
         backend=handle.backend,
         device=handle.device,
-        options=handle.options,
+        options=dict(handle.options),
         batch_config=handle.batch_config,
         async_infer=handle.async_infer,
         instances=1,  # each instance is a single worker; prevents recursion

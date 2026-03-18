@@ -582,11 +582,19 @@ class MultiInstanceProxy:
         return any(r is True for r in results)
 
     async def shutdown(self) -> None:
-        """Broadcast SHUTDOWN to all instances."""
-        for p in self._proxies:
-            await p.shutdown()
+        """Broadcast SHUTDOWN to all instances concurrently."""
+        results = await asyncio.gather(
+            *(p.shutdown() for p in self._proxies), return_exceptions=True
+        )
+        for i, r in enumerate(results):
+            if isinstance(r, BaseException):
+                logger.warning("multi_instance_shutdown_error instance=%d: %s", i, r)
 
     async def close(self) -> None:
-        """Close all underlying proxies."""
-        for p in self._proxies:
-            await p.close()
+        """Close all underlying proxies concurrently."""
+        results = await asyncio.gather(
+            *(p.close() for p in self._proxies), return_exceptions=True
+        )
+        for i, r in enumerate(results):
+            if isinstance(r, BaseException):
+                logger.warning("multi_instance_close_error instance=%d: %s", i, r)
