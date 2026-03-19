@@ -65,13 +65,14 @@ class AsyncTimingSink:
         self._thread.start()
 
     async def stop(self) -> None:
-        """Flush pending writes and close.
+        """Signal the writer thread to stop and wait up to 5 s for it to exit.
 
-        Sends a sentinel to the writer thread and waits up to 5 s for it to
-        exit.  The writer thread is responsible for closing the file (in its
-        finally block), so this method never calls fp.close() directly —
-        avoiding the race where join() times out but the thread is still
-        mid-write on the same file handle.
+        Shutdown is best-effort: if the queue is full at teardown time (e.g.
+        sustained IO stall), items are silently discarded to make room for the
+        sentinel.  The writer thread flushes whatever it can before exiting.
+        The writer thread is responsible for closing the file (in its finally
+        block), so this method never calls fp.close() directly — avoiding the
+        race where join() times out but the thread is still mid-write.
         """
         if self._thread is not None:
             self._stopping = True  # prevent new writes before sentinel is consumed

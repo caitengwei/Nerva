@@ -370,6 +370,10 @@ class _WorkerLoop:
         loop: asyncio.AbstractEventLoop | None = getattr(self._thread_local, "loop", None)
         if loop is None or loop.is_closed():
             loop = asyncio.new_event_loop()
+            # Register as the running loop for this thread so that code inside
+            # infer() can call asyncio.get_event_loop() without DeprecationWarning
+            # (Python 3.10+) or RuntimeError (Python 3.12+).
+            asyncio.set_event_loop(loop)
             self._thread_local.loop = loop
         return loop.run_until_complete(self._backend.infer(inputs, context))
 
