@@ -101,6 +101,10 @@ def decode_frame(data: bytes | memoryview, offset: int = 0) -> tuple[Frame, int]
         is ``bytes``.  This avoids a payload copy on the decode hot path.
         Callers that need ``bytes`` (e.g. ``encode_frame``) convert lazily.
     """
+    if not (0 <= offset <= len(data)):
+        raise ProtocolError(
+            f"invalid offset: {offset} for buffer of length {len(data)}"
+        )
     available = len(data) - offset
     if available < HEADER_SIZE:
         raise ProtocolError(

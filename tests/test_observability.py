@@ -167,3 +167,16 @@ class TestAsyncTimingSink:
             with open(os.path.join(d, "stop_test.log")) as f:
                 content = f.read()
             assert "late" not in content
+
+    async def test_stop_completes_even_when_queue_full(self) -> None:
+        """stop() must not block forever when the queue is full (IO stall scenario)."""
+        import queue as q_mod
+        sink = AsyncTimingSink()
+        with tempfile.TemporaryDirectory() as d:
+            await sink.start(d, "full_stop.log")
+            # Stuff the queue to capacity with a tiny maxsize.
+            sink._queue = q_mod.Queue(maxsize=2)
+            sink._queue.put_nowait({"a": 1})
+            sink._queue.put_nowait({"a": 2})
+            # stop() must drain and insert sentinel without blocking.
+            await sink.stop()  # would hang forever before the fix

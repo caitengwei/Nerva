@@ -319,6 +319,18 @@ class TestRpcHandler:
         error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.DEADLINE_EXCEEDED
 
+    def test_unavailable_worker_disconnect(self) -> None:
+        """WorkerProxy disconnect message maps to UNAVAILABLE (not INTERNAL)."""
+        client = self._make_app(
+            executor_side_effect=RuntimeError("UNAVAILABLE: worker disconnected")
+        )
+        body = _make_request_frames("classify", {"x": 1})
+        resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        frames = _decode_response_frames(resp.content)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
+        assert error["code"] == ErrorCode.UNAVAILABLE
+        assert error["retryable"] is True
+
     def test_unavailable_error(self) -> None:
         """Exception containing UNAVAILABLE maps to UNAVAILABLE code."""
         client = self._make_app(

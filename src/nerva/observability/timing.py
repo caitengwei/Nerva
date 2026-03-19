@@ -74,7 +74,17 @@ class AsyncTimingSink:
         """
         if self._thread is not None:
             self._stopping = True  # prevent new writes before sentinel is consumed
-            self._queue.put(_SENTINEL)
+            # Insert sentinel without blocking the event loop.  _stopping=True
+            # ensures no new items are enqueued, so we are the sole producer and
+            # can safely drain items to make room if the queue is full (sustained
+            # IO stall is the scenario this bounded queue is meant to protect).
+            while True:
+                try:
+                    self._queue.put_nowait(_SENTINEL)
+                    break
+                except queue.Full:
+                    with contextlib.suppress(queue.Empty):
+                        self._queue.get_nowait()  # discard one item to make room
             await asyncio.to_thread(self._thread.join, 5.0)
             if self._thread.is_alive():
                 logger.warning(

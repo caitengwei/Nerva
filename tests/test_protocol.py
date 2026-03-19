@@ -207,6 +207,20 @@ class TestDecodeWithOffset:
         with pytest.raises(ProtocolError, match="incomplete header"):
             decode_frame(raw, len(raw) - 5)  # only 5 bytes left
 
+    def test_negative_offset_raises(self) -> None:
+        """Negative offset raises ProtocolError instead of silently mis-parsing."""
+        frame = Frame(frame_type=FrameType.DATA, request_id=1, flags=0, payload=b"hello")
+        raw = encode_frame(frame)
+        with pytest.raises(ProtocolError, match="invalid offset"):
+            decode_frame(raw, -1)
+
+    def test_offset_beyond_buffer_raises(self) -> None:
+        """Offset beyond buffer length raises ProtocolError with a clear message."""
+        frame = Frame(frame_type=FrameType.DATA, request_id=1, flags=0, payload=b"x")
+        raw = encode_frame(frame)
+        with pytest.raises(ProtocolError, match="invalid offset"):
+            decode_frame(raw, len(raw) + 1)
+
 
 class TestDecodeUnknownFrameType:
     def test_unknown_frame_type_raises_protocol_error(self) -> None:
