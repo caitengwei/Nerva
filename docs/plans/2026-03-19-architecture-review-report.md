@@ -35,7 +35,7 @@
 
 - **文件**：`src/nerva/server/rpc.py:28-34`
 - **性能影响**：Worker 崩溃恢复期间的请求被计为 INTERNAL（不重试）而非 UNAVAILABLE（可重试），压测中 Worker 重启窗口的可用性指标偏差，掩盖真实恢复能力。
-- **问题**：Worker 层 `AckStatus.UNAVAILABLE` 已存在（`worker/ipc.py:45`），但 `ErrorCode` 枚举无此值，`_map_exception` 也无对应分支，Worker 崩溃被映射为 INTERNAL(13)。
+- **问题**：Worker 层 `AckStatus.UNAVAILABLE` 已存在（`src/nerva/worker/ipc.py:45`），但 `ErrorCode` 枚举无此值，`_map_exception` 也无对应分支，Worker 崩溃被映射为 INTERNAL(13)。
 - **建议**：`ErrorCode` 增加 `UNAVAILABLE = 14`；`_map_exception` 增加 `"UNAVAILABLE" in msg` 分支；retryable 逻辑增加 `UNAVAILABLE`。
 
 ### 热路径性能（4 项）
