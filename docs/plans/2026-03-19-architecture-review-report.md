@@ -96,7 +96,7 @@
 | # | 文件:行 | 问题 |
 |---|---------|------|
 | E1 | `executor.py:373,399` | `_execute_parallel`/`_execute_cond` 创建子 Executor 时未传递 `_precomputed`，每请求重建 PrecomputedGraph（含拓扑排序），违反 §6.4 摊销原则 |
-| E3 | `executor.py:73-79` | PrecomputedGraph dict 字段未真正冻结，`frozen=True` 只防字段重赋值不防 dict 内容 mutation；建议 `MappingProxyType` 或文档标注约定 |
+| E2 | `executor.py:73-79` | PrecomputedGraph dict 字段未真正冻结，`frozen=True` 只防字段重赋值不防 dict 内容 mutation；建议 `MappingProxyType` 或文档标注约定 |
 
 ### Worker/进程（5 项）
 
