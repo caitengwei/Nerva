@@ -30,9 +30,10 @@ def _decode_response_frames(body: bytes) -> list[Frame]:
     from nerva.server.protocol import decode_frame
 
     frames = []
+    mv = memoryview(body)
     offset = 0
-    while offset < len(body):
-        frame, consumed = decode_frame(body[offset:])
+    while offset < len(mv):
+        frame, consumed = decode_frame(mv, offset)
         frames.append(frame)
         offset += consumed
     return frames
@@ -45,6 +46,7 @@ class TestErrorCode:
         assert ErrorCode.DEADLINE_EXCEEDED == 4
         assert ErrorCode.RESOURCE_EXHAUSTED == 8
         assert ErrorCode.INTERNAL == 13
+        assert ErrorCode.UNAVAILABLE == 14
 
 
 class TestRpcHandler:
@@ -316,6 +318,50 @@ class TestRpcHandler:
         frames = _decode_response_frames(resp.content)
         error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.DEADLINE_EXCEEDED
+
+    def test_unavailable_error(self) -> None:
+        """Exception containing UNAVAILABLE maps to UNAVAILABLE code."""
+        client = self._make_app(
+            executor_side_effect=RuntimeError("UNAVAILABLE: worker crashed")
+        )
+        body = _make_request_frames("classify", {"x": 1})
+        resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        frames = _decode_response_frames(resp.content)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
+        assert error["code"] == ErrorCode.UNAVAILABLE
+
+    def test_unavailable_is_retryable(self) -> None:
+        """UNAVAILABLE errors should be marked retryable."""
+        client = self._make_app(
+            executor_side_effect=RuntimeError("UNAVAILABLE: worker down")
+        )
+        body = _make_request_frames("classify", {"x": 1})
+        resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        frames = _decode_response_frames(resp.content)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
+        assert error["retryable"] is True
+
+    def test_deadline_exceeded_not_retryable(self) -> None:
+        """DEADLINE_EXCEEDED errors should NOT be marked retryable."""
+        client = self._make_app(
+            executor_side_effect=RuntimeError("DEADLINE_EXCEEDED: timeout")
+        )
+        body = _make_request_frames("classify", {"x": 1})
+        resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        frames = _decode_response_frames(resp.content)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
+        assert error["retryable"] is False
+
+    def test_resource_exhausted_is_retryable(self) -> None:
+        """RESOURCE_EXHAUSTED errors should be marked retryable."""
+        client = self._make_app(
+            executor_side_effect=RuntimeError("RESOURCE_EXHAUSTED")
+        )
+        body = _make_request_frames("classify", {"x": 1})
+        resp = client.post("/rpc/classify", content=body, headers=self._rpc_headers())
+        frames = _decode_response_frames(resp.content)
+        error = msgpack.unpackb(frames[0].payload, raw=False)
+        assert error["retryable"] is True
 
 
 from prometheus_client import CollectorRegistry  # noqa: E402

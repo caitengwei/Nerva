@@ -67,12 +67,14 @@ def _map_exception(exc: BaseException) -> tuple[ErrorCode, str]:
 def _parse_frames(data: bytes) -> list[Frame]:
     """Parse all frames from a byte buffer.
 
-    Uses offset-based decode_frame to avoid intermediate byte copies.
+    Wraps *data* in a memoryview so that ``decode_frame`` returns zero-copy
+    payload slices — no intermediate byte copies for the entire parse loop.
     """
     frames: list[Frame] = []
+    mv = memoryview(data)
     offset = 0
-    while offset < len(data):
-        frame, consumed = decode_frame(data, offset)
+    while offset < len(mv):
+        frame, consumed = decode_frame(mv, offset)
         frames.append(frame)
         offset += consumed
     return frames

@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from prometheus_client import CollectorRegistry
+
+if TYPE_CHECKING:
+    import pathlib
 
 from nerva.observability.metrics import NervaMetrics, get_metrics
 
@@ -104,3 +109,61 @@ class TestConfigureLogging:
         configure_logging(dev=True)
         log = structlog.get_logger("test.module")
         assert log is not None
+
+
+# ============================================================
+# AsyncTimingSink tests
+# ============================================================
+
+import json  # noqa: E402
+import os  # noqa: E402
+import tempfile  # noqa: E402
+
+from nerva.observability.timing import AsyncTimingSink  # noqa: E402
+
+
+class TestAsyncTimingSink:
+    async def test_write_noop_before_start(self) -> None:
+        """write() before start() is a no-op (no exception)."""
+        sink = AsyncTimingSink()
+        sink.write({"event": "test"})  # should not raise
+
+    async def test_roundtrip(self, tmp_path: pathlib.Path) -> None:
+        """Written dicts appear as JSON lines in the log file."""
+        sink = AsyncTimingSink()
+        await sink.start(str(tmp_path), "test.log")
+        sink.write({"event": "a", "val": 1})
+        sink.write({"event": "b", "val": 2})
+        await sink.stop()
+        lines = (tmp_path / "test.log").read_text().strip().split("\n")
+        assert len(lines) == 2
+        assert json.loads(lines[0]) == {"event": "a", "val": 1}
+        assert json.loads(lines[1]) == {"event": "b", "val": 2}
+
+    async def test_queue_full_drops_silently(self) -> None:
+        """When queue is full, write() drops entries without raising."""
+        sink = AsyncTimingSink()
+        # Use a tiny maxsize to test backpressure.
+        import queue
+        sink._queue = queue.Queue(maxsize=2)
+        # Simulate started state with a fake thread ref.
+        sink._thread = type("FakeThread", (), {"is_alive": lambda self: True})()  # type: ignore[assignment]
+        sink._stopping = False
+        # Fill the queue.
+        sink.write({"a": 1})
+        sink.write({"a": 2})
+        # This should be silently dropped (queue full).
+        sink.write({"a": 3})
+        assert sink._queue.qsize() == 2
+
+    async def test_write_noop_when_stopping(self) -> None:
+        """write() is a no-op once stop has been initiated."""
+        sink = AsyncTimingSink()
+        with tempfile.TemporaryDirectory() as d:
+            await sink.start(d, "stop_test.log")
+            await sink.stop()
+            # After stop, write should be no-op.
+            sink.write({"event": "late"})
+            with open(os.path.join(d, "stop_test.log")) as f:
+                content = f.read()
+            assert "late" not in content

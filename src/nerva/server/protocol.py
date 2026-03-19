@@ -48,7 +48,7 @@ class Frame:
     frame_type: FrameType
     request_id: int
     flags: int
-    payload: bytes
+    payload: bytes | memoryview
 
 
 _MAX_U64 = (1 << 64) - 1
@@ -56,13 +56,14 @@ _MAX_U64 = (1 << 64) - 1
 
 def encode_frame(frame: Frame) -> bytes:
     """Encode a Frame into wire bytes (header + payload)."""
+    payload = frame.payload if isinstance(frame.payload, bytes) else bytes(frame.payload)
     if not (0 <= frame.request_id <= _MAX_U64):
         raise ProtocolError(
             f"request_id {frame.request_id} out of u64 range [0, {_MAX_U64}]"
         )
-    if len(frame.payload) > MAX_PAYLOAD_BYTES:
+    if len(payload) > MAX_PAYLOAD_BYTES:
         raise ProtocolError(
-            f"payload size {len(frame.payload)} exceeds max {MAX_PAYLOAD_BYTES}"
+            f"payload size {len(payload)} exceeds max {MAX_PAYLOAD_BYTES}"
         )
     header = struct.pack(
         _HEADER_FMT,
@@ -72,18 +73,19 @@ def encode_frame(frame: Frame) -> bytes:
         frame.flags,
         frame.request_id,
         1,  # stream_id (fixed)
-        len(frame.payload),
+        len(payload),
         0,  # crc32 (fixed)
         0,  # ext_hdr_len (fixed)
     )
-    return header + frame.payload
+    return header + payload
 
 
-def decode_frame(data: bytes, offset: int = 0) -> tuple[Frame, int]:
+def decode_frame(data: bytes | memoryview, offset: int = 0) -> tuple[Frame, int]:
     """Decode a Frame from wire bytes starting at *offset*.
 
     Args:
-        data: Raw bytes buffer (may contain multiple frames).
+        data: Raw bytes buffer (may contain multiple frames).  Accepts
+            ``memoryview`` to enable fully zero-copy parsing pipelines.
         offset: Start position within *data*. Defaults to 0.
 
     Returns:
@@ -92,6 +94,12 @@ def decode_frame(data: bytes, offset: int = 0) -> tuple[Frame, int]:
 
     Raises:
         ProtocolError: On invalid header, bad magic/version, or size violations.
+
+    Note:
+        The returned ``Frame.payload`` is a ``memoryview`` slice into *data*
+        when *data* is a ``memoryview``, or into a temporary view when *data*
+        is ``bytes``.  This avoids a payload copy on the decode hot path.
+        Callers that need ``bytes`` (e.g. ``encode_frame``) convert lazily.
     """
     available = len(data) - offset
     if available < HEADER_SIZE:
@@ -118,7 +126,9 @@ def decode_frame(data: bytes, offset: int = 0) -> tuple[Frame, int]:
             f"incomplete payload: got {available} bytes, need {total}"
         )
 
-    payload = data[offset + HEADER_SIZE : offset + total]
+    # Zero-copy payload extraction via memoryview.
+    mv = data if isinstance(data, memoryview) else memoryview(data)
+    payload = mv[offset + HEADER_SIZE : offset + total]
     try:
         ft = FrameType(frame_type)
     except ValueError:
