@@ -56,6 +56,7 @@ class AsyncTimingSink:
 
     async def start(self, log_dir: str, filename: str) -> None:
         """Open log file and start background writer thread."""
+        self._stopping = False  # reset so instance can be restarted after stop()
         os.makedirs(log_dir, exist_ok=True)
         self._fp = open(os.path.join(log_dir, filename), "a")  # noqa: SIM115
         self._thread = threading.Thread(

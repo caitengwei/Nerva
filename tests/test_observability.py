@@ -169,14 +169,31 @@ class TestAsyncTimingSink:
             assert "late" not in content
 
     async def test_stop_completes_even_when_queue_full(self) -> None:
-        """stop() must not block forever when the queue is full (IO stall scenario)."""
+        """stop() must not block when queue is full at shutdown time."""
+        import asyncio as _asyncio
         import queue as q_mod
         sink = AsyncTimingSink()
+        # Configure the tiny queue BEFORE start() so the writer thread
+        # and stop() operate on the same queue instance (no race).
+        sink._queue = q_mod.Queue(maxsize=2)
         with tempfile.TemporaryDirectory() as d:
             await sink.start(d, "full_stop.log")
-            # Stuff the queue to capacity with a tiny maxsize.
-            sink._queue = q_mod.Queue(maxsize=2)
-            sink._queue.put_nowait({"a": 1})
-            sink._queue.put_nowait({"a": 2})
-            # stop() must drain and insert sentinel without blocking.
-            await sink.stop()  # would hang forever before the fix
+            # Fill queue; writer may drain before stop() runs, that's fine —
+            # the important property is stop() completes in bounded time either way.
+            sink.write({"a": 1})
+            sink.write({"a": 2})
+            # wait_for makes the test fail fast if stop() deadlocks (was 5+ s before fix).
+            await _asyncio.wait_for(sink.stop(), timeout=2.0)
+
+    async def test_restart_after_stop_writes_correctly(self, tmp_path: pathlib.Path) -> None:
+        """stop() then start() on same instance works; _stopping is reset."""
+        sink = AsyncTimingSink()
+        await sink.start(str(tmp_path), "restart.log")
+        sink.write({"phase": "first"})
+        await sink.stop()
+        # Restart — _stopping must be cleared so write() works again.
+        await sink.start(str(tmp_path), "restart2.log")
+        sink.write({"phase": "second"})
+        await sink.stop()
+        content = (tmp_path / "restart2.log").read_text()
+        assert "second" in content
