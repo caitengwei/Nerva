@@ -31,11 +31,14 @@ class ErrorCode(IntEnum):
     DEADLINE_EXCEEDED = 4
     RESOURCE_EXHAUSTED = 8
     INTERNAL = 13
+    UNAVAILABLE = 14
 
 
 def _error_frame(request_id: int, code: ErrorCode, message: str) -> bytes:
     """Build an ERROR frame."""
-    retryable = code in (ErrorCode.DEADLINE_EXCEEDED, ErrorCode.RESOURCE_EXHAUSTED)
+    # DEADLINE_EXCEEDED: do not retry (request already timed out).
+    # RESOURCE_EXHAUSTED / UNAVAILABLE: retryable with backoff.
+    retryable = code in (ErrorCode.RESOURCE_EXHAUSTED, ErrorCode.UNAVAILABLE)
     payload = msgpack.packb(
         {"code": int(code), "message": message, "retryable": retryable},
         use_bin_type=True,
@@ -44,8 +47,16 @@ def _error_frame(request_id: int, code: ErrorCode, message: str) -> bytes:
 
 
 def _map_exception(exc: BaseException) -> tuple[ErrorCode, str]:
-    """Map an execution exception to an error code and message."""
+    """Map an execution exception to an error code and message.
+
+    NOTE: This is a transitional implementation using string matching.
+    When modifying exception messages in worker/proxy.py or the backend
+    layer, you MUST update this function to keep mappings consistent.
+    Future work: replace with a typed exception hierarchy (NervaError subclasses).
+    """
     msg = str(exc)
+    if "UNAVAILABLE" in msg:
+        return ErrorCode.UNAVAILABLE, msg
     if "RESOURCE_EXHAUSTED" in msg:
         return ErrorCode.RESOURCE_EXHAUSTED, msg
     if "DEADLINE_EXCEEDED" in msg:
@@ -54,11 +65,16 @@ def _map_exception(exc: BaseException) -> tuple[ErrorCode, str]:
 
 
 def _parse_frames(data: bytes) -> list[Frame]:
-    """Parse all frames from a byte buffer."""
+    """Parse all frames from a byte buffer.
+
+    Wraps *data* in a memoryview so that ``decode_frame`` returns zero-copy
+    payload slices — no intermediate byte copies for the entire parse loop.
+    """
     frames: list[Frame] = []
+    mv = memoryview(data)
     offset = 0
-    while offset < len(data):
-        frame, consumed = decode_frame(data[offset:])
+    while offset < len(mv):
+        frame, consumed = decode_frame(mv, offset)
         frames.append(frame)
         offset += consumed
     return frames

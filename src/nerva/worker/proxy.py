@@ -348,7 +348,7 @@ class WorkerProxy:
                 raw: bytes = parts[1] if len(parts) >= 2 else parts[0]
             except zmq.ZMQError:
                 logger.debug("ZMQ recv error in recv_loop, exiting")
-                self._fail_outstanding("Worker disconnected")
+                self._fail_outstanding("UNAVAILABLE: worker disconnected")
                 break
             except asyncio.CancelledError:
                 break

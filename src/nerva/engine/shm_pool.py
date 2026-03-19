@@ -145,8 +145,14 @@ class ShmPool:
         if self._closed:
             raise RuntimeError("ShmPool is closed")
 
+        # Try the smallest fitting class first; if full, promote to the next
+        # larger class. This prevents a full class from causing request failures
+        # when larger classes still have capacity (e.g. during burst traffic).
+        first_fit_idx: int | None = None
         for idx, class_bytes in enumerate(self._size_classes_bytes):
             if class_bytes >= size:
+                if first_fit_idx is None:
+                    first_fit_idx = idx
                 slot_idx = self._bitmaps[idx].alloc()
                 if slot_idx is not None:
                     return ShmSlot(
@@ -156,12 +162,13 @@ class ShmPool:
                         _class_idx=idx,
                         _slot_idx=slot_idx,
                     )
-                # This class is full — try the next bigger class? No, spec says
-                # raise exhausted for the matching class.
-                raise ShmPoolExhausted(
-                    f"Size class {class_bytes} exhausted "
-                    f"({self._slots_per_class} slots all in use)"
-                )
+                # This class is full — try the next bigger class.
+
+        if first_fit_idx is not None:
+            raise ShmPoolExhausted(
+                f"All size classes >= {size} bytes exhausted "
+                f"({self._slots_per_class} slots per class, all in use)"
+            )
 
         raise ShmPoolExhausted(
             f"Requested size {size} exceeds largest size class "

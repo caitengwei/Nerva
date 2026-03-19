@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -43,14 +44,19 @@ class AsyncTimingSink:
     burst load where asyncio.to_thread callbacks add unwanted overhead.
     """
 
+    # Maximum number of unwritten timing entries. Entries beyond this limit are
+    # silently dropped to protect the process from OOM during sustained IO stalls.
+    _QUEUE_MAXSIZE = 100_000
+
     def __init__(self) -> None:
         self._fp: IO[str] | None = None
-        self._queue: queue.SimpleQueue[Any] = queue.SimpleQueue()
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
         self._thread: threading.Thread | None = None
         self._stopping: bool = False
 
     async def start(self, log_dir: str, filename: str) -> None:
         """Open log file and start background writer thread."""
+        self._stopping = False  # reset so instance can be restarted after stop()
         os.makedirs(log_dir, exist_ok=True)
         self._fp = open(os.path.join(log_dir, filename), "a")  # noqa: SIM115
         self._thread = threading.Thread(
@@ -59,17 +65,28 @@ class AsyncTimingSink:
         self._thread.start()
 
     async def stop(self) -> None:
-        """Flush pending writes and close.
+        """Signal the writer thread to stop and wait up to 5 s for it to exit.
 
-        Sends a sentinel to the writer thread and waits up to 5 s for it to
-        exit.  The writer thread is responsible for closing the file (in its
-        finally block), so this method never calls fp.close() directly —
-        avoiding the race where join() times out but the thread is still
-        mid-write on the same file handle.
+        Shutdown is best-effort: if the queue is full at teardown time (e.g.
+        sustained IO stall), items are silently discarded to make room for the
+        sentinel.  The writer thread flushes whatever it can before exiting.
+        The writer thread is responsible for closing the file (in its finally
+        block), so this method never calls fp.close() directly — avoiding the
+        race where join() times out but the thread is still mid-write.
         """
         if self._thread is not None:
             self._stopping = True  # prevent new writes before sentinel is consumed
-            self._queue.put(_SENTINEL)
+            # Insert sentinel without blocking the event loop.  _stopping=True
+            # ensures no new items are enqueued, so we are the sole producer and
+            # can safely drain items to make room if the queue is full (sustained
+            # IO stall is the scenario this bounded queue is meant to protect).
+            while True:
+                try:
+                    self._queue.put_nowait(_SENTINEL)
+                    break
+                except queue.Full:
+                    with contextlib.suppress(queue.Empty):
+                        self._queue.get_nowait()  # discard one item to make room
             await asyncio.to_thread(self._thread.join, 5.0)
             if self._thread.is_alive():
                 logger.warning(
@@ -80,9 +97,17 @@ class AsyncTimingSink:
         self._fp = None
 
     def write(self, data: dict[str, Any]) -> None:
-        """Non-blocking enqueue. No-op if sink not started, stopping, or writer thread has died."""
+        """Non-blocking enqueue. No-op if sink not started, stopping, or writer thread has died.
+
+        json.dumps is intentionally deferred to the writer thread so that the
+        event loop hot path only pays the cost of a single queue.put_nowait().
+        Entries are silently dropped when the queue is full (_QUEUE_MAXSIZE).
+        """
         if self._thread is not None and not self._stopping and self._thread.is_alive():
-            self._queue.put_nowait(json.dumps(data) + "\n")
+            # Silently shed entries when the queue is full (sustained IO stall).
+            # contextlib.suppress avoids a try/except on the hot path.
+            with contextlib.suppress(queue.Full):
+                self._queue.put_nowait(data)
 
     def _writer_loop(self) -> None:
         assert self._fp is not None
@@ -93,7 +118,8 @@ class AsyncTimingSink:
                 if item is _SENTINEL:
                     fp.flush()
                     return
-                batch = [item]
+                # json.dumps runs here in the writer thread, off the hot path.
+                batch = [json.dumps(item) + "\n"]
                 # drain any items already queued
                 while True:
                     try:
@@ -104,7 +130,7 @@ class AsyncTimingSink:
                         fp.write("".join(batch))
                         fp.flush()
                         return
-                    batch.append(nxt)
+                    batch.append(json.dumps(nxt) + "\n")
                 fp.write("".join(batch))
                 fp.flush()
         finally:

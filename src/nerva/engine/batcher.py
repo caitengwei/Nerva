@@ -67,7 +67,7 @@ class DynamicBatcher:
             maxsize=config.queue_capacity
         )
         self._loop_task: asyncio.Task[None] | None = None
-        self._in_flight_futures: list[asyncio.Future[dict[str, Any]]] = []
+        self._in_flight_futures: set[asyncio.Future[dict[str, Any]]] = set()
 
     async def start(self) -> None:
         """Start the background batch loop."""
@@ -153,7 +153,7 @@ class DynamicBatcher:
                 self._metrics.queue_depth.labels(model=self._model_name).dec()
             # Register immediately so stop() can drain this future even if
             # CancelledError is raised during the aggregation window below.
-            self._in_flight_futures.append(first.future)
+            self._in_flight_futures.add(first.future)
             batch: list[_PendingRequest] = [first]
             batch_deadline = time.monotonic() + config.max_delay_ms / 1000.0
 
@@ -169,7 +169,7 @@ class DynamicBatcher:
                     if self._metrics:
                         self._metrics.queue_depth.labels(model=self._model_name).dec()
                     # Register immediately after dequeue for the same reason.
-                    self._in_flight_futures.append(item.future)
+                    self._in_flight_futures.add(item.future)
                     batch.append(item)
                 except TimeoutError:
                     break
@@ -184,8 +184,7 @@ class DynamicBatcher:
                     if not req.future.done():
                         req.future.set_exception(RuntimeError("DEADLINE_EXCEEDED"))
                     # Deregister from in-flight since we are resolving it here.
-                    with contextlib.suppress(ValueError):
-                        self._in_flight_futures.remove(req.future)
+                    self._in_flight_futures.discard(req.future)
                 else:
                     valid.append(req)
 
@@ -219,5 +218,4 @@ class DynamicBatcher:
                     req.future.set_result(result)
             # Deregister futures after successful dispatch.
             for req in valid:
-                with contextlib.suppress(ValueError):
-                    self._in_flight_futures.remove(req.future)
+                self._in_flight_futures.discard(req.future)

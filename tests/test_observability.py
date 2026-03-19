@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from prometheus_client import CollectorRegistry
+
+if TYPE_CHECKING:
+    import pathlib
 
 from nerva.observability.metrics import NervaMetrics, get_metrics
 
@@ -104,3 +109,91 @@ class TestConfigureLogging:
         configure_logging(dev=True)
         log = structlog.get_logger("test.module")
         assert log is not None
+
+
+# ============================================================
+# AsyncTimingSink tests
+# ============================================================
+
+import json  # noqa: E402
+import os  # noqa: E402
+import tempfile  # noqa: E402
+
+from nerva.observability.timing import AsyncTimingSink  # noqa: E402
+
+
+class TestAsyncTimingSink:
+    async def test_write_noop_before_start(self) -> None:
+        """write() before start() is a no-op (no exception)."""
+        sink = AsyncTimingSink()
+        sink.write({"event": "test"})  # should not raise
+
+    async def test_roundtrip(self, tmp_path: pathlib.Path) -> None:
+        """Written dicts appear as JSON lines in the log file."""
+        sink = AsyncTimingSink()
+        await sink.start(str(tmp_path), "test.log")
+        sink.write({"event": "a", "val": 1})
+        sink.write({"event": "b", "val": 2})
+        await sink.stop()
+        lines = (tmp_path / "test.log").read_text().strip().split("\n")
+        assert len(lines) == 2
+        assert json.loads(lines[0]) == {"event": "a", "val": 1}
+        assert json.loads(lines[1]) == {"event": "b", "val": 2}
+
+    async def test_queue_full_drops_silently(self) -> None:
+        """When queue is full, write() drops entries without raising."""
+        sink = AsyncTimingSink()
+        # Use a tiny maxsize to test backpressure.
+        import queue
+        sink._queue = queue.Queue(maxsize=2)
+        # Simulate started state with a fake thread ref.
+        sink._thread = type("FakeThread", (), {"is_alive": lambda self: True})()  # type: ignore[assignment]
+        sink._stopping = False
+        # Fill the queue.
+        sink.write({"a": 1})
+        sink.write({"a": 2})
+        # This should be silently dropped (queue full).
+        sink.write({"a": 3})
+        assert sink._queue.qsize() == 2
+
+    async def test_write_noop_when_stopping(self) -> None:
+        """write() is a no-op once stop has been initiated."""
+        sink = AsyncTimingSink()
+        with tempfile.TemporaryDirectory() as d:
+            await sink.start(d, "stop_test.log")
+            await sink.stop()
+            # After stop, write should be no-op.
+            sink.write({"event": "late"})
+            with open(os.path.join(d, "stop_test.log")) as f:
+                content = f.read()
+            assert "late" not in content
+
+    async def test_stop_completes_even_when_queue_full(self) -> None:
+        """stop() must not block when queue is full at shutdown time."""
+        import asyncio as _asyncio
+        import queue as q_mod
+        sink = AsyncTimingSink()
+        # Configure the tiny queue BEFORE start() so the writer thread
+        # and stop() operate on the same queue instance (no race).
+        sink._queue = q_mod.Queue(maxsize=2)
+        with tempfile.TemporaryDirectory() as d:
+            await sink.start(d, "full_stop.log")
+            # Fill queue; writer may drain before stop() runs, that's fine —
+            # the important property is stop() completes in bounded time either way.
+            sink.write({"a": 1})
+            sink.write({"a": 2})
+            # wait_for makes the test fail fast if stop() deadlocks (was 5+ s before fix).
+            await _asyncio.wait_for(sink.stop(), timeout=2.0)
+
+    async def test_restart_after_stop_writes_correctly(self, tmp_path: pathlib.Path) -> None:
+        """stop() then start() on same instance works; _stopping is reset."""
+        sink = AsyncTimingSink()
+        await sink.start(str(tmp_path), "restart.log")
+        sink.write({"phase": "first"})
+        await sink.stop()
+        # Restart — _stopping must be cleared so write() works again.
+        await sink.start(str(tmp_path), "restart2.log")
+        sink.write({"phase": "second"})
+        await sink.stop()
+        content = (tmp_path / "restart2.log").read_text()
+        assert "second" in content

@@ -150,6 +150,78 @@ class TestEncodeValidation:
             encode_frame(frame)
 
 
+class TestDecodeWithOffset:
+    def test_decode_at_nonzero_offset(self) -> None:
+        """decode_frame with explicit offset parses the correct frame."""
+        f1 = Frame(frame_type=FrameType.OPEN, request_id=1, flags=0, payload=b"first")
+        f2 = Frame(frame_type=FrameType.DATA, request_id=2, flags=0, payload=b"second")
+        raw = encode_frame(f1) + encode_frame(f2)
+        offset1 = HEADER_SIZE + len(f1.payload)
+        decoded, consumed = decode_frame(raw, offset1)
+        assert decoded.frame_type == FrameType.DATA
+        assert decoded.request_id == 2
+        assert bytes(decoded.payload) == b"second"
+        assert consumed == HEADER_SIZE + len(f2.payload)
+
+    def test_multi_frame_offset_loop(self) -> None:
+        """Parse three concatenated frames via offset loop — no slicing."""
+        payloads = [b"aaa", b"bbbbbb", b"c"]
+        originals = [
+            Frame(frame_type=FrameType.DATA, request_id=i, flags=0, payload=p)
+            for i, p in enumerate(payloads)
+        ]
+        raw = b"".join(encode_frame(f) for f in originals)
+        parsed: list[Frame] = []
+        offset = 0
+        while offset < len(raw):
+            frame, consumed = decode_frame(raw, offset)
+            parsed.append(frame)
+            offset += consumed
+        assert len(parsed) == 3
+        for orig, dec in zip(originals, parsed, strict=True):
+            assert dec.request_id == orig.request_id
+            assert bytes(dec.payload) == orig.payload
+
+    def test_decode_returns_memoryview_payload(self) -> None:
+        """Decoded payload is a memoryview (zero-copy) when input is bytes."""
+        frame = Frame(frame_type=FrameType.DATA, request_id=1, flags=0, payload=b"hello")
+        raw = encode_frame(frame)
+        decoded, _ = decode_frame(raw)
+        assert isinstance(decoded.payload, memoryview)
+        assert bytes(decoded.payload) == b"hello"
+
+    def test_decode_memoryview_input(self) -> None:
+        """decode_frame accepts memoryview input directly."""
+        frame = Frame(frame_type=FrameType.DATA, request_id=7, flags=0, payload=b"mv-test")
+        raw = encode_frame(frame)
+        mv = memoryview(raw)
+        decoded, consumed = decode_frame(mv, 0)
+        assert isinstance(decoded.payload, memoryview)
+        assert bytes(decoded.payload) == b"mv-test"
+        assert consumed == HEADER_SIZE + len(b"mv-test")
+
+    def test_incomplete_header_at_offset(self) -> None:
+        """Short buffer at offset raises ProtocolError."""
+        frame = Frame(frame_type=FrameType.DATA, request_id=1, flags=0, payload=b"x")
+        raw = encode_frame(frame)
+        with pytest.raises(ProtocolError, match="incomplete header"):
+            decode_frame(raw, len(raw) - 5)  # only 5 bytes left
+
+    def test_negative_offset_raises(self) -> None:
+        """Negative offset raises ProtocolError instead of silently mis-parsing."""
+        frame = Frame(frame_type=FrameType.DATA, request_id=1, flags=0, payload=b"hello")
+        raw = encode_frame(frame)
+        with pytest.raises(ProtocolError, match="invalid offset"):
+            decode_frame(raw, -1)
+
+    def test_offset_beyond_buffer_raises(self) -> None:
+        """Offset beyond buffer length raises ProtocolError with a clear message."""
+        frame = Frame(frame_type=FrameType.DATA, request_id=1, flags=0, payload=b"x")
+        raw = encode_frame(frame)
+        with pytest.raises(ProtocolError, match="invalid offset"):
+            decode_frame(raw, len(raw) + 1)
+
+
 class TestDecodeUnknownFrameType:
     def test_unknown_frame_type_raises_protocol_error(self) -> None:
         """Unknown frame_type byte should raise ProtocolError, not ValueError."""

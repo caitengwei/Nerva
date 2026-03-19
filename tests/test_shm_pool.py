@@ -97,6 +97,49 @@ class TestExhaustion:
 
 
 # ---------------------------------------------------------------------------
+# Size class promotion (fallback)
+# ---------------------------------------------------------------------------
+
+
+class TestSizeClassPromotion:
+    def test_promotes_to_larger_class_when_full(self) -> None:
+        """When the best-fit class is full, alloc promotes to the next larger class."""
+        pool = ShmPool(size_classes_kb=[4, 16], slots_per_class=1, name_prefix="tp1")
+        try:
+            # Fill the 4KB class.
+            s1 = pool.alloc(100)
+            assert s1.slot_size == 4 * 1024
+            # Next 4KB-fitting alloc should promote to 16KB.
+            s2 = pool.alloc(100)
+            assert s2.slot_size == 16 * 1024
+        finally:
+            pool.close()
+
+    def test_all_fitting_classes_exhausted(self) -> None:
+        """When all fitting classes are full, raises ShmPoolExhausted."""
+        pool = ShmPool(size_classes_kb=[4, 16], slots_per_class=1, name_prefix="tp2")
+        try:
+            pool.alloc(100)   # fills 4KB class
+            pool.alloc(100)   # promotes to 16KB class
+            with pytest.raises(ShmPoolExhausted, match="All size classes"):
+                pool.alloc(100)  # both classes full
+        finally:
+            pool.close()
+
+    def test_promotion_skips_non_fitting_classes(self) -> None:
+        """Alloc for a 5KB request skips the 4KB class entirely."""
+        pool = ShmPool(size_classes_kb=[4, 16, 64], slots_per_class=1, name_prefix="tp3")
+        try:
+            s = pool.alloc(5 * 1024)
+            assert s.slot_size == 16 * 1024
+            # 16KB full, should promote to 64KB.
+            s2 = pool.alloc(5 * 1024)
+            assert s2.slot_size == 64 * 1024
+        finally:
+            pool.close()
+
+
+# ---------------------------------------------------------------------------
 # Free
 # ---------------------------------------------------------------------------
 

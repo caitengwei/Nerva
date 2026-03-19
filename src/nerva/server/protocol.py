@@ -48,7 +48,7 @@ class Frame:
     frame_type: FrameType
     request_id: int
     flags: int
-    payload: bytes
+    payload: bytes | memoryview
 
 
 _MAX_U64 = (1 << 64) - 1
@@ -56,13 +56,14 @@ _MAX_U64 = (1 << 64) - 1
 
 def encode_frame(frame: Frame) -> bytes:
     """Encode a Frame into wire bytes (header + payload)."""
+    payload = frame.payload if isinstance(frame.payload, bytes) else bytes(frame.payload)
     if not (0 <= frame.request_id <= _MAX_U64):
         raise ProtocolError(
             f"request_id {frame.request_id} out of u64 range [0, {_MAX_U64}]"
         )
-    if len(frame.payload) > MAX_PAYLOAD_BYTES:
+    if len(payload) > MAX_PAYLOAD_BYTES:
         raise ProtocolError(
-            f"payload size {len(frame.payload)} exceeds max {MAX_PAYLOAD_BYTES}"
+            f"payload size {len(payload)} exceeds max {MAX_PAYLOAD_BYTES}"
         )
     header = struct.pack(
         _HEADER_FMT,
@@ -72,29 +73,46 @@ def encode_frame(frame: Frame) -> bytes:
         frame.flags,
         frame.request_id,
         1,  # stream_id (fixed)
-        len(frame.payload),
+        len(payload),
         0,  # crc32 (fixed)
         0,  # ext_hdr_len (fixed)
     )
-    return header + frame.payload
+    return header + payload
 
 
-def decode_frame(data: bytes) -> tuple[Frame, int]:
-    """Decode a Frame from wire bytes.
+def decode_frame(data: bytes | memoryview, offset: int = 0) -> tuple[Frame, int]:
+    """Decode a Frame from wire bytes starting at *offset*.
+
+    Args:
+        data: Raw bytes buffer (may contain multiple frames).  Accepts
+            ``memoryview`` to enable fully zero-copy parsing pipelines.
+        offset: Start position within *data*. Defaults to 0.
 
     Returns:
-        (frame, consumed_bytes) tuple.
+        (frame, consumed_bytes) where consumed_bytes is the number of bytes
+        read starting from *offset* (i.e. HEADER_SIZE + payload_length).
 
     Raises:
         ProtocolError: On invalid header, bad magic/version, or size violations.
+
+    Note:
+        The returned ``Frame.payload`` is a ``memoryview`` slice into *data*
+        when *data* is a ``memoryview``, or into a temporary view when *data*
+        is ``bytes``.  This avoids a payload copy on the decode hot path.
+        Callers that need ``bytes`` (e.g. ``encode_frame``) convert lazily.
     """
-    if len(data) < HEADER_SIZE:
+    if not (0 <= offset <= len(data)):
         raise ProtocolError(
-            f"incomplete header: got {len(data)} bytes, need {HEADER_SIZE}"
+            f"invalid offset: {offset} for buffer of length {len(data)}"
+        )
+    available = len(data) - offset
+    if available < HEADER_SIZE:
+        raise ProtocolError(
+            f"incomplete header: got {available} bytes, need {HEADER_SIZE}"
         )
 
     magic, version, frame_type, flags, request_id, _stream_id, payload_len, _crc32, _ext_hdr_len = (
-        struct.unpack_from(_HEADER_FMT, data)
+        struct.unpack_from(_HEADER_FMT, data, offset)
     )
 
     if magic != MAGIC:
@@ -107,12 +125,14 @@ def decode_frame(data: bytes) -> tuple[Frame, int]:
         )
 
     total = HEADER_SIZE + payload_len
-    if len(data) < total:
+    if available < total:
         raise ProtocolError(
-            f"incomplete payload: got {len(data)} bytes, need {total}"
+            f"incomplete payload: got {available} bytes, need {total}"
         )
 
-    payload = data[HEADER_SIZE:total]
+    # Zero-copy payload extraction via memoryview.
+    mv = data if isinstance(data, memoryview) else memoryview(data)
+    payload = mv[offset + HEADER_SIZE : offset + total]
     try:
         ft = FrameType(frame_type)
     except ValueError:
