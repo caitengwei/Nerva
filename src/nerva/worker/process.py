@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -354,15 +355,23 @@ class _WorkerLoop:
             self._contexts.pop(request_id, None)
             structlog.contextvars.clear_contextvars()
 
+    # Thread-local storage for per-thread event loops (sync inference path).
+    _thread_local: threading.local = threading.local()
+
     def _run_infer_sync(self, inputs: dict[str, Any], context: InferContext) -> dict[str, Any]:
         """Blocking wrapper for thread execution of async backend inference.
 
         This runs inside ``asyncio.to_thread()``, so there is no running loop in
-        this thread. ``asyncio.run()`` is safe here and keeps backend.infer()
-        isolated from the worker event loop.
+        this thread. A thread-local event loop is created once per thread and
+        reused across requests, avoiding the ~50 us overhead of asyncio.run()
+        which creates and destroys a new loop on every call.
         """
         assert self._backend is not None
-        return asyncio.run(self._backend.infer(inputs, context))
+        loop: asyncio.AbstractEventLoop | None = getattr(self._thread_local, "loop", None)
+        if loop is None or loop.is_closed():
+            loop = asyncio.new_event_loop()
+            self._thread_local.loop = loop
+        return loop.run_until_complete(self._backend.infer(inputs, context))
 
     def _read_inputs(self, descriptor: Descriptor) -> dict[str, Any]:
         """Read inputs from either inline data or SHM."""

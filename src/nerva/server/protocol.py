@@ -79,22 +79,28 @@ def encode_frame(frame: Frame) -> bytes:
     return header + frame.payload
 
 
-def decode_frame(data: bytes) -> tuple[Frame, int]:
-    """Decode a Frame from wire bytes.
+def decode_frame(data: bytes, offset: int = 0) -> tuple[Frame, int]:
+    """Decode a Frame from wire bytes starting at *offset*.
+
+    Args:
+        data: Raw bytes buffer (may contain multiple frames).
+        offset: Start position within *data*. Defaults to 0.
 
     Returns:
-        (frame, consumed_bytes) tuple.
+        (frame, consumed_bytes) where consumed_bytes is the number of bytes
+        read starting from *offset* (i.e. HEADER_SIZE + payload_length).
 
     Raises:
         ProtocolError: On invalid header, bad magic/version, or size violations.
     """
-    if len(data) < HEADER_SIZE:
+    available = len(data) - offset
+    if available < HEADER_SIZE:
         raise ProtocolError(
-            f"incomplete header: got {len(data)} bytes, need {HEADER_SIZE}"
+            f"incomplete header: got {available} bytes, need {HEADER_SIZE}"
         )
 
     magic, version, frame_type, flags, request_id, _stream_id, payload_len, _crc32, _ext_hdr_len = (
-        struct.unpack_from(_HEADER_FMT, data)
+        struct.unpack_from(_HEADER_FMT, data, offset)
     )
 
     if magic != MAGIC:
@@ -107,12 +113,12 @@ def decode_frame(data: bytes) -> tuple[Frame, int]:
         )
 
     total = HEADER_SIZE + payload_len
-    if len(data) < total:
+    if available < total:
         raise ProtocolError(
-            f"incomplete payload: got {len(data)} bytes, need {total}"
+            f"incomplete payload: got {available} bytes, need {total}"
         )
 
-    payload = data[HEADER_SIZE:total]
+    payload = data[offset + HEADER_SIZE : offset + total]
     try:
         ft = FrameType(frame_type)
     except ValueError:

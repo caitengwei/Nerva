@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -43,9 +44,13 @@ class AsyncTimingSink:
     burst load where asyncio.to_thread callbacks add unwanted overhead.
     """
 
+    # Maximum number of unwritten timing entries. Entries beyond this limit are
+    # silently dropped to protect the process from OOM during sustained IO stalls.
+    _QUEUE_MAXSIZE = 100_000
+
     def __init__(self) -> None:
         self._fp: IO[str] | None = None
-        self._queue: queue.SimpleQueue[Any] = queue.SimpleQueue()
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
         self._thread: threading.Thread | None = None
         self._stopping: bool = False
 
@@ -80,9 +85,17 @@ class AsyncTimingSink:
         self._fp = None
 
     def write(self, data: dict[str, Any]) -> None:
-        """Non-blocking enqueue. No-op if sink not started, stopping, or writer thread has died."""
+        """Non-blocking enqueue. No-op if sink not started, stopping, or writer thread has died.
+
+        json.dumps is intentionally deferred to the writer thread so that the
+        event loop hot path only pays the cost of a single queue.put_nowait().
+        Entries are silently dropped when the queue is full (_QUEUE_MAXSIZE).
+        """
         if self._thread is not None and not self._stopping and self._thread.is_alive():
-            self._queue.put_nowait(json.dumps(data) + "\n")
+            # Silently shed entries when the queue is full (sustained IO stall).
+            # contextlib.suppress avoids a try/except on the hot path.
+            with contextlib.suppress(queue.Full):
+                self._queue.put_nowait(data)
 
     def _writer_loop(self) -> None:
         assert self._fp is not None
@@ -93,7 +106,8 @@ class AsyncTimingSink:
                 if item is _SENTINEL:
                     fp.flush()
                     return
-                batch = [item]
+                # json.dumps runs here in the writer thread, off the hot path.
+                batch = [json.dumps(item) + "\n"]
                 # drain any items already queued
                 while True:
                     try:
@@ -104,7 +118,7 @@ class AsyncTimingSink:
                         fp.write("".join(batch))
                         fp.flush()
                         return
-                    batch.append(nxt)
+                    batch.append(json.dumps(nxt) + "\n")
                 fp.write("".join(batch))
                 fp.flush()
         finally:
