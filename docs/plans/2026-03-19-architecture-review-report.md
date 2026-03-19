@@ -4,6 +4,7 @@
 - 范围：全仓库代码，对照《架构原则指导手册》逐模块 Review
 - 工具：5 个并行 code-reviewer subagent，覆盖 Core/DSL、Engine/执行、Worker/进程、Backends+Observability、Server/Serving 五层
 - 优先级标准：P1 = 影响性能或压测结论；P2 = 正确性/合规问题但不影响性能；P3 = 改进建议
+- 说明：各模块条目编号与原始缺陷记录保持一致，可能存在不连续情况（例如缺号）
 
 ---
 
