@@ -17,7 +17,7 @@ Qwen3-Omni speech-to-speech 推理场景要求：
 
 | 方案 | 描述 | 优势 | 劣势 | 适配成本 |
 |------|------|------|------|----------|
-| **HTTP/2 StreamingResponse** | Starlette StreamingResponse, chunked transfer | 复用现有 ASGI 栈；帧协议天然支持多 DATA 帧 | 不支持真正的双向流（HTTP 请求体必须先发完） | 低 |
+| **HTTP/2 StreamingResponse** | Starlette StreamingResponse + ASGI | 复用现有 ASGI 栈；帧协议天然支持多 DATA 帧 | ASGI/Starlette 限制：`request.body()` 阻塞到完整请求体，无法与响应交错（HTTP/2 协议本身支持交错，但 ASGI 接口不暴露） | 低 |
 | WebSocket | 独立 WS 端点，双向消息 | 真正全双工；低 overhead | 需要新的连接管理、认证、状态机；与现有帧协议不兼容 | 高 |
 | gRPC bidirectional streaming | protobuf + HTTP/2 | 成熟的流式语义；代码生成 | 引入 protobuf 编译链；与 Nerva 自有二进制协议冲突 | 高 |
 | Server-Sent Events (SSE) | text/event-stream | 简单；浏览器友好 | 仅文本；无二进制支持；单向 | 不适用 |
@@ -66,8 +66,8 @@ DAG 中的流式输出可以在不同粒度实现：
 | 模式 | `x-nerva-stream` | 输入 | 输出 | 状态 |
 |------|-------------------|------|------|------|
 | Unary | `0` | 缓冲 | 缓冲 | **已实现** |
-| Output-streaming | `1` | 缓冲 | 流式 | **本次实现** |
-| Full-duplex | `2` | 缓冲（降级） | 流式 | **本次实现（输入降级）** |
+| Output-streaming | `1` | 缓冲 | 流式 | **计划实现（Phase 3）** |
+| Full-duplex | `2` | 缓冲（降级） | 流式 | **计划实现（Phase 3，输入降级）** |
 
 > **MVP 中 `x-nerva-stream=2` 的行为**：RPC 层接受 `2` 并按 `1` 处理（`await request.body()` 缓冲输入，流式输出）。客户端可以 chunked 发送，服务端缓冲后处理。这是有意的优雅降级——客户端声明 full-duplex 意图，服务端尽力而为。真正的 streaming input（`request.stream()` 逐 chunk 解帧 + Backend API 变更）留待后续版本，届时客户端零改动。
 
@@ -87,9 +87,9 @@ DAG 中的流式输出可以在不同粒度实现：
 Client ──chunk──chunk──chunk──> RPC Handler (缓冲) ──complete dict──> Executor ──> Worker
 ```
 
-- RPC Handler 通过 `request.stream()` 增量读取客户端帧
-- 积累所有 DATA 帧后组装为完整 `inputs: dict`
-- 然后正常调用 `executor.execute()` 或 `executor.execute_stream()`
+- MVP 中，RPC Handler 通过 `await request.body()` 一次性读取并缓冲完整请求体
+- 解析所有 DATA 帧后组装为完整 `inputs: dict`
+- 然后正常调用 `executor.execute()` 或 `executor.execute_stream()`（后续如需真正全双工输入，可切换为 `request.stream()` 增量读取）
 
 **优势**：
 - **零 API 变更**：Backend.infer() / infer_stream() 的签名不变
