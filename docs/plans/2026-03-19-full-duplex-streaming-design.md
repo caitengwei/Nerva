@@ -317,7 +317,7 @@ Worker 当前有两个 dispatch 路径：
 
 **MVP 不实现显式背压。** 理由：
 - LLM token 生成速度（~50 tokens/s）远低于 ZMQ IPC 传输能力
-- ZMQ ROUTER socket 的 HWM (High Water Mark) 提供隐式缓冲（默认 1000 条消息）
+- ZMQ ROUTER socket 的 HWM (High Water Mark) 提供隐式缓冲（具体大小取决于运行时配置和 libzmq/pyzmq 默认值，需在部署时显式确认或设置）
 - HTTP/2 的 flow control 在传输层提供了 client → server 的背压
 
 **风险场景**：如果 audio chunk 生成速度极快且 chunk 较大，ZMQ 缓冲可能增长。后续版本可引入基于 credit 的流控（Proxy 发送 credit → Worker 按 credit 发送 chunk）。
