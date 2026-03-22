@@ -129,6 +129,19 @@ class _PipelineExecutor:
         )
         return await executor.execute(inputs)
 
+    async def execute_stream(
+        self, inputs: Any, *, deadline_ms: int = 30000, request_id: str = ""
+    ) -> Any:  # AsyncIterator[dict[str, Any]]
+        """Stream the terminal node's output via execute_stream()."""
+        if not request_id:
+            request_id = str(uuid.uuid4())
+        ctx = InferContext(request_id=request_id, deadline_ms=deadline_ms)
+        executor = Executor(
+            self._graph, self._proxies, ctx, _precomputed=self._precomputed
+        )
+        async for chunk in executor.execute_stream(inputs):
+            yield chunk
+
 
 class _NervaASGIApp:
     """ASGI application wrapper that lazily starts workers on first HTTP request.
