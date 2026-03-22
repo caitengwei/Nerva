@@ -33,6 +33,8 @@ from nerva.worker.ipc import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from nerva.backends.base import InferContext
     from nerva.engine.shm_pool import ShmPool, ShmSlot
 
@@ -55,8 +57,10 @@ class WorkerProxy:
         self._socket: zmq.asyncio.Socket | None = None
         self._send_lock = asyncio.Lock()
 
-        # Pending infer futures keyed by request_id.
+        # Pending infer futures keyed by request_id (unary).
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # Pending stream queues keyed by request_id (streaming).
+        self._pending_stream: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._request_pools: dict[str, ShmPool | None] = {}
         self._output_slots: dict[str, tuple[ShmPool, ShmSlot]] = {}
         self._recently_completed: deque[str] = deque()
@@ -292,6 +296,90 @@ class WorkerProxy:
             })
         return result
 
+    async def infer_stream(
+        self,
+        inputs: dict[str, Any],
+        context: InferContext,
+        shm_pool: ShmPool | None = None,
+    ) -> Any:  # AsyncIterator[dict[str, Any]]
+        """Send INFER_SUBMIT with stream=True; yield INFER_ACK chunks until stream_done.
+
+        Streaming chunks always use inline Descriptor (SHM disabled for stream path).
+        """
+        request_id = context.request_id
+        raw_bytes_input = self._extract_raw_bytes_input(inputs)
+        if raw_bytes_input is None:
+            input_key = None
+            payload_codec = "msgpack_dict_v1"
+            input_bytes = msgpack.packb(inputs, use_bin_type=True)
+        else:
+            input_key, input_bytes = raw_bytes_input
+            payload_codec = "raw_bytes_v1"
+
+        shm_slot = None
+        if len(input_bytes) <= IPC_CONTROL_INLINE_MAX_BYTES or shm_pool is None:
+            descriptor = Descriptor(
+                request_id=request_id,
+                node_id=0,
+                inline_data=input_bytes,
+                length=len(input_bytes),
+                payload_codec=payload_codec,
+                input_key=input_key,
+            )
+        else:
+            shm_slot = shm_pool.alloc(len(input_bytes))
+            shm_pool.write(shm_slot, input_bytes)
+            descriptor = Descriptor(
+                request_id=request_id,
+                node_id=0,
+                shm_id=shm_slot.shm_name,
+                offset=shm_slot.offset,
+                length=len(input_bytes),
+                payload_codec=payload_codec,
+                input_key=input_key,
+            )
+
+        if request_id in self._pending or request_id in self._pending_stream:
+            raise RuntimeError(f"Duplicate in-flight request_id '{request_id}'")
+
+        chunk_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._pending_stream[request_id] = chunk_queue
+        self._request_pools[request_id] = shm_pool
+
+        try:
+            await self._send({
+                "type": MessageType.INFER_SUBMIT.value,
+                "request_id": request_id,
+                "descriptor": descriptor.to_dict(),
+                "deadline_ms": context.deadline_ms,
+                "stream": True,
+            })
+
+            while True:
+                ack = await asyncio.wait_for(
+                    chunk_queue.get(), timeout=self._submit_timeout
+                )
+                status = ack.get("status", "")
+                stream_done = ack.get("stream_done", True)
+
+                if status != AckStatus.OK.value:
+                    error = ack.get("error", "unknown error")
+                    raise RuntimeError(f"Infer failed: [{status}] {error}")
+
+                if "descriptor" in ack:
+                    out_descriptor = Descriptor.from_dict(ack["descriptor"])
+                    yield self._decode_output(out_descriptor, request_id)
+
+                if stream_done:
+                    break
+        finally:
+            self._pending_stream.pop(request_id, None)
+            self._request_pools.pop(request_id, None)
+            self._mark_request_completed(request_id)
+            self._release_output_slot(request_id)
+            if shm_slot is not None and shm_pool is not None:
+                shm_pool.free(shm_slot)
+
     async def cancel(self, request_id: str, reason: str = "") -> None:
         """Send CANCEL (best-effort)."""
         await self._send({
@@ -376,14 +464,19 @@ class WorkerProxy:
 
             elif msg_type == MessageType.INFER_ACK.value:
                 request_id = msg.get("request_id", "")
-                fut = self._pending.get(request_id)
-                if fut is not None and not fut.done():
-                    fut.set_result(msg)
+                # Stream path takes priority (same request_id can produce N ACKs).
+                q = self._pending_stream.get(request_id)
+                if q is not None:
+                    await q.put(msg)
                 else:
-                    if request_id in self._recently_completed_set:
-                        logger.debug("Late INFER_ACK for completed request '%s'", request_id)
+                    fut = self._pending.get(request_id)
+                    if fut is not None and not fut.done():
+                        fut.set_result(msg)
                     else:
-                        logger.warning("No pending future for request '%s'", request_id)
+                        if request_id in self._recently_completed_set:
+                            logger.debug("Late INFER_ACK for completed request '%s'", request_id)
+                        else:
+                            logger.warning("No pending future for request '%s'", request_id)
 
             elif msg_type == MessageType.SHM_ALLOC_REQUEST.value:
                 await self._handle_shm_alloc_request(msg)
@@ -397,6 +490,16 @@ class WorkerProxy:
             if not fut.done():
                 fut.set_exception(RuntimeError(reason))
         self._pending.clear()
+
+        # Inject poison pill into all pending stream queues.
+        for q in self._pending_stream.values():
+            q.put_nowait({
+                "status": AckStatus.UNAVAILABLE.value,
+                "error": reason,
+                "stream_done": True,
+            })
+        self._pending_stream.clear()
+
         self._request_pools.clear()
 
         for request_id in list(self._output_slots.keys()):
@@ -572,6 +675,17 @@ class MultiInstanceProxy:
         """Round-robin dispatch to one of the underlying WorkerProxy instances."""
         idx = next(self._counter) % len(self._proxies)
         return await self._proxies[idx].infer(inputs, context, **kwargs)
+
+    async def infer_stream(
+        self,
+        inputs: dict[str, Any],
+        context: InferContext,
+        **kwargs: Any,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Round-robin dispatch to one proxy, yield its stream chunks."""
+        idx = next(self._counter) % len(self._proxies)
+        async for chunk in self._proxies[idx].infer_stream(inputs, context, **kwargs):
+            yield chunk
 
     async def health_check(self, timeout: float = 3.0) -> bool:
         """Return True if any instance is healthy."""
