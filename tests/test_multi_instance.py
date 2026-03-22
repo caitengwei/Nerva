@@ -188,6 +188,63 @@ class TestMultiInstanceProxyHealthCheck:
         assert await mip.health_check() is False
 
 
+class TestMultiInstanceProxyInferStream:
+    async def test_infer_stream_round_robins_to_first_proxy(self) -> None:
+        """infer_stream() round-robins; first call goes to proxy 0."""
+        chunks_p0 = [{"i": 0, "chunk": 0}, {"i": 0, "chunk": 1}]
+        chunks_p1 = [{"i": 1, "chunk": 0}]
+
+        async def _gen_p0(*_: Any, **__: Any) -> Any:
+            for c in chunks_p0:
+                yield c
+
+        async def _gen_p1(*_: Any, **__: Any) -> Any:
+            for c in chunks_p1:
+                yield c
+
+        p0 = _make_mock_proxy()
+        p0.infer_stream = _gen_p0  # type: ignore[attr-defined]
+        p1 = _make_mock_proxy()
+        p1.infer_stream = _gen_p1  # type: ignore[attr-defined]
+
+        mip = MultiInstanceProxy([p0, p1])
+        ctx = InferContext(request_id="stream-rr-001", deadline_ms=5000)
+
+        got: list[dict[str, Any]] = []
+        async for chunk in mip.infer_stream({}, ctx):
+            got.append(chunk)
+
+        # Counter starts at 0 → first call routes to p0.
+        assert got == chunks_p0
+
+    async def test_infer_stream_second_call_round_robins_to_p1(self) -> None:
+        """Two sequential infer_stream calls alternate between proxy 0 and 1."""
+        async def _gen_p0(*_: Any, **__: Any) -> Any:
+            yield {"instance": 0}
+
+        async def _gen_p1(*_: Any, **__: Any) -> Any:
+            yield {"instance": 1}
+
+        p0 = _make_mock_proxy()
+        p0.infer_stream = _gen_p0  # type: ignore[attr-defined]
+        p1 = _make_mock_proxy()
+        p1.infer_stream = _gen_p1  # type: ignore[attr-defined]
+
+        mip = MultiInstanceProxy([p0, p1])
+        ctx = InferContext(request_id="stream-rr-002", deadline_ms=5000)
+
+        first: list[dict[str, Any]] = []
+        async for chunk in mip.infer_stream({}, ctx):
+            first.append(chunk)
+
+        second: list[dict[str, Any]] = []
+        async for chunk in mip.infer_stream({}, ctx):
+            second.append(chunk)
+
+        assert first == [{"instance": 0}]
+        assert second == [{"instance": 1}]
+
+
 class TestMultiInstanceProxyShutdownClose:
     async def test_shutdown_broadcasts_to_all(self) -> None:
         proxies = [_make_mock_proxy() for _ in range(3)]

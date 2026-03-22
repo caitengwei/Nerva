@@ -373,6 +373,248 @@ class TestWorkerDecodeRobustness:
                 ctx.term()
 
 
+class TestWorkerInferStream:
+    """Worker handles INFER_SUBMIT with stream=True, sends multiple INFER_ACK."""
+
+    async def test_infer_stream_multiple_chunks(self) -> None:
+        """Worker yields N INFER_ACK chunks; last one has stream_done=True."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sock_path = _make_socket_path(tmp_dir)
+            ctx = zmq.asyncio.Context()
+
+            proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
+            proc.start()
+            socket = None
+            try:
+                socket = await _connect_dealer(ctx, sock_path)
+
+                # Load streaming model.
+                await _send_msg(socket, {
+                    "type": MessageType.LOAD_MODEL.value,
+                    "model_name": "streaming-echo",
+                    "model_class": "tests.helpers:StreamingEchoModel",
+                    "backend": "pytorch",
+                    "device": "cpu",
+                })
+                ack = await _recv_msg(socket)
+                assert ack["status"] == AckStatus.OK.value
+
+                # Send streaming infer request (count=3 → 3 chunks).
+                input_data = {"value": 7, "count": 3}
+                inline_bytes = msgpack.packb(input_data, use_bin_type=True)
+                descriptor = Descriptor(
+                    request_id="req-stream-001",
+                    node_id=0,
+                    inline_data=inline_bytes,
+                    length=len(inline_bytes),
+                )
+                await _send_msg(socket, {
+                    "type": MessageType.INFER_SUBMIT.value,
+                    "request_id": "req-stream-001",
+                    "descriptor": descriptor.to_dict(),
+                    "deadline_ms": 30000,
+                    "stream": True,
+                })
+
+                # Receive 3 INFER_ACK messages.
+                acks = []
+                for _ in range(3):
+                    msg = await _recv_msg(socket)
+                    assert msg["type"] == MessageType.INFER_ACK.value
+                    assert msg["request_id"] == "req-stream-001"
+                    assert msg["status"] == AckStatus.OK.value
+                    acks.append(msg)
+
+                # First two must not be done; last must be done.
+                assert acks[0].get("stream_done") is False
+                assert acks[1].get("stream_done") is False
+                assert acks[2].get("stream_done") is True
+
+                # All three must carry a descriptor with chunk data.
+                for i, msg in enumerate(acks):
+                    assert "descriptor" in msg, f"ACK {i} missing descriptor"
+                    out = Descriptor.from_dict(msg["descriptor"])
+                    assert out.is_inline
+                    assert out.inline_data is not None
+                    chunk = msgpack.unpackb(out.inline_data, raw=False)
+                    assert chunk == {"chunk": i, "value": 7}
+            finally:
+                if socket is not None:
+                    await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                    socket.close(linger=0)
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=2)
+                ctx.term()
+
+    async def test_infer_stream_empty_sends_done_only(self) -> None:
+        """count=0 → single INFER_ACK with stream_done=True and no descriptor."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sock_path = _make_socket_path(tmp_dir)
+            ctx = zmq.asyncio.Context()
+
+            proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
+            proc.start()
+            socket = None
+            try:
+                socket = await _connect_dealer(ctx, sock_path)
+
+                await _send_msg(socket, {
+                    "type": MessageType.LOAD_MODEL.value,
+                    "model_name": "streaming-echo",
+                    "model_class": "tests.helpers:StreamingEchoModel",
+                    "backend": "pytorch",
+                    "device": "cpu",
+                })
+                ack = await _recv_msg(socket)
+                assert ack["status"] == AckStatus.OK.value
+
+                input_data = {"value": 0, "count": 0}
+                inline_bytes = msgpack.packb(input_data, use_bin_type=True)
+                descriptor = Descriptor(
+                    request_id="req-stream-empty",
+                    node_id=0,
+                    inline_data=inline_bytes,
+                    length=len(inline_bytes),
+                )
+                await _send_msg(socket, {
+                    "type": MessageType.INFER_SUBMIT.value,
+                    "request_id": "req-stream-empty",
+                    "descriptor": descriptor.to_dict(),
+                    "deadline_ms": 30000,
+                    "stream": True,
+                })
+
+                msg = await _recv_msg(socket)
+                assert msg["type"] == MessageType.INFER_ACK.value
+                assert msg["status"] == AckStatus.OK.value
+                assert msg.get("stream_done") is True
+                assert "descriptor" not in msg
+            finally:
+                if socket is not None:
+                    await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                    socket.close(linger=0)
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=2)
+                ctx.term()
+
+    async def test_infer_stream_expired_deadline_returns_deadline_exceeded(self) -> None:
+        """Stream request with already-expired deadline gets DEADLINE_EXCEEDED + stream_done=True."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sock_path = _make_socket_path(tmp_dir)
+            ctx = zmq.asyncio.Context()
+
+            proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
+            proc.start()
+            socket = None
+            try:
+                socket = await _connect_dealer(ctx, sock_path)
+
+                await _send_msg(socket, {
+                    "type": MessageType.LOAD_MODEL.value,
+                    "model_name": "streaming-echo",
+                    "model_class": "tests.helpers:StreamingEchoModel",
+                    "backend": "pytorch",
+                    "device": "cpu",
+                })
+                ack = await _recv_msg(socket)
+                assert ack["status"] == AckStatus.OK.value
+
+                input_data = {"value": 7, "count": 3}
+                inline_bytes = msgpack.packb(input_data, use_bin_type=True)
+                descriptor = Descriptor(
+                    request_id="req-stream-expired",
+                    node_id=0,
+                    inline_data=inline_bytes,
+                    length=len(inline_bytes),
+                )
+                await _send_msg(socket, {
+                    "type": MessageType.INFER_SUBMIT.value,
+                    "request_id": "req-stream-expired",
+                    "descriptor": descriptor.to_dict(),
+                    "deadline_ms": -1,  # Already expired.
+                    "stream": True,
+                })
+
+                msg = await _recv_msg(socket)
+                assert msg["type"] == MessageType.INFER_ACK.value
+                assert msg["request_id"] == "req-stream-expired"
+                assert msg["status"] == AckStatus.DEADLINE_EXCEEDED.value
+                assert msg.get("stream_done") is True
+            finally:
+                if socket is not None:
+                    await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                    socket.close(linger=0)
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=2)
+                ctx.term()
+
+    async def test_infer_stream_error_sends_terminal_ack(self) -> None:
+        """Exception mid-stream → INFER_ACK with INTERNAL status and stream_done=True."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sock_path = _make_socket_path(tmp_dir)
+            ctx = zmq.asyncio.Context()
+
+            proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
+            proc.start()
+            socket = None
+            try:
+                socket = await _connect_dealer(ctx, sock_path)
+
+                await _send_msg(socket, {
+                    "type": MessageType.LOAD_MODEL.value,
+                    "model_name": "streaming-crash",
+                    "model_class": "tests.helpers:StreamingCrashModel",
+                    "backend": "pytorch",
+                    "device": "cpu",
+                })
+                ack = await _recv_msg(socket)
+                assert ack["status"] == AckStatus.OK.value
+
+                input_data: dict[str, Any] = {}
+                inline_bytes = msgpack.packb(input_data, use_bin_type=True)
+                descriptor = Descriptor(
+                    request_id="req-stream-crash",
+                    node_id=0,
+                    inline_data=inline_bytes,
+                    length=len(inline_bytes),
+                )
+                await _send_msg(socket, {
+                    "type": MessageType.INFER_SUBMIT.value,
+                    "request_id": "req-stream-crash",
+                    "descriptor": descriptor.to_dict(),
+                    "deadline_ms": 30000,
+                    "stream": True,
+                })
+
+                # First ACK: the one chunk yielded before the crash.
+                first = await _recv_msg(socket)
+                assert first["type"] == MessageType.INFER_ACK.value
+                assert first["status"] == AckStatus.OK.value
+                assert first.get("stream_done") is False
+
+                # Terminal error ACK.
+                terminal = await _recv_msg(socket)
+                assert terminal["type"] == MessageType.INFER_ACK.value
+                assert terminal["status"] == AckStatus.INTERNAL.value
+                assert terminal.get("stream_done") is True
+                assert "error" in terminal
+            finally:
+                if socket is not None:
+                    await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                    socket.close(linger=0)
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=2)
+                ctx.term()
+
+
 class TestWorkerShutdown:
     """Send SHUTDOWN, verify process exits cleanly."""
 

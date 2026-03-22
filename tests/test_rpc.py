@@ -2,6 +2,7 @@
 """Tests for nerva.server.rpc — Binary RPC handler."""
 
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -10,6 +11,31 @@ from starlette.testclient import TestClient
 
 from nerva.server.protocol import Frame, FrameType, encode_frame
 from nerva.server.rpc import ErrorCode, build_rpc_app
+
+
+class _MockStreamExecutor:
+    """Executor mock that supports both execute() and execute_stream()."""
+
+    def __init__(
+        self,
+        chunks: list[dict[str, Any]],
+        stream_error: Exception | None = None,
+    ) -> None:
+        self._chunks = chunks
+        self._stream_error = stream_error
+
+    async def execute(
+        self, inputs: Any, *, deadline_ms: int = 0, request_id: str = ""
+    ) -> dict[str, Any]:
+        return self._chunks[-1] if self._chunks else {}
+
+    async def execute_stream(
+        self, inputs: Any, *, deadline_ms: int = 0, request_id: str = ""
+    ) -> AsyncIterator[dict[str, Any]]:
+        for chunk in self._chunks:
+            yield chunk
+        if self._stream_error is not None:
+            raise self._stream_error
 
 
 def _make_request_frames(
@@ -242,7 +268,7 @@ class TestRpcHandler:
         client = self._make_app()
         body = _make_request_frames("classify", {"x": 1})
         headers = self._rpc_headers()
-        headers["x-nerva-stream"] = "1"
+        headers["x-nerva-stream"] = "99"  # anything beyond 0/1/2
         resp = client.post("/rpc/classify", content=body, headers=headers)
         frames = _decode_response_frames(resp.content)
         assert frames[0].frame_type == FrameType.ERROR
@@ -429,3 +455,86 @@ class TestRpcHandlerMetrics:
         body = _make_request_frames("classify", {"x": 1})
         client.post("/rpc/classify", content=body, headers=self._rpc_headers())
         assert m.request_total.labels(pipeline="classify", status="internal")._value.get() == 1.0
+
+
+class TestRpcHandlerStreaming:
+    """Tests for x-nerva-stream=1 and x-nerva-stream=2 streaming paths."""
+
+    def _stream_headers(self, mode: str = "1") -> dict[str, str]:
+        deadline = int(time.time() * 1000) + 30000
+        return {
+            "content-type": "application/x-nerva-rpc",
+            "x-nerva-deadline-ms": str(deadline),
+            "x-nerva-stream": mode,
+        }
+
+    def _make_app(
+        self,
+        chunks: list[dict[str, Any]],
+        stream_error: Exception | None = None,
+    ) -> TestClient:
+        executor = _MockStreamExecutor(chunks, stream_error)
+        pipelines = {"classify": executor}
+        app = build_rpc_app(pipelines)
+        return TestClient(app)
+
+    def test_stream_mode1_yields_data_frames_plus_end(self) -> None:
+        """x-nerva-stream=1: each chunk becomes a DATA frame, followed by END."""
+        chunks = [{"tok": 0}, {"tok": 1}, {"tok": 2}]
+        client = self._make_app(chunks)
+        body = _make_request_frames("classify", {"prompt": "hi"})
+        resp = client.post("/rpc/classify", content=body, headers=self._stream_headers("1"))
+
+        assert resp.status_code == 200
+        frames = _decode_response_frames(resp.content)
+        assert len(frames) == 4  # 3 DATA + 1 END
+
+        for i, frame in enumerate(frames[:3]):
+            assert frame.frame_type == FrameType.DATA
+            payload = msgpack.unpackb(frame.payload, raw=False)
+            assert payload == {"tok": i}
+
+        assert frames[-1].frame_type == FrameType.END
+
+    def test_stream_mode2_input_buffered_same_as_mode1(self) -> None:
+        """x-nerva-stream=2: input is buffered (MVP), output streaming same as mode 1."""
+        chunks = [{"tok": 0}, {"tok": 1}]
+        client = self._make_app(chunks)
+        body = _make_request_frames("classify", {"audio": "..."})
+        resp = client.post("/rpc/classify", content=body, headers=self._stream_headers("2"))
+
+        assert resp.status_code == 200
+        frames = _decode_response_frames(resp.content)
+        assert len(frames) == 3  # 2 DATA + 1 END
+        assert frames[0].frame_type == FrameType.DATA
+        assert frames[1].frame_type == FrameType.DATA
+        assert frames[2].frame_type == FrameType.END
+
+    def test_stream_error_mid_stream_yields_error_frame(self) -> None:
+        """Exception during streaming yields ERROR frame instead of crashing."""
+        chunks = [{"tok": 0}]
+        client = self._make_app(chunks, stream_error=RuntimeError("model exploded"))
+        body = _make_request_frames("classify", {"x": 1})
+        resp = client.post("/rpc/classify", content=body, headers=self._stream_headers("1"))
+
+        assert resp.status_code == 200
+        frames = _decode_response_frames(resp.content)
+        # Should contain the successful chunk + an ERROR frame (no END frame).
+        data_frames = [f for f in frames if f.frame_type == FrameType.DATA]
+        error_frames = [f for f in frames if f.frame_type == FrameType.ERROR]
+        assert len(data_frames) == 1
+        assert len(error_frames) == 1
+        error = msgpack.unpackb(error_frames[0].payload, raw=False)
+        assert error["code"] == ErrorCode.INTERNAL
+
+    def test_stream_mode_invalid_rejected(self) -> None:
+        """x-nerva-stream=3 (unknown mode) is rejected with INVALID_ARGUMENT."""
+        client = self._make_app([])
+        body = _make_request_frames("classify", {"x": 1})
+        resp = client.post("/rpc/classify", content=body, headers=self._stream_headers("3"))
+
+        assert resp.status_code == 200
+        frames = _decode_response_frames(resp.content)
+        assert frames[0].frame_type == FrameType.ERROR
+        error = msgpack.unpackb(frames[0].payload, raw=False)
+        assert error["code"] == ErrorCode.INVALID_ARGUMENT
