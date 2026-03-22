@@ -14,11 +14,13 @@ import time
 from dataclasses import dataclass, replace
 from enum import IntEnum
 from functools import reduce
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import nerva.observability.timing as _timing
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from nerva.backends.base import InferContext
     from nerva.core.graph import Edge, Graph, Node
 
@@ -37,6 +39,25 @@ class InferableProxy(Protocol):
         context: InferContext,
         **kwargs: Any,
     ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class InferableStreamProxy(InferableProxy, Protocol):
+    """Protocol for proxies that support both unary and streaming inference.
+
+    Inherits InferableProxy (has infer()).  Additionally exposes infer_stream()
+    for use by execute_stream() on the terminal node of a DAG.
+
+    @runtime_checkable allows isinstance() checks in execute_stream() so the
+    caller gets a clear TypeError when the terminal proxy is non-streaming.
+    """
+
+    def infer_stream(
+        self,
+        inputs: dict[str, Any],
+        context: InferContext,
+        **kwargs: Any,
+    ) -> AsyncIterator[dict[str, Any]]: ...
 
 
 def resolve_field_path(output: Any, field_path: tuple[str, ...]) -> Any:
@@ -307,6 +328,128 @@ class Executor:
             })
 
         return result
+
+    async def execute_stream(self, inputs: Any = None) -> AsyncIterator[dict[str, Any]]:
+        """Execute the DAG; stream the terminal node's output via infer_stream().
+
+        Intermediate nodes use infer() (unary).  Only the terminal node (last in
+        topological order) is called via infer_stream().
+
+        Raises:
+            TypeError: If the terminal node's proxy does not implement
+                InferableStreamProxy (i.e., missing infer_stream()).
+            RuntimeError: If any non-terminal node fails (fail-fast).
+        """
+        pc = self._pc
+        graph = self._graph
+        if not graph.nodes:
+            return
+
+        # Validate proxies.
+        for node in graph.nodes:
+            if node.node_type == "call" and node.model_name not in self._proxies:
+                raise KeyError(
+                    f"No proxy registered for model '{node.model_name}'. "
+                    f"Available: {list(self._proxies.keys())}"
+                )
+
+        last_node_id = pc.last_node_id
+        if last_node_id is None:
+            return
+
+        terminal_node = pc.node_map[last_node_id]
+        terminal_proxy = self._proxies[terminal_node.model_name]
+        if not isinstance(terminal_proxy, InferableStreamProxy):
+            raise TypeError(
+                f"Proxy for '{terminal_node.model_name}' does not implement "
+                f"InferableStreamProxy — cannot use execute_stream(). "
+                f"Either use execute() or provide a streaming-capable proxy."
+            )
+
+        # Run all non-terminal nodes via the event-driven scheduler; collect completed dict.
+        # If the graph has only one node, skip prefix execution entirely.
+        if len(graph.nodes) > 1:
+            completed = await self._execute_prefix(inputs, last_node_id)
+        else:
+            completed = {}
+
+        terminal_inputs = self._build_node_inputs(last_node_id, completed, inputs)
+        terminal_ctx = self._make_node_context(last_node_id)
+        async for chunk in terminal_proxy.infer_stream(terminal_inputs, terminal_ctx):
+            yield chunk
+
+    async def _execute_prefix(
+        self, inputs: Any, terminal_node_id: str
+    ) -> dict[str, Any]:
+        """Run all non-terminal nodes via the event-driven scheduler.
+
+        Returns the completed dict, which is used to build the terminal node's inputs.
+        """
+        pc = self._pc
+        graph = self._graph
+        in_degree: dict[str, int] = dict(pc.base_in_degree)
+        completed: dict[str, Any] = {}
+        done_queue: asyncio.Queue[str | BaseException] = asyncio.Queue()
+        running: dict[str, asyncio.Task[None]] = {}
+        failed: BaseException | None = None
+
+        async def _run_node(node_id: str) -> None:
+            try:
+                node = pc.node_map[node_id]
+                node_inputs = self._build_node_inputs(node_id, completed, inputs)
+                if node.node_type == "call":
+                    proxy = self._proxies[node.model_name]
+                    node_ctx = self._make_node_context(node_id)
+                    result = await proxy.infer(node_inputs, node_ctx)
+                elif node.node_type == "parallel":
+                    result = await self._execute_parallel(node, node_inputs)
+                elif node.node_type == "cond":
+                    result = await self._execute_cond(
+                        node,
+                        predicate_input=node_inputs,
+                        branch_inputs=inputs,
+                    )
+                else:
+                    raise RuntimeError(f"Unknown node type: {node.node_type}")
+                completed[node_id] = result
+                await done_queue.put(node_id)
+            except BaseException as exc:
+                await done_queue.put(exc)
+
+        # Start non-terminal source nodes (in-degree == 0, not terminal).
+        for node_id in pc.source_node_ids:
+            if node_id != terminal_node_id:
+                task = asyncio.create_task(_run_node(node_id))
+                running[node_id] = task
+
+        non_terminal_count = sum(1 for n in graph.nodes if n.id != terminal_node_id)
+        remaining = non_terminal_count
+
+        while remaining > 0:
+            item = await done_queue.get()
+            if isinstance(item, BaseException):
+                failed = item
+                break
+            done_id: str = item
+            remaining -= 1
+            running.pop(done_id, None)
+            for succ_id in self._successors.get(done_id, ()):
+                if succ_id == terminal_node_id:
+                    continue  # Don't schedule terminal — it runs via infer_stream()
+                in_degree[succ_id] -= 1
+                if in_degree[succ_id] == 0:
+                    task = asyncio.create_task(_run_node(succ_id))
+                    running[succ_id] = task
+
+        if failed is not None:
+            for task in running.values():
+                task.cancel()
+            for task in running.values():
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            raise RuntimeError(f"DAG execution failed: {failed}") from failed
+
+        return completed
 
     def _make_node_context(self, node_id: str) -> InferContext:
         """Create a per-node InferContext with a unique request_id.
