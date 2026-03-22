@@ -501,6 +501,65 @@ class TestWorkerInferStream:
                     proc.join(timeout=2)
                 ctx.term()
 
+    async def test_infer_stream_deadline_enforced_during_iteration(self) -> None:
+        """asyncio.timeout fires mid-stream: buffered chunk sent OK, then DEADLINE_EXCEEDED."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sock_path = _make_socket_path(tmp_dir)
+            ctx = zmq.asyncio.Context()
+
+            proc = multiprocessing.Process(target=worker_entry, args=(sock_path,))
+            proc.start()
+            socket = None
+            try:
+                socket = await _connect_dealer(ctx, sock_path)
+
+                await _send_msg(socket, {
+                    "type": MessageType.LOAD_MODEL.value,
+                    "model_name": "slow-streaming",
+                    "model_class": "tests.helpers:SlowStreamingModel",
+                    "backend": "pytorch",
+                    "device": "cpu",
+                })
+                ack = await _recv_msg(socket)
+                assert ack["status"] == AckStatus.OK.value
+
+                inline_bytes = msgpack.packb({}, use_bin_type=True)
+                descriptor = Descriptor(
+                    request_id="req-stream-slow",
+                    node_id=0,
+                    inline_data=inline_bytes,
+                    length=len(inline_bytes),
+                )
+                # deadline_ms=100: first chunk (immediate) fits, second chunk (500ms) does not.
+                await _send_msg(socket, {
+                    "type": MessageType.INFER_SUBMIT.value,
+                    "request_id": "req-stream-slow",
+                    "descriptor": descriptor.to_dict(),
+                    "deadline_ms": 100,
+                    "stream": True,
+                })
+
+                # First ACK: buffered first chunk sent as non-terminal before timeout.
+                first = await _recv_msg(socket)
+                assert first["type"] == MessageType.INFER_ACK.value
+                assert first["status"] == AckStatus.OK.value
+                assert first.get("stream_done") is False
+
+                # Terminal ACK: DEADLINE_EXCEEDED.
+                terminal = await _recv_msg(socket)
+                assert terminal["type"] == MessageType.INFER_ACK.value
+                assert terminal["status"] == AckStatus.DEADLINE_EXCEEDED.value
+                assert terminal.get("stream_done") is True
+            finally:
+                if socket is not None:
+                    await _send_msg(socket, {"type": MessageType.SHUTDOWN.value})
+                    socket.close(linger=0)
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=2)
+                ctx.term()
+
     async def test_infer_stream_expired_deadline_returns_deadline_exceeded(self) -> None:
         """Stream request with already-expired deadline gets DEADLINE_EXCEEDED + stream_done=True."""
         with tempfile.TemporaryDirectory() as tmp_dir:

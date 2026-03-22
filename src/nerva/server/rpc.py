@@ -156,7 +156,7 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
 
-        # Validate stream mode header (Phase 4: unary only).
+        # Validate stream mode header (0=unary, 1=output-streaming, 2=full-duplex MVP).
         stream_header = request.headers.get("x-nerva-stream")
         if stream_header is None:
             return Response(
@@ -355,8 +355,14 @@ class RpcHandler:
         exception, preventing the client from receiving a structured error response.
         """
         executor = self._pipelines[pipeline_name]
+        metrics = self._metrics
 
         async def generate() -> Any:
+            structlog.contextvars.bind_contextvars(
+                request_id=str(request_id), pipeline=pipeline_name
+            )
+            t0 = time.monotonic()
+            metrics.request_in_flight.labels(pipeline=pipeline_name).inc()
             try:
                 async for chunk in executor.execute_stream(
                     inputs,
@@ -379,21 +385,20 @@ class RpcHandler:
                         msgpack.packb({"status": 0}, use_bin_type=True),
                     )
                 )
+                metrics.request_total.labels(pipeline=pipeline_name, status="ok").inc()
             except Exception as exc:
                 code, message = _map_exception(exc)
-                yield encode_frame(
-                    Frame(
-                        FrameType.ERROR,
-                        request_id,
-                        0,
-                        msgpack.packb(
-                            {"code": int(code), "message": message},
-                            use_bin_type=True,
-                        ),
-                    )
-                )
+                metrics.request_total.labels(
+                    pipeline=pipeline_name, status=code.name.lower()
+                ).inc()
+                yield _error_frame(request_id, code, message)
                 # Do not re-raise: generator returns normally so Starlette
                 # closes the response cleanly (no TCP connection reset).
+            finally:
+                elapsed = time.monotonic() - t0
+                metrics.request_duration_seconds.labels(pipeline=pipeline_name).observe(elapsed)
+                metrics.request_in_flight.labels(pipeline=pipeline_name).dec()
+                structlog.contextvars.clear_contextvars()
 
         return StreamingResponse(generate(), media_type=CONTENT_TYPE)
 

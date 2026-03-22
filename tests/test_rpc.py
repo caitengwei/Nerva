@@ -403,6 +403,8 @@ class TestRpcHandler:
 
 
 from prometheus_client import CollectorRegistry  # noqa: E402
+from starlette.applications import Starlette  # noqa: E402
+from starlette.routing import Route  # noqa: E402
 
 from nerva.observability.metrics import NervaMetrics  # noqa: E402
 from nerva.server.rpc import RpcHandler  # noqa: E402
@@ -538,3 +540,51 @@ class TestRpcHandlerStreaming:
         assert frames[0].frame_type == FrameType.ERROR
         error = msgpack.unpackb(frames[0].payload, raw=False)
         assert error["code"] == ErrorCode.INVALID_ARGUMENT
+
+    def test_stream_error_frame_includes_retryable(self) -> None:
+        """ERROR frame from streaming path must include 'retryable' field (protocol consistency)."""
+        chunks: list[dict[str, Any]] = []
+        client = self._make_app(chunks, stream_error=RuntimeError("fail"))
+        body = _make_request_frames("classify", {"x": 1})
+        resp = client.post("/rpc/classify", content=body, headers=self._stream_headers("1"))
+
+        frames = _decode_response_frames(resp.content)
+        error_frames = [f for f in frames if f.frame_type == FrameType.ERROR]
+        assert len(error_frames) == 1
+        error = msgpack.unpackb(error_frames[0].payload, raw=False)
+        assert "retryable" in error
+
+    def _make_stream_app_with_metrics(
+        self,
+        chunks: list[dict[str, Any]],
+        stream_error: Exception | None = None,
+    ) -> tuple[TestClient, Any]:
+        executor = _MockStreamExecutor(chunks, stream_error)
+        reg = CollectorRegistry()
+        m = NervaMetrics(registry=reg)
+        handler = RpcHandler({"classify": executor}, metrics=m)
+        app = Starlette(routes=[Route("/rpc/{pipeline_name}", handler.handle, methods=["POST"])])
+        return TestClient(app), m
+
+    def test_stream_request_total_incremented_on_success(self) -> None:
+        """request_total is incremented with status=ok after successful stream."""
+        client, m = self._make_stream_app_with_metrics([{"tok": 0}])
+        body = _make_request_frames("classify", {"x": 1})
+        client.post("/rpc/classify", content=body, headers=self._stream_headers("1"))
+        assert m.request_total.labels(pipeline="classify", status="ok")._value.get() == 1.0
+
+    def test_stream_request_in_flight_returns_to_zero(self) -> None:
+        """request_in_flight returns to 0 after stream completes."""
+        client, m = self._make_stream_app_with_metrics([{"tok": 0}])
+        body = _make_request_frames("classify", {"x": 1})
+        client.post("/rpc/classify", content=body, headers=self._stream_headers("1"))
+        assert m.request_in_flight.labels(pipeline="classify")._value.get() == 0.0
+
+    def test_stream_request_total_incremented_on_error(self) -> None:
+        """request_total is incremented with error status when streaming raises."""
+        client, m = self._make_stream_app_with_metrics(
+            [], stream_error=RuntimeError("exploded")
+        )
+        body = _make_request_frames("classify", {"x": 1})
+        client.post("/rpc/classify", content=body, headers=self._stream_headers("1"))
+        assert m.request_total.labels(pipeline="classify", status="internal")._value.get() == 1.0

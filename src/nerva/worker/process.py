@@ -387,13 +387,33 @@ class _WorkerLoop:
             t_stream_start = time.perf_counter()
             t_first_chunk: float | None = None
 
-            async for chunk in self._backend.infer_stream(inputs, context):
-                output_bytes = msgpack.packb(chunk, use_bin_type=True)
-                if t_first_chunk is None:
-                    t_first_chunk = time.perf_counter()
-                chunk_count += 1
+            try:
+                async with asyncio.timeout(context.deadline_ms / 1000.0):
+                    async for chunk in self._backend.infer_stream(inputs, context):
+                        output_bytes = msgpack.packb(chunk, use_bin_type=True)
+                        if t_first_chunk is None:
+                            t_first_chunk = time.perf_counter()
+                        chunk_count += 1
+                        if prev_bytes is not None:
+                            # Send buffered chunk as non-terminal.
+                            desc = Descriptor(
+                                request_id=request_id,
+                                node_id=0,
+                                inline_data=prev_bytes,
+                                length=len(prev_bytes),
+                                payload_codec="msgpack_dict_v1",
+                            )
+                            await self._send_to(client_id, {
+                                "type": MessageType.INFER_ACK.value,
+                                "request_id": request_id,
+                                "status": AckStatus.OK.value,
+                                "descriptor": desc.to_dict(),
+                                "stream_done": False,
+                            })
+                        prev_bytes = output_bytes
+            except TimeoutError:
+                # Deadline exceeded mid-stream: flush buffered chunk first, then terminal.
                 if prev_bytes is not None:
-                    # Send buffered chunk as non-terminal.
                     desc = Descriptor(
                         request_id=request_id,
                         node_id=0,
@@ -408,9 +428,16 @@ class _WorkerLoop:
                         "descriptor": desc.to_dict(),
                         "stream_done": False,
                     })
-                prev_bytes = output_bytes
+                await self._send_to(client_id, {
+                    "type": MessageType.INFER_ACK.value,
+                    "request_id": request_id,
+                    "status": AckStatus.DEADLINE_EXCEEDED.value,
+                    "error": "deadline exceeded during streaming",
+                    "stream_done": True,
+                })
+                return
 
-            # Iterator exhausted — prev_bytes is the final chunk (or None for empty stream).
+            # Iterator exhausted normally — prev_bytes is the final chunk (or None).
             if prev_bytes is not None:
                 desc = Descriptor(
                     request_id=request_id,

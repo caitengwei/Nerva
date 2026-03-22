@@ -304,7 +304,9 @@ class WorkerProxy:
     ) -> Any:  # AsyncIterator[dict[str, Any]]
         """Send INFER_SUBMIT with stream=True; yield INFER_ACK chunks until stream_done.
 
-        Streaming chunks always use inline Descriptor (SHM disabled for stream path).
+        Streamed output chunks always use inline Descriptor (SHM disabled for outputs
+        to avoid _output_slots use-after-free races). Inputs may still use SHM when
+        shm_pool is provided and the payload exceeds IPC_CONTROL_INLINE_MAX_BYTES.
         """
         request_id = context.request_id
         raw_bytes_input = self._extract_raw_bytes_input(inputs)
