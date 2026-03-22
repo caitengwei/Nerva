@@ -149,6 +149,38 @@ class PidModel(Model):
         return {"pid": os.getpid()}
 
 
+class StreamingEchoModel(Model):
+    """Yields {"chunk": i, "value": inputs["value"]} for i in range(count).
+
+    inputs["count"] controls how many chunks to yield (default 3).
+    """
+
+    def load(self) -> None:
+        pass
+
+    async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        return {"echo": inputs.get("value")}
+
+    async def infer_stream(self, inputs: dict[str, Any]):  # type: ignore[override]
+        count = int(inputs.get("count", 3))
+        for i in range(count):
+            yield {"chunk": i, "value": inputs.get("value")}
+
+
+class StreamingCrashModel(Model):
+    """Yields one chunk then raises RuntimeError."""
+
+    def load(self) -> None:
+        pass
+
+    async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    async def infer_stream(self, inputs: dict[str, Any]):  # type: ignore[override]
+        yield {"chunk": 0}
+        raise RuntimeError("StreamingCrashModel always fails mid-stream")
+
+
 class BenchClassifier(Model):
     """Benchmark model: simulates classification head.
 
