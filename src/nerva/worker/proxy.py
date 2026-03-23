@@ -301,7 +301,7 @@ class WorkerProxy:
         inputs: dict[str, Any],
         context: InferContext,
         shm_pool: ShmPool | None = None,
-    ) -> Any:  # AsyncIterator[dict[str, Any]]
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Send INFER_SUBMIT with stream=True; yield INFER_ACK chunks until stream_done.
 
         Streamed output chunks always use inline Descriptor (SHM disabled for outputs

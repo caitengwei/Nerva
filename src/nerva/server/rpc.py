@@ -14,6 +14,8 @@ from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from starlette.requests import Request
 
 import nerva.observability.timing as _timing
@@ -357,7 +359,7 @@ class RpcHandler:
         executor = self._pipelines[pipeline_name]
         metrics = self._metrics
 
-        async def generate() -> Any:
+        async def generate() -> AsyncGenerator[bytes, None]:
             structlog.contextvars.bind_contextvars(
                 request_id=str(request_id), pipeline=pipeline_name
             )

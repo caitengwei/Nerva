@@ -20,6 +20,8 @@ from nerva.server.app import build_app
 from nerva.worker.manager import WorkerManager
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from starlette.applications import Starlette
 
     from nerva.core.graph import Graph
@@ -131,7 +133,7 @@ class _PipelineExecutor:
 
     async def execute_stream(
         self, inputs: Any, *, deadline_ms: int = 30000, request_id: str = ""
-    ) -> Any:  # AsyncIterator[dict[str, Any]]
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream the terminal node's output via execute_stream()."""
         if not request_id:
             request_id = str(uuid.uuid4())
