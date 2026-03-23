@@ -181,6 +181,132 @@ class TestWorkerProxyOutputShmPath:
             pool.close()
 
 
+class TestWorkerProxyInferStream:
+    """proxy.infer_stream() yields chunks from a streaming Worker."""
+
+    async def test_infer_stream_collects_all_chunks(
+        self, started_worker: StartedWorkerFactory
+    ) -> None:
+        """infer_stream() yields all 3 chunks from StreamingEchoModel."""
+        proxy = await started_worker("streaming-echo", "tests.helpers:StreamingEchoModel")
+        ctx = InferContext(request_id="req-stream-proxy-001", deadline_ms=30000)
+        chunks = []
+        async for chunk in proxy.infer_stream({"value": 5, "count": 3}, ctx):
+            chunks.append(chunk)
+        assert len(chunks) == 3
+        assert chunks[0] == {"chunk": 0, "value": 5}
+        assert chunks[1] == {"chunk": 1, "value": 5}
+        assert chunks[2] == {"chunk": 2, "value": 5}
+
+    async def test_infer_stream_empty_yields_nothing(
+        self, started_worker: StartedWorkerFactory
+    ) -> None:
+        """count=0 → infer_stream() yields no chunks."""
+        proxy = await started_worker("streaming-echo", "tests.helpers:StreamingEchoModel")
+        ctx = InferContext(request_id="req-stream-empty-proxy", deadline_ms=30000)
+        chunks = []
+        async for chunk in proxy.infer_stream({"value": 0, "count": 0}, ctx):
+            chunks.append(chunk)
+        assert chunks == []
+
+    async def test_infer_stream_error_raises(
+        self, started_worker: StartedWorkerFactory
+    ) -> None:
+        """StreamingCrashModel mid-stream error raises RuntimeError."""
+        proxy = await started_worker("streaming-crash", "tests.helpers:StreamingCrashModel")
+        ctx = InferContext(request_id="req-stream-crash-proxy", deadline_ms=30000)
+        chunks = []
+        with pytest.raises(RuntimeError, match="INTERNAL"):
+            async for chunk in proxy.infer_stream({}, ctx):
+                chunks.append(chunk)
+        # One chunk should have arrived before the error.
+        assert len(chunks) == 1
+        assert chunks[0] == {"chunk": 0}
+
+    async def test_infer_stream_fail_outstanding_terminates(
+        self,
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """_fail_outstanding() injects poison pill into pending stream queues."""
+        proxy = WorkerProxy(os.path.join(tmp_path, "unused.sock"))
+        sent: list[dict[str, Any]] = []
+
+        async def _fake_send(msg: dict[str, Any]) -> None:
+            sent.append(msg)
+
+        proxy._send = _fake_send  # type: ignore[method-assign]
+
+        # Manually register a pending stream queue.
+        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        proxy._pending_stream["req-s1"] = q
+
+        proxy._fail_outstanding("worker crashed")
+
+        # Queue should have received a poison pill.
+        pill = q.get_nowait()
+        assert pill["status"] == AckStatus.UNAVAILABLE.value
+        assert pill.get("stream_done") is True
+        assert "worker crashed" in pill.get("error", "")
+
+        # _pending_stream should be cleared.
+        assert "req-s1" not in proxy._pending_stream
+
+
+class TestWorkerProxyRequestIdCollision:
+    """Cross-dict collision detection between _pending and _pending_stream."""
+
+    async def test_infer_stream_rejects_id_already_in_pending_unary(
+        self,
+        monkeypatch,  # type: ignore[no-untyped-def]
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """infer_stream() raises if request_id is already in _pending (unary in flight)."""
+        proxy = WorkerProxy(os.path.join(tmp_path, "unused.sock"))
+        fake_future: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        proxy._pending["dup-001"] = fake_future
+        try:
+            ctx = InferContext(request_id="dup-001", deadline_ms=5000)
+            with pytest.raises(RuntimeError, match="Duplicate"):
+                async for _ in proxy.infer_stream({}, ctx):
+                    pass
+        finally:
+            proxy._pending.pop("dup-001", None)
+            fake_future.cancel()
+
+    async def test_infer_rejects_id_already_in_pending_stream(
+        self,
+        monkeypatch,  # type: ignore[no-untyped-def]
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """infer() raises if request_id is already in _pending_stream (stream in flight)."""
+        proxy = WorkerProxy(os.path.join(tmp_path, "unused.sock"))
+        proxy._pending_stream["dup-002"] = asyncio.Queue()
+        try:
+            ctx = InferContext(request_id="dup-002", deadline_ms=5000)
+            with pytest.raises(RuntimeError, match="Duplicate"):
+                await proxy.infer({}, ctx)
+        finally:
+            proxy._pending_stream.pop("dup-002", None)
+
+    async def test_infer_stream_timeout_maps_to_deadline_exceeded(
+        self,
+        monkeypatch,  # type: ignore[no-untyped-def]
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """asyncio.wait_for timeout in infer_stream() raises RuntimeError with DEADLINE_EXCEEDED."""
+        proxy = WorkerProxy(os.path.join(tmp_path, "unused.sock"), submit_timeout=0.01)
+
+        async def _never_send(msg: dict[str, Any]) -> None:
+            pass  # Drop message — chunk_queue.get() will time out.
+
+        monkeypatch.setattr(proxy, "_send", _never_send)
+
+        ctx = InferContext(request_id="timeout-001", deadline_ms=5000)
+        with pytest.raises(RuntimeError, match="DEADLINE_EXCEEDED"):
+            async for _ in proxy.infer_stream({}, ctx):
+                pass
+
+
 class TestWorkerProxyShmAllocContention:
     async def test_competing_alloc_requests(
         self,

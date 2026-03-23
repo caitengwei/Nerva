@@ -10,10 +10,12 @@ from typing import TYPE_CHECKING, Any
 import msgpack
 import structlog
 from starlette.applications import Starlette
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from starlette.requests import Request
 
 import nerva.observability.timing as _timing
@@ -156,7 +158,7 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
 
-        # Validate stream mode header (Phase 4: unary only).
+        # Validate stream mode header (0=unary, 1=output-streaming, 2=full-duplex MVP).
         stream_header = request.headers.get("x-nerva-stream")
         if stream_header is None:
             return Response(
@@ -167,12 +169,12 @@ class RpcHandler:
                 ),
                 media_type=CONTENT_TYPE,
             )
-        if stream_header != "0":
+        if stream_header not in ("0", "1", "2"):
             return Response(
                 content=_error_frame(
                     request_id,
                     ErrorCode.INVALID_ARGUMENT,
-                    f"unsupported stream mode: {stream_header!r} (only '0' supported)",
+                    f"unsupported stream mode: {stream_header!r} (supported: '0', '1', '2')",
                 ),
                 media_type=CONTENT_TYPE,
             )
@@ -273,6 +275,12 @@ class RpcHandler:
                 media_type=CONTENT_TYPE,
             )
 
+        # Route to streaming path for x-nerva-stream=1 or x-nerva-stream=2.
+        # Mode 2 (full-duplex) is handled the same as mode 1 in MVP: input is buffered
+        # above via `await request.body()`, output is streamed.
+        if stream_header in ("1", "2"):
+            return self._handle_stream(request_id, pipeline_name, inputs, deadline_ms)
+
         # Execute pipeline.
         executor = self._pipelines[pipeline_name]
         structlog.contextvars.bind_contextvars(
@@ -333,6 +341,68 @@ class RpcHandler:
             content=resp_data + resp_end,
             media_type=CONTENT_TYPE,
         )
+
+
+    def _handle_stream(
+        self,
+        request_id: int,
+        pipeline_name: str,
+        inputs: dict[str, Any],
+        deadline_ms: int,
+    ) -> StreamingResponse:
+        """Return a StreamingResponse that yields DATA frames per chunk, then END.
+
+        Exceptions inside the generator are caught and yield an ERROR frame instead
+        of propagating — StreamingResponse would close the connection on an unhandled
+        exception, preventing the client from receiving a structured error response.
+        """
+        executor = self._pipelines[pipeline_name]
+        metrics = self._metrics
+
+        async def generate() -> AsyncGenerator[bytes, None]:
+            structlog.contextvars.bind_contextvars(
+                request_id=str(request_id), pipeline=pipeline_name
+            )
+            t0 = time.monotonic()
+            metrics.request_in_flight.labels(pipeline=pipeline_name).inc()
+            try:
+                async for chunk in executor.execute_stream(
+                    inputs,
+                    deadline_ms=deadline_ms,
+                    request_id=str(request_id),
+                ):
+                    yield encode_frame(
+                        Frame(
+                            FrameType.DATA,
+                            request_id,
+                            0,
+                            msgpack.packb(chunk, use_bin_type=True),
+                        )
+                    )
+                yield encode_frame(
+                    Frame(
+                        FrameType.END,
+                        request_id,
+                        0,
+                        msgpack.packb({"status": 0}, use_bin_type=True),
+                    )
+                )
+                metrics.request_total.labels(pipeline=pipeline_name, status="ok").inc()
+            except Exception as exc:
+                code, message = _map_exception(exc)
+                metrics.request_total.labels(
+                    pipeline=pipeline_name, status=code.name.lower()
+                ).inc()
+                yield _error_frame(request_id, code, message)
+                # Do not re-raise: generator returns normally so Starlette
+                # closes the response cleanly (no TCP connection reset).
+            finally:
+                elapsed = time.monotonic() - t0
+                metrics.request_duration_seconds.labels(pipeline=pipeline_name).observe(elapsed)
+                metrics.request_in_flight.labels(pipeline=pipeline_name).dec()
+                structlog.contextvars.clear_contextvars()
+
+        return StreamingResponse(generate(), media_type=CONTENT_TYPE)
 
 
 def build_rpc_app(pipelines: dict[str, Any]) -> Starlette:

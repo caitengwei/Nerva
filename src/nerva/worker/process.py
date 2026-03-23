@@ -220,7 +220,7 @@ class _WorkerLoop:
             })
 
     async def _handle_infer(self, msg: dict[str, Any], client_id: bytes) -> None:
-        """Deserialize inputs, run inference, send INFER_ACK."""
+        """Deserialize inputs, run inference (unary or streaming), send INFER_ACK."""
         request_id: str = msg.get("request_id", "")
         context: InferContext | None = None
         t_recv = time.perf_counter()
@@ -241,12 +241,20 @@ class _WorkerLoop:
             self._contexts[request_id] = context
 
             if context.deadline_ms <= 0:
-                await self._send_to(client_id, {
+                resp: dict[str, Any] = {
                     "type": MessageType.INFER_ACK.value,
                     "request_id": request_id,
                     "status": AckStatus.DEADLINE_EXCEEDED.value,
                     "error": "deadline exceeded before execution",
-                })
+                }
+                if msg.get("stream", False):
+                    resp["stream_done"] = True
+                await self._send_to(client_id, resp)
+                return
+
+            # Dispatch to streaming path if requested.
+            if msg.get("stream", False):
+                await self._handle_infer_stream(msg, client_id, request_id, inputs, context)
                 return
 
             try:
@@ -354,6 +362,155 @@ class _WorkerLoop:
         finally:
             self._contexts.pop(request_id, None)
             structlog.contextvars.clear_contextvars()
+
+    async def _handle_infer_stream(
+        self,
+        msg: dict[str, Any],
+        client_id: bytes,
+        request_id: str,
+        inputs: dict[str, Any],
+        context: InferContext,
+    ) -> None:
+        """Call backend.infer_stream(), send multiple INFER_ACK chunks.
+
+        Uses lookahead: buffers one chunk so the final ACK can carry a descriptor
+        and stream_done=True simultaneously.
+
+        Streaming chunks always use inline Descriptor (SHM disabled — _output_slots
+        stores only one slot per request_id; consecutive SHM_ALLOC_REQUEST messages
+        would free previous un-consumed slots causing use-after-free).
+        """
+        assert self._backend is not None
+        try:
+            prev_bytes: bytes | None = None
+            chunk_count = 0
+            t_stream_start = time.perf_counter()
+            t_first_chunk: float | None = None
+
+            try:
+                async with asyncio.timeout(context.deadline_ms / 1000.0):
+                    async for chunk in self._backend.infer_stream(inputs, context):
+                        output_bytes = msgpack.packb(chunk, use_bin_type=True)
+                        if t_first_chunk is None:
+                            t_first_chunk = time.perf_counter()
+                        chunk_count += 1
+                        if prev_bytes is not None:
+                            # Send buffered chunk as non-terminal.
+                            desc = Descriptor(
+                                request_id=request_id,
+                                node_id=0,
+                                inline_data=prev_bytes,
+                                length=len(prev_bytes),
+                                payload_codec="msgpack_dict_v1",
+                            )
+                            await self._send_to(client_id, {
+                                "type": MessageType.INFER_ACK.value,
+                                "request_id": request_id,
+                                "status": AckStatus.OK.value,
+                                "descriptor": desc.to_dict(),
+                                "stream_done": False,
+                            })
+                        prev_bytes = output_bytes
+            except TimeoutError:
+                # Deadline exceeded mid-stream: flush buffered chunk first, then terminal.
+                if prev_bytes is not None:
+                    desc = Descriptor(
+                        request_id=request_id,
+                        node_id=0,
+                        inline_data=prev_bytes,
+                        length=len(prev_bytes),
+                        payload_codec="msgpack_dict_v1",
+                    )
+                    await self._send_to(client_id, {
+                        "type": MessageType.INFER_ACK.value,
+                        "request_id": request_id,
+                        "status": AckStatus.OK.value,
+                        "descriptor": desc.to_dict(),
+                        "stream_done": False,
+                    })
+                await self._send_to(client_id, {
+                    "type": MessageType.INFER_ACK.value,
+                    "request_id": request_id,
+                    "status": AckStatus.DEADLINE_EXCEEDED.value,
+                    "error": "deadline exceeded during streaming",
+                    "stream_done": True,
+                })
+                return
+
+            # Iterator exhausted normally — prev_bytes is the final chunk (or None).
+            if prev_bytes is not None:
+                desc = Descriptor(
+                    request_id=request_id,
+                    node_id=0,
+                    inline_data=prev_bytes,
+                    length=len(prev_bytes),
+                    payload_codec="msgpack_dict_v1",
+                )
+                await self._send_to(client_id, {
+                    "type": MessageType.INFER_ACK.value,
+                    "request_id": request_id,
+                    "status": AckStatus.OK.value,
+                    "descriptor": desc.to_dict(),
+                    "stream_done": True,
+                })
+            else:
+                # Empty stream — send terminal signal with no descriptor.
+                await self._send_to(client_id, {
+                    "type": MessageType.INFER_ACK.value,
+                    "request_id": request_id,
+                    "status": AckStatus.OK.value,
+                    "stream_done": True,
+                })
+
+            if self._timing_sink is not None:
+                t_now = time.perf_counter()
+                self._timing_sink.write({
+                    "event": "infer_stream_timing",
+                    "request_id": request_id,
+                    "model": self._model_name,
+                    "chunk_count": chunk_count,
+                    "first_chunk_ms": round(
+                        (t_first_chunk - t_stream_start) * 1000, 3
+                    ) if t_first_chunk is not None else None,
+                    "total_stream_ms": round((t_now - t_stream_start) * 1000, 3),
+                })
+
+        except asyncio.CancelledError:
+            if context is not None:
+                context.cancelled = True
+            await self._send_to(client_id, {
+                "type": MessageType.INFER_ACK.value,
+                "request_id": request_id,
+                "status": AckStatus.ABORTED.value,
+                "error": "request cancelled",
+                "stream_done": True,
+            })
+        except Exception as exc:
+            logger.exception("infer_stream_failed", request_id=request_id)
+            # If a chunk was buffered when the exception fired, send it first
+            # (it was successfully generated before the error).
+            if prev_bytes is not None:
+                desc = Descriptor(
+                    request_id=request_id,
+                    node_id=0,
+                    inline_data=prev_bytes,
+                    length=len(prev_bytes),
+                    payload_codec="msgpack_dict_v1",
+                )
+                await self._send_to(client_id, {
+                    "type": MessageType.INFER_ACK.value,
+                    "request_id": request_id,
+                    "status": AckStatus.OK.value,
+                    "descriptor": desc.to_dict(),
+                    "stream_done": False,
+                })
+            await self._send_to(client_id, {
+                "type": MessageType.INFER_ACK.value,
+                "request_id": request_id,
+                "status": AckStatus.INTERNAL.value,
+                "error": str(exc),
+                "stream_done": True,
+            })
 
     # Thread-local storage for per-thread event loops (sync inference path).
     _thread_local: threading.local = threading.local()

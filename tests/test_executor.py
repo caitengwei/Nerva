@@ -1,5 +1,6 @@
 """Tests for nerva.engine.executor — Event-driven DAG Executor (mock WorkerProxy)."""
 
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -7,7 +8,7 @@ import pytest
 
 from nerva.backends.base import InferContext
 from nerva.core.graph import Edge, Graph, Node
-from nerva.engine.executor import Executor, resolve_field_path
+from nerva.engine.executor import Executor, InferableStreamProxy, resolve_field_path
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -323,3 +324,119 @@ class TestExecutorErrors:
 
         proxy_a.infer.assert_not_called()
         proxy_b.infer.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Helpers for streaming tests
+# ---------------------------------------------------------------------------
+
+
+def make_streaming_proxy(chunks: list[dict[str, Any]]) -> Any:
+    """Create an object that satisfies InferableStreamProxy, yielding given chunks."""
+
+    class _StreamProxy:
+        async def infer(
+            self,
+            inputs: dict[str, Any],
+            context: InferContext,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            return chunks[-1] if chunks else {}
+
+        async def infer_stream(
+            self,
+            inputs: dict[str, Any],
+            context: InferContext,
+            **kwargs: Any,
+        ) -> AsyncIterator[dict[str, Any]]:
+            for chunk in chunks:
+                yield chunk
+
+    return _StreamProxy()
+
+
+# ---------------------------------------------------------------------------
+# execute_stream tests
+# ---------------------------------------------------------------------------
+
+
+class TestExecutorStream:
+    async def test_execute_stream_single_node(self) -> None:
+        """execute_stream() on a single terminal node yields all chunks."""
+        g = Graph()
+        g.add_node(Node(id="m_1", model_name="m"))
+
+        proxy = make_streaming_proxy([{"tok": 0}, {"tok": 1}, {"tok": 2}])
+        ctx = make_context()
+        executor = Executor(g, {"m": proxy}, ctx)
+
+        chunks = []
+        async for chunk in executor.execute_stream({"input": 1}):
+            chunks.append(chunk)
+
+        assert chunks == [{"tok": 0}, {"tok": 1}, {"tok": 2}]
+
+    async def test_execute_stream_linear_chain_terminal_only(self) -> None:
+        """Intermediate node uses infer(); terminal node uses infer_stream()."""
+        g = Graph()
+        g.add_node(Node(id="a_1", model_name="a"))
+        g.add_node(Node(id="b_1", model_name="b"))
+        g.add_edge(Edge(src="a_1", dst="b_1"))
+
+        proxy_a = make_mock_proxy(return_value={"mid": 42})
+        proxy_b = make_streaming_proxy([{"out": 0}, {"out": 1}])
+
+        ctx = make_context()
+        executor = Executor(g, {"a": proxy_a, "b": proxy_b}, ctx)
+
+        chunks = []
+        async for chunk in executor.execute_stream({"input": 1}):
+            chunks.append(chunk)
+
+        assert chunks == [{"out": 0}, {"out": 1}]
+        # Intermediate node must use infer(), not infer_stream().
+        proxy_a.infer.assert_called_once()
+
+    async def test_execute_stream_non_streaming_proxy_raises_type_error(self) -> None:
+        """Terminal proxy without infer_stream() raises TypeError."""
+        g = Graph()
+        g.add_node(Node(id="m_1", model_name="m"))
+
+        proxy = make_mock_proxy(return_value={"out": 1})
+        ctx = make_context()
+        executor = Executor(g, {"m": proxy}, ctx)
+
+        with pytest.raises(TypeError, match="InferableStreamProxy"):
+            async for _ in executor.execute_stream({}):
+                pass
+
+    async def test_execute_stream_non_call_terminal_raises_runtime_error(self) -> None:
+        """execute_stream() with a cond/parallel terminal raises RuntimeError, not KeyError."""
+        g = Graph()
+        true_branch: Graph = Graph()
+        true_branch.add_node(Node(id="a_1", model_name="a"))
+        false_branch: Graph = Graph()
+        false_branch.add_node(Node(id="b_1", model_name="b"))
+        cond_node = Node(
+            id="cond_1",
+            model_name="cond",
+            node_type="cond",
+            true_branch=true_branch,
+            false_branch=false_branch,
+        )
+        g.add_node(cond_node)
+
+        ctx = make_context()
+        executor = Executor(g, {}, ctx)
+
+        with pytest.raises(RuntimeError, match="call"):
+            async for _ in executor.execute_stream({}):
+                pass
+
+    async def test_infer_stream_protocol_isinstance(self) -> None:
+        """InferableStreamProxy is @runtime_checkable."""
+        streaming = make_streaming_proxy([])
+        non_streaming = make_mock_proxy(return_value={})
+
+        assert isinstance(streaming, InferableStreamProxy)
+        assert not isinstance(non_streaming, InferableStreamProxy)

@@ -15,7 +15,7 @@ from nerva.server.app import build_app
 from nerva.server.protocol import Frame, FrameType, decode_frame, encode_frame
 from nerva.server.serve import _build_pipelines
 from nerva.worker.manager import WorkerManager
-from tests.helpers import EchoModel
+from tests.helpers import EchoModel, StreamingEchoModel
 
 
 def _make_frames(pipeline: str, inputs: dict[str, Any], request_id: int = 1) -> bytes:
@@ -111,3 +111,89 @@ async def test_e2e_models(e2e_client: httpx.AsyncClient) -> None:
     data = resp.json()
     assert len(data["models"]) == 1
     assert data["models"][0]["name"] == "echo"
+
+
+# ---------------------------------------------------------------------------
+# Streaming e2e fixture + tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def e2e_stream_client() -> Any:
+    """E2E client backed by a real Worker running StreamingEchoModel."""
+    handle = model("streaming-echo", StreamingEchoModel, backend="pytorch", device="cpu")
+    graph = trace(lambda inp: handle(inp))
+
+    manager = WorkerManager()
+    executors, model_info = await _build_pipelines({"streaming-echo": graph}, manager)
+    app = build_app(pipelines=executors, model_info=model_info)
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        try:
+            yield client
+        finally:
+            await manager.shutdown_all()
+
+
+def _stream_headers(mode: str = "1", deadline_offset_ms: int = 30000) -> dict[str, str]:
+    deadline = int(time.time() * 1000) + deadline_offset_ms
+    return {
+        "content-type": "application/x-nerva-rpc",
+        "x-nerva-deadline-ms": str(deadline),
+        "x-nerva-stream": mode,
+    }
+
+
+async def test_e2e_stream_mode1_yields_chunks(
+    e2e_stream_client: httpx.AsyncClient,
+) -> None:
+    """Full stack: HTTP → RPC → Executor → WorkerProxy → Worker → StreamingEchoModel."""
+    body = _make_frames("streaming-echo", {"value": 99, "count": 3})
+    resp = await e2e_stream_client.post(
+        "/rpc/streaming-echo", content=body, headers=_stream_headers("1")
+    )
+    assert resp.status_code == 200
+    frames = _decode_frames(resp.content)
+
+    data_frames = [f for f in frames if f.frame_type == FrameType.DATA]
+    end_frames = [f for f in frames if f.frame_type == FrameType.END]
+
+    assert len(data_frames) == 3
+    assert len(end_frames) == 1
+
+    for i, frame in enumerate(data_frames):
+        chunk = msgpack.unpackb(frame.payload, raw=False)
+        assert chunk == {"chunk": i, "value": 99}
+
+
+async def test_e2e_stream_mode2_same_as_mode1(
+    e2e_stream_client: httpx.AsyncClient,
+) -> None:
+    """x-nerva-stream=2 (full-duplex MVP) behaves same as mode 1."""
+    body = _make_frames("streaming-echo", {"value": 7, "count": 2})
+    resp = await e2e_stream_client.post(
+        "/rpc/streaming-echo", content=body, headers=_stream_headers("2")
+    )
+    assert resp.status_code == 200
+    frames = _decode_frames(resp.content)
+    data_frames = [f for f in frames if f.frame_type == FrameType.DATA]
+    assert len(data_frames) == 2
+    assert msgpack.unpackb(data_frames[0].payload, raw=False) == {"chunk": 0, "value": 7}
+    assert msgpack.unpackb(data_frames[1].payload, raw=False) == {"chunk": 1, "value": 7}
+
+
+async def test_e2e_stream_empty_yields_only_end(
+    e2e_stream_client: httpx.AsyncClient,
+) -> None:
+    """count=0 → no DATA frames, only END."""
+    body = _make_frames("streaming-echo", {"value": 0, "count": 0})
+    resp = await e2e_stream_client.post(
+        "/rpc/streaming-echo", content=body, headers=_stream_headers("1")
+    )
+    assert resp.status_code == 200
+    frames = _decode_frames(resp.content)
+    data_frames = [f for f in frames if f.frame_type == FrameType.DATA]
+    end_frames = [f for f in frames if f.frame_type == FrameType.END]
+    assert len(data_frames) == 0
+    assert len(end_frames) == 1
