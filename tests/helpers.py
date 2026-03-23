@@ -238,7 +238,7 @@ class BenchStreamingModel(Model):
         chunk_size = int(self._options.get("chunk_size", 1024))
         return {"chunk": 0, "payload": b"x" * chunk_size}
 
-    async def infer_stream(self, inputs: dict[str, Any]):  # type: ignore[override]
+    async def infer_stream(self, inputs: dict[str, Any]):  # type: ignore[no-untyped-def]
         import asyncio
 
         count = int(self._options.get("count", 100))

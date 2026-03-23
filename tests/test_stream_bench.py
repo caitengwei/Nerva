@@ -108,7 +108,7 @@ class _MockStreamProxy:
     ) -> dict[str, Any]:
         return {}
 
-    async def infer_stream(  # type: ignore[return]
+    async def infer_stream(
         self, inputs: dict[str, Any], context: InferContext, **kwargs: Any
     ) -> Any:
         for i in range(self._n_chunks):
@@ -330,7 +330,7 @@ class TestSB4HttpConcurrentStreams:
         try:
             executors, model_info = await _build_pipelines({"sb4": graph}, manager)
             app = build_app(pipelines=executors, model_info=model_info)
-            transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+            transport = httpx.ASGITransport(app=app)
 
             body = _make_request_body("sb4", {"value": "x"})
             results: list[dict[str, Any]] = []
@@ -424,7 +424,7 @@ class TestSB5HttpFullDuplexLargeBody:
         try:
             executors, model_info = await _build_pipelines({"sb5": graph}, manager)
             app = build_app(pipelines=executors, model_info=model_info)
-            transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+            transport = httpx.ASGITransport(app=app)
 
             # 64KB input payload embedded in DATA frame
             large_input = {"payload": b"x" * _SB5_INPUT_PAYLOAD_BYTES}
