@@ -119,6 +119,24 @@ C 从 1 开始按指数递增（`[1, 2, 4, 8, 16, 32, 64, 128]`），每轮：
 
 ---
 
+### SB5 — HTTP Full-Duplex 大 Body 并发压力（x-nerva-stream=2）
+
+**层：** HTTP RpcHandler（ASGI），`x-nerva-stream=2`
+**目的：** 模拟 full-duplex 使用场景，压测大 body 读取 + 输出流的组合路径；
+为未来真正实现 input streaming 时留下基准对比数据。
+
+**与 SB4 的区别：**
+- Header：`x-nerva-stream=2`（而非 `1`）
+- 输入 payload：64KB（`b"x" * 65536`），模拟大型 input（如图像/音频帧）
+- 模型参数：`count=100, chunk_size=1024, delay_ms=30`（与 SB4 相同，理论延迟 3000ms）
+
+**C 递增逻辑：** 与 SB4 完全相同（`[1, 2, 4, 8, 16, 32, 64, 128]`，3 轮取均值，
+停止条件 `p90 > 4500ms`，记录 `bottleneck_c`）。
+
+**输出字段：** 与 SB4 相同结构，额外增加 `input_payload_bytes: 65536`。
+
+---
+
 ## 结果目录结构
 
 ```
@@ -127,6 +145,7 @@ bench-results/stream/
   SB2_worker_proxy_stream_throughput.json
   SB3_e2e_stream_latency.json
   SB4_http_concurrent_streams.json
+  SB5_http_fullduplex_large_body.json
 ```
 
 ---
