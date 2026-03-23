@@ -84,12 +84,18 @@ def _make_request_body(pipeline: str, inputs: dict[str, Any], request_id: int = 
 
 
 def _validate_stream_frames(data: bytes) -> None:
-    """Decode binary frames; assert at least one DATA and one END frame exist."""
+    """Decode binary frames; assert at least one DATA and one END frame exist.
+
+    Raises AssertionError with decoded payload on ERROR frame for easier diagnosis.
+    """
     offset = 0
     seen_data = False
     seen_end = False
     while offset < len(data):
         frame, consumed = decode_frame(data, offset)
+        if frame.frame_type == FrameType.ERROR:
+            payload_str = bytes(frame.payload).decode("utf-8", errors="replace")
+            raise AssertionError(f"server returned ERROR frame: {payload_str}")
         if frame.frame_type == FrameType.DATA:
             seen_data = True
         elif frame.frame_type == FrameType.END:
@@ -349,9 +355,61 @@ async def _one_stream_request(
     t0 = time.perf_counter()
     resp = await client.post(url, content=body, headers=headers)
     latency_ms = (time.perf_counter() - t0) * 1000
+    # Check HTTP status before frame decoding to surface clear errors on non-RPC responses
+    assert resp.status_code == 200, f"unexpected HTTP {resp.status_code}: {resp.text[:200]}"
     # Validate frame structure after timing to avoid skewing measurements
     _validate_stream_frames(resp.content)
     return latency_ms
+
+
+async def _run_concurrency_bench(
+    client: httpx.AsyncClient,
+    body: bytes,
+    url: str,
+    label: str,
+    stream_mode: str,
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Run escalating-concurrency benchmark; return (per-C results, bottleneck_c)."""
+    results: list[dict[str, Any]] = []
+    bottleneck_c: int | None = None
+
+    for c in _C_SEQUENCE:
+        round_latencies: list[float] = []
+        round_qps_list: list[float] = []
+        headers = _stream_headers(stream_mode, deadline_offset_ms=120000)
+
+        for _ in range(_ROUNDS_PER_C):
+            tasks = [_one_stream_request(client, body, headers, url) for _ in range(c)]
+            t_round = time.perf_counter()
+            latencies = await asyncio.gather(*tasks)
+            wall_clock_s = time.perf_counter() - t_round
+            round_latencies.extend(latencies)
+            round_qps_list.append(c / (wall_clock_s + 1e-9))
+
+        pcts = _percentiles(round_latencies)
+        qps = round(mean(round_qps_list), 2)
+        entry = {
+            "c": c,
+            "p50_ms": pcts["p50"],
+            "p90_ms": pcts["p90"],
+            "p99_ms": pcts["p99"],
+            "qps": qps,
+        }
+        results.append(entry)
+        print(
+            f"\n[{label}] C={c:3d}: p50={pcts['p50']:.0f}ms "
+            f"p90={pcts['p90']:.0f}ms p99={pcts['p99']:.0f}ms qps={qps}"
+        )
+
+        if pcts["p90"] > _BOTTLENECK_THRESHOLD_MS:
+            bottleneck_c = c
+            print(
+                f"[{label}] Bottleneck detected at C={c} "
+                f"(p90={pcts['p90']:.0f}ms > {_BOTTLENECK_THRESHOLD_MS:.0f}ms)"
+            )
+            break
+
+    return results, bottleneck_c
 
 
 @pytest.mark.slow
@@ -376,55 +434,17 @@ class TestSB4HttpConcurrentStreams:
             transport = httpx.ASGITransport(app=app)
 
             body = _make_request_body("sb4", {"value": "x"})
-            results: list[dict[str, Any]] = []
-            bottleneck_c: int | None = None
 
             async with httpx.AsyncClient(
                 transport=transport, base_url="http://testserver", timeout=120.0
             ) as client:
                 # Warmup with C=1
-                headers = _stream_headers("1", deadline_offset_ms=120000)
-                await _one_stream_request(client, body, headers, "/rpc/sb4")
+                warmup_headers = _stream_headers("1", deadline_offset_ms=120000)
+                await _one_stream_request(client, body, warmup_headers, "/rpc/sb4")
 
-                for c in _C_SEQUENCE:
-                    round_latencies: list[float] = []
-                    round_qps_list: list[float] = []
-                    headers = _stream_headers("1", deadline_offset_ms=120000)
-
-                    for _ in range(_ROUNDS_PER_C):
-                        tasks = [
-                            _one_stream_request(client, body, headers, "/rpc/sb4")
-                            for _ in range(c)
-                        ]
-                        t_round = time.perf_counter()
-                        latencies = await asyncio.gather(*tasks)
-                        wall_clock_s = time.perf_counter() - t_round
-                        round_latencies.extend(latencies)
-                        round_qps_list.append(c / (wall_clock_s + 1e-9))
-
-                    pcts = _percentiles(round_latencies)
-                    qps = round(mean(round_qps_list), 2)
-
-                    entry = {
-                        "c": c,
-                        "p50_ms": pcts["p50"],
-                        "p90_ms": pcts["p90"],
-                        "p99_ms": pcts["p99"],
-                        "qps": qps,
-                    }
-                    results.append(entry)
-                    print(
-                        f"\n[SB4] C={c:3d}: p50={pcts['p50']:.0f}ms "
-                        f"p90={pcts['p90']:.0f}ms p99={pcts['p99']:.0f}ms qps={qps}"
-                    )
-
-                    if pcts["p90"] > _BOTTLENECK_THRESHOLD_MS:
-                        bottleneck_c = c
-                        print(
-                            f"[SB4] Bottleneck detected at C={c} "
-                            f"(p90={pcts['p90']:.0f}ms > {_BOTTLENECK_THRESHOLD_MS:.0f}ms)"
-                        )
-                        break
+                results, bottleneck_c = await _run_concurrency_bench(
+                    client, body, "/rpc/sb4", "SB4", "1"
+                )
 
             result = {
                 "benchmark": "SB4_http_concurrent_streams",
@@ -472,55 +492,17 @@ class TestSB5HttpFullDuplexLargeBody:
             # 64KB input payload embedded in DATA frame
             large_input = {"payload": b"x" * _SB5_INPUT_PAYLOAD_BYTES}
             body = _make_request_body("sb5", large_input)
-            results: list[dict[str, Any]] = []
-            bottleneck_c: int | None = None
 
             async with httpx.AsyncClient(
                 transport=transport, base_url="http://testserver", timeout=120.0
             ) as client:
                 # Warmup
-                headers = _stream_headers("2", deadline_offset_ms=120000)
-                await _one_stream_request(client, body, headers, "/rpc/sb5")
+                warmup_headers = _stream_headers("2", deadline_offset_ms=120000)
+                await _one_stream_request(client, body, warmup_headers, "/rpc/sb5")
 
-                for c in _C_SEQUENCE:
-                    round_latencies: list[float] = []
-                    round_qps_list: list[float] = []
-                    headers = _stream_headers("2", deadline_offset_ms=120000)
-
-                    for _ in range(_ROUNDS_PER_C):
-                        tasks = [
-                            _one_stream_request(client, body, headers, "/rpc/sb5")
-                            for _ in range(c)
-                        ]
-                        t_round = time.perf_counter()
-                        latencies = await asyncio.gather(*tasks)
-                        wall_clock_s = time.perf_counter() - t_round
-                        round_latencies.extend(latencies)
-                        round_qps_list.append(c / (wall_clock_s + 1e-9))
-
-                    pcts = _percentiles(round_latencies)
-                    qps = round(mean(round_qps_list), 2)
-
-                    entry = {
-                        "c": c,
-                        "p50_ms": pcts["p50"],
-                        "p90_ms": pcts["p90"],
-                        "p99_ms": pcts["p99"],
-                        "qps": qps,
-                    }
-                    results.append(entry)
-                    print(
-                        f"\n[SB5] C={c:3d}: p50={pcts['p50']:.0f}ms "
-                        f"p90={pcts['p90']:.0f}ms p99={pcts['p99']:.0f}ms qps={qps}"
-                    )
-
-                    if pcts["p90"] > _BOTTLENECK_THRESHOLD_MS:
-                        bottleneck_c = c
-                        print(
-                            f"[SB5] Bottleneck at C={c} "
-                            f"(p90={pcts['p90']:.0f}ms > {_BOTTLENECK_THRESHOLD_MS:.0f}ms)"
-                        )
-                        break
+                results, bottleneck_c = await _run_concurrency_bench(
+                    client, body, "/rpc/sb5", "SB5", "2"
+                )
 
             result = {
                 "benchmark": "SB5_http_fullduplex_large_body",

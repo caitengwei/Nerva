@@ -62,7 +62,7 @@ class BenchStreamingModel(Model):
 - [ ] **Step 2: 验证 lint 通过**
 
 ```bash
-cd /Users/twcai/workspace/twcai/Nerva/.worktrees/bidir_stream_perf
+# run from repo/worktree root
 uv run ruff check tests/helpers.py
 ```
 
@@ -71,7 +71,7 @@ Expected: no errors.
 - [ ] **Step 3: 验证模型基本行为（Python 交互式快速检查）**
 
 ```bash
-cd /Users/twcai/workspace/twcai/Nerva/.worktrees/bidir_stream_perf
+# run from repo/worktree root
 uv run python -c "
 import asyncio
 from tests.helpers import BenchStreamingModel
