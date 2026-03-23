@@ -219,3 +219,33 @@ class BenchClassifier(Model):
         if delay_ms > 0:
             await asyncio.sleep(delay_ms / 1000.0)
         return {"label": "cat", "score": 0.95}
+
+
+class BenchStreamingModel(Model):
+    """Streaming bench model: yields `count` chunks of `chunk_size` bytes each.
+
+    Options:
+        count (int, default 100): number of chunks to yield.
+        chunk_size (int, default 1024): bytes per chunk.
+        delay_ms (float, default 30): sleep between chunks (simulates inference).
+    Output per chunk: {"chunk": i, "payload": bytes}
+    """
+
+    def load(self) -> None:
+        pass
+
+    async def infer(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        chunk_size = int(self._options.get("chunk_size", 1024))
+        return {"chunk": 0, "payload": b"x" * chunk_size}
+
+    async def infer_stream(self, inputs: dict[str, Any]):  # type: ignore[override]
+        import asyncio
+
+        count = int(self._options.get("count", 100))
+        chunk_size = int(self._options.get("chunk_size", 1024))
+        delay_ms = float(self._options.get("delay_ms", 30))
+        payload = b"x" * chunk_size
+        for i in range(count):
+            if delay_ms > 0:
+                await asyncio.sleep(delay_ms / 1000.0)
+            yield {"chunk": i, "payload": payload}
