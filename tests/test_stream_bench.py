@@ -155,38 +155,46 @@ class TestSB1ExecutorStreamOverhead:
 
 
 # ---------------------------------------------------------------------------
-# SB2: WorkerProxy infer_stream IPC throughput
+# SB2: WorkerProxy infer_stream IPC latency consistency
 # ---------------------------------------------------------------------------
+
+_SB2_COUNT = 100
+_SB2_DELAY_MS = 30
+_SB2_THEORETICAL_MS = _SB2_COUNT * _SB2_DELAY_MS  # 3000ms
 
 
 @pytest.mark.slow
-class TestSB2WorkerProxyStreamThroughput:
-    """SB2: WorkerProxy.infer_stream() IPC throughput — real Worker, delay_ms=0."""
+class TestSB2WorkerProxyStreamLatency:
+    """SB2: WorkerProxy.infer_stream() latency consistency — real Worker, realistic delay.
 
-    async def test_worker_proxy_stream_throughput(self) -> None:
+    Measures how close actual stream latency is to theoretical (count * delay_ms).
+    The gap reveals IPC + serialization overhead under realistic conditions.
+    """
+
+    async def test_worker_proxy_stream_latency(self) -> None:
         handle = model(
             "sb2-bench-stream",
             BenchStreamingModel,
             backend="pytorch",
             device="cpu",
-            count=5,
+            count=_SB2_COUNT,
             chunk_size=1024,
-            delay_ms=0,
+            delay_ms=_SB2_DELAY_MS,
         )
         manager = WorkerManager()
         try:
             proxy = await manager.start_worker(handle)
 
-            n_iters = 20
+            n_iters = 5
             latencies_ms: list[float] = []
 
             # Warmup
-            ctx = InferContext(request_id="sb2-warmup", deadline_ms=30000)
+            ctx = InferContext(request_id="sb2-warmup", deadline_ms=60000)
             async for _ in proxy.infer_stream({}, ctx):
                 pass
 
             for i in range(n_iters):
-                ctx = InferContext(request_id=f"sb2-{i}", deadline_ms=30000)
+                ctx = InferContext(request_id=f"sb2-{i}", deadline_ms=60000)
                 t0 = time.perf_counter()
                 async for _ in proxy.infer_stream({}, ctx):
                     pass
@@ -194,22 +202,26 @@ class TestSB2WorkerProxyStreamThroughput:
                 latencies_ms.append(elapsed_ms)
 
             pcts = _percentiles(latencies_ms)
-            n_chunks_per_stream = 5  # matches count=5 model option above
-            chunks_per_sec = round(n_chunks_per_stream * 1000 / mean(latencies_ms), 1)
+            avg_ms = mean(latencies_ms)
+            overhead_ms = round(avg_ms - _SB2_THEORETICAL_MS, 2)
 
             result = {
-                "benchmark": "SB2_worker_proxy_stream_throughput",
-                "description": "WorkerProxy.infer_stream() serial, count=5, chunk_size=1024, delay_ms=0",
+                "benchmark": "SB2_worker_proxy_stream_latency",
+                "description": (
+                    f"WorkerProxy.infer_stream() serial, count={_SB2_COUNT}, "
+                    f"chunk_size=1024, delay_ms={_SB2_DELAY_MS}"
+                ),
                 "iterations": n_iters,
-                "avg_ms": round(mean(latencies_ms), 3),
+                "theoretical_ms": _SB2_THEORETICAL_MS,
+                "avg_ms": round(avg_ms, 1),
+                "overhead_ms": overhead_ms,
                 "latency_ms": pcts,
-                "chunks_per_sec": chunks_per_sec,
                 "env": _env_info(),
             }
-            _save_result("SB2_worker_proxy_stream_throughput", result)
+            _save_result("SB2_worker_proxy_stream_latency", result)
             print(
-                f"\n[SB2] IPC throughput: avg={mean(latencies_ms):.1f}ms, "
-                f"p95={pcts['p95']:.1f}ms, {chunks_per_sec} chunks/s"
+                f"\n[SB2] IPC latency: avg={avg_ms:.0f}ms (theoretical={_SB2_THEORETICAL_MS}ms, "
+                f"overhead={overhead_ms:+.1f}ms) p95={pcts['p95']:.0f}ms"
             )
         finally:
             await manager.shutdown_all()
@@ -222,19 +234,21 @@ class TestSB2WorkerProxyStreamThroughput:
 
 @pytest.mark.slow
 class TestSB3E2EStreamLatency:
-    """SB3: E2E execute_stream() TTFT and full-stream latency — real Worker."""
+    """SB3: E2E execute_stream() TTFT and full-stream latency — real Worker, realistic delay.
+
+    TTFT ≈ first delay_ms (time to receive first chunk through IPC + executor).
+    Full stream ≈ count * delay_ms (theoretical). Gap shows E2E stack overhead.
+    """
 
     async def test_e2e_stream_latency(self) -> None:
-        from nerva.server.serve import _PipelineExecutor  # noqa: F401
-
         handle = model(
             "sb3-bench-stream",
             BenchStreamingModel,
             backend="pytorch",
             device="cpu",
-            count=5,
+            count=100,
             chunk_size=1024,
-            delay_ms=0,
+            delay_ms=30,
         )
         graph = trace(lambda inp: handle(inp))
         manager = WorkerManager()
@@ -242,19 +256,19 @@ class TestSB3E2EStreamLatency:
             executors, _ = await _build_pipelines({"sb3": graph}, manager)
             pipeline_executor = executors["sb3"]
 
-            n_iters = 20
+            n_iters = 5
             ttft_ms_list: list[float] = []
             full_ms_list: list[float] = []
 
             # Warmup
-            async for _ in pipeline_executor.execute_stream({}, deadline_ms=30000, request_id="sb3-warmup"):
+            async for _ in pipeline_executor.execute_stream({}, deadline_ms=60000, request_id="sb3-warmup"):
                 pass
 
             for i in range(n_iters):
                 t_start = time.perf_counter()
                 t_first: float | None = None
                 async for _ in pipeline_executor.execute_stream(
-                    {}, deadline_ms=30000, request_id=f"sb3-{i}"
+                    {}, deadline_ms=60000, request_id=f"sb3-{i}"
                 ):
                     if t_first is None:
                         t_first = time.perf_counter()
@@ -268,22 +282,24 @@ class TestSB3E2EStreamLatency:
 
             result = {
                 "benchmark": "SB3_e2e_stream_latency",
-                "description": "E2E execute_stream() serial, count=5, chunk_size=1024, delay_ms=0",
+                "description": "E2E execute_stream() serial, count=100, chunk_size=1024, delay_ms=30",
                 "iterations": n_iters,
+                "theoretical_ttft_ms": 30,
+                "theoretical_full_ms": 3000,
                 "ttft_ms": {
-                    "avg": round(mean(ttft_ms_list), 3),
+                    "avg": round(mean(ttft_ms_list), 1),
                     **ttft_pcts,
                 },
                 "full_stream_ms": {
-                    "avg": round(mean(full_ms_list), 3),
+                    "avg": round(mean(full_ms_list), 1),
                     **full_pcts,
                 },
                 "env": _env_info(),
             }
             _save_result("SB3_e2e_stream_latency", result)
             print(
-                f"\n[SB3] TTFT: avg={mean(ttft_ms_list):.1f}ms p95={ttft_pcts['p95']:.1f}ms | "
-                f"Full: avg={mean(full_ms_list):.1f}ms p95={full_pcts['p95']:.1f}ms"
+                f"\n[SB3] TTFT: avg={mean(ttft_ms_list):.1f}ms (theoretical=30ms) | "
+                f"Full: avg={mean(full_ms_list):.0f}ms (theoretical=3000ms)"
             )
         finally:
             await manager.shutdown_all()
