@@ -312,6 +312,8 @@ git commit -m "test(bench): implement SB1 executor execute_stream overhead"
 
 ## Task 4: 实现 SB2 — WorkerProxy infer_stream IPC 吞吐
 
+> **设计更新：** 实际实现改为 count=100, delay_ms=30ms, n_iters=5，测量 overhead_ms（非 chunks/s）。见最终实现代码。
+
 **Files:**
 - Modify: `tests/test_stream_bench.py`
 
@@ -401,6 +403,8 @@ git commit -m "test(bench): implement SB2 WorkerProxy infer_stream IPC throughpu
 ---
 
 ## Task 5: 实现 SB3 — E2E 单流延迟（TTFT + 全流）
+
+> **设计更新：** 实际实现改为 count=100, delay_ms=30ms, n_iters=5，新增 theoretical_ttft_ms/theoretical_full_ms 输出字段。见最终实现代码。
 
 **Files:**
 - Modify: `tests/test_stream_bench.py`

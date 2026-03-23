@@ -25,7 +25,7 @@ from nerva.backends.base import InferContext
 from nerva.core.graph import Graph, Node
 from nerva.engine.executor import Executor
 from nerva.server.app import build_app
-from nerva.server.protocol import Frame, FrameType, encode_frame
+from nerva.server.protocol import Frame, FrameType, decode_frame, encode_frame
 from nerva.server.serve import _build_pipelines
 from nerva.worker.manager import WorkerManager
 from tests.helpers import BenchStreamingModel
@@ -81,6 +81,22 @@ def _make_request_body(pipeline: str, inputs: dict[str, Any], request_id: int = 
     frames += encode_frame(Frame(FrameType.DATA, request_id, 0, msgpack.packb(inputs, use_bin_type=True)))
     frames += encode_frame(Frame(FrameType.END, request_id, 0, b""))
     return frames
+
+
+def _validate_stream_frames(data: bytes) -> None:
+    """Decode binary frames; assert at least one DATA and one END frame exist."""
+    offset = 0
+    seen_data = False
+    seen_end = False
+    while offset < len(data):
+        frame, consumed = decode_frame(data, offset)
+        if frame.frame_type == FrameType.DATA:
+            seen_data = True
+        elif frame.frame_type == FrameType.END:
+            seen_end = True
+        offset += consumed
+    assert seen_data, "response contains no DATA frame"
+    assert seen_end, "response contains no END frame"
 
 
 def _stream_headers(mode: str = "1", deadline_offset_ms: int = 60000) -> dict[str, str]:
@@ -190,15 +206,23 @@ class TestSB2WorkerProxyStreamLatency:
 
             # Warmup
             ctx = InferContext(request_id="sb2-warmup", deadline_ms=60000)
+            warmup_chunks = 0
             async for _ in proxy.infer_stream({}, ctx):
-                pass
+                warmup_chunks += 1
+            assert warmup_chunks == _SB2_COUNT, (
+                f"warmup: expected {_SB2_COUNT} chunks, got {warmup_chunks}"
+            )
 
             for i in range(n_iters):
                 ctx = InferContext(request_id=f"sb2-{i}", deadline_ms=60000)
                 t0 = time.perf_counter()
+                chunk_count = 0
                 async for _ in proxy.infer_stream({}, ctx):
-                    pass
+                    chunk_count += 1
                 elapsed_ms = (time.perf_counter() - t0) * 1000
+                assert chunk_count == _SB2_COUNT, (
+                    f"iter {i}: expected {_SB2_COUNT} chunks, got {chunk_count}"
+                )
                 latencies_ms.append(elapsed_ms)
 
             pcts = _percentiles(latencies_ms)
@@ -323,8 +347,11 @@ async def _one_stream_request(
 ) -> float:
     """Issue one streaming POST and return total latency in ms."""
     t0 = time.perf_counter()
-    await client.post(url, content=body, headers=headers)
-    return (time.perf_counter() - t0) * 1000
+    resp = await client.post(url, content=body, headers=headers)
+    latency_ms = (time.perf_counter() - t0) * 1000
+    # Validate frame structure after timing to avoid skewing measurements
+    _validate_stream_frames(resp.content)
+    return latency_ms
 
 
 @pytest.mark.slow
