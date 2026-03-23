@@ -358,6 +358,12 @@ class Executor:
             return
 
         terminal_node = pc.node_map[last_node_id]
+        if terminal_node.node_type != "call":
+            raise RuntimeError(
+                f"execute_stream() requires the terminal graph node to be a 'call' node; "
+                f"got node_type={terminal_node.node_type!r}. "
+                f"Streaming for cond/parallel terminal nodes is not supported."
+            )
         terminal_proxy = self._proxies[terminal_node.model_name]
         if not isinstance(terminal_proxy, InferableStreamProxy):
             raise TypeError(

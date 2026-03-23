@@ -410,6 +410,29 @@ class TestExecutorStream:
             async for _ in executor.execute_stream({}):
                 pass
 
+    async def test_execute_stream_non_call_terminal_raises_runtime_error(self) -> None:
+        """execute_stream() with a cond/parallel terminal raises RuntimeError, not KeyError."""
+        g = Graph()
+        true_branch: Graph = Graph()
+        true_branch.add_node(Node(id="a_1", model_name="a"))
+        false_branch: Graph = Graph()
+        false_branch.add_node(Node(id="b_1", model_name="b"))
+        cond_node = Node(
+            id="cond_1",
+            model_name="cond",
+            node_type="cond",
+            true_branch=true_branch,
+            false_branch=false_branch,
+        )
+        g.add_node(cond_node)
+
+        ctx = make_context()
+        executor = Executor(g, {}, ctx)
+
+        with pytest.raises(RuntimeError, match="call"):
+            async for _ in executor.execute_stream({}):
+                pass
+
     async def test_infer_stream_protocol_isinstance(self) -> None:
         """InferableStreamProxy is @runtime_checkable."""
         streaming = make_streaming_proxy([])

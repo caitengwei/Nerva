@@ -252,6 +252,61 @@ class TestWorkerProxyInferStream:
         assert "req-s1" not in proxy._pending_stream
 
 
+class TestWorkerProxyRequestIdCollision:
+    """Cross-dict collision detection between _pending and _pending_stream."""
+
+    async def test_infer_stream_rejects_id_already_in_pending_unary(
+        self,
+        monkeypatch,  # type: ignore[no-untyped-def]
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """infer_stream() raises if request_id is already in _pending (unary in flight)."""
+        proxy = WorkerProxy(os.path.join(tmp_path, "unused.sock"))
+        fake_future: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        proxy._pending["dup-001"] = fake_future
+        try:
+            ctx = InferContext(request_id="dup-001", deadline_ms=5000)
+            with pytest.raises(RuntimeError, match="Duplicate"):
+                async for _ in proxy.infer_stream({}, ctx):
+                    pass
+        finally:
+            proxy._pending.pop("dup-001", None)
+            fake_future.cancel()
+
+    async def test_infer_rejects_id_already_in_pending_stream(
+        self,
+        monkeypatch,  # type: ignore[no-untyped-def]
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """infer() raises if request_id is already in _pending_stream (stream in flight)."""
+        proxy = WorkerProxy(os.path.join(tmp_path, "unused.sock"))
+        proxy._pending_stream["dup-002"] = asyncio.Queue()
+        try:
+            ctx = InferContext(request_id="dup-002", deadline_ms=5000)
+            with pytest.raises(RuntimeError, match="Duplicate"):
+                await proxy.infer({}, ctx)
+        finally:
+            proxy._pending_stream.pop("dup-002", None)
+
+    async def test_infer_stream_timeout_maps_to_deadline_exceeded(
+        self,
+        monkeypatch,  # type: ignore[no-untyped-def]
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """asyncio.wait_for timeout in infer_stream() raises RuntimeError with DEADLINE_EXCEEDED."""
+        proxy = WorkerProxy(os.path.join(tmp_path, "unused.sock"), submit_timeout=0.01)
+
+        async def _never_send(msg: dict[str, Any]) -> None:
+            pass  # Drop message — chunk_queue.get() will time out.
+
+        monkeypatch.setattr(proxy, "_send", _never_send)
+
+        ctx = InferContext(request_id="timeout-001", deadline_ms=5000)
+        with pytest.raises(RuntimeError, match="DEADLINE_EXCEEDED"):
+            async for _ in proxy.infer_stream({}, ctx):
+                pass
+
+
 class TestWorkerProxyShmAllocContention:
     async def test_competing_alloc_requests(
         self,

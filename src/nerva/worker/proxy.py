@@ -235,7 +235,7 @@ class WorkerProxy:
             )
 
         loop = asyncio.get_running_loop()
-        if request_id in self._pending:
+        if request_id in self._pending or request_id in self._pending_stream:
             raise RuntimeError(f"Duplicate in-flight request_id '{request_id}'")
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[request_id] = fut
@@ -358,9 +358,15 @@ class WorkerProxy:
             })
 
             while True:
-                ack = await asyncio.wait_for(
-                    chunk_queue.get(), timeout=self._submit_timeout
-                )
+                try:
+                    ack = await asyncio.wait_for(
+                        chunk_queue.get(), timeout=self._submit_timeout
+                    )
+                except TimeoutError as exc:
+                    raise RuntimeError(
+                        f"DEADLINE_EXCEEDED: chunk wait timed out after "
+                        f"{self._submit_timeout}s (no response from worker)"
+                    ) from exc
                 status = ack.get("status", "")
                 stream_done = ack.get("stream_done", True)
 
