@@ -1,5 +1,6 @@
 # scripts/bench/remote/_common.py
 from __future__ import annotations
+
 import json
 import subprocess
 import sys
@@ -30,7 +31,7 @@ def gpu_info() -> list[dict[str, Any]]:
             ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
             text=True,
         )
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
         return []
     gpus = []
     for line in out.strip().splitlines():
@@ -46,7 +47,10 @@ PROFILER_STATE_FILE = Path("/tmp/nerva-bench-profilers.json")
 
 def load_state(path: Path) -> dict[str, Any]:
     if path.exists():
-        return json.loads(path.read_text())
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            return {}
     return {}
 
 
