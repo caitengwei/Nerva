@@ -12,7 +12,7 @@
 
 ## 约束与上下文
 
-- **远程机器**: `ssh tengwei.ctw@11.160.41.175`，NVIDIA P100×2，Docker 可用
+- **远程机器**: `ssh ${REMOTE_BENCH_USER}@${REMOTE_BENCH_HOST}`，NVIDIA P100×2，Docker 可用；实际用户名和主机地址应存放在本地环境变量或未提交的本地配置中，不写入仓库
 - **代码**: 远程已有 `git clone`，通过 `git pull` 更新
 - **压测目标**: Nerva vs vLLM vs Triton 全对比
 - **运行模式**: Mock（测框架开销）+ Real（真实小模型端到端）
