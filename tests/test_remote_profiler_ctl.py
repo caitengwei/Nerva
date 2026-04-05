@@ -53,6 +53,38 @@ def test_start_profiler_pyspy_returns_info(tmp_path):
     assert "flamegraph" in info["output"]
 
 
+def test_start_profiler_nsys_requires_pid(tmp_path):
+    with pytest.raises(ValueError, match="--pid required for nsys"):
+        start_profiler(profiler_type="nsys", target_pid=None, output_dir=tmp_path)
+
+
+def test_start_profiler_nsys_returns_info(tmp_path):
+    mock_proc = MagicMock()
+    mock_proc.pid = 4321
+    with patch("subprocess.Popen", return_value=mock_proc):
+        info = start_profiler(profiler_type="nsys", target_pid=1234, output_dir=tmp_path)
+    assert info["type"] == "nsys"
+    assert info["target_pid"] == 1234
+    assert info["status"] == "running"
+    assert info["output"].endswith(".nsys-rep")
+
+
+def test_start_profiler_perf_stat_requires_pid(tmp_path):
+    with pytest.raises(ValueError, match="--pid required for perf-stat"):
+        start_profiler(profiler_type="perf-stat", target_pid=None, output_dir=tmp_path)
+
+
+def test_start_profiler_perf_stat_returns_info(tmp_path):
+    mock_proc = MagicMock()
+    mock_proc.pid = 8765
+    with patch("builtins.open", MagicMock()), patch("subprocess.Popen", return_value=mock_proc):
+        info = start_profiler(profiler_type="perf-stat", target_pid=1234, output_dir=tmp_path)
+    assert info["type"] == "perf-stat"
+    assert info["target_pid"] == 1234
+    assert info["status"] == "running"
+    assert "perf_stat" in info["output"]
+
+
 def test_stop_profilers_sends_sigint():
     state = {"py-spy-1234": {"type": "py-spy", "pid": 5678, "target_pid": 1234}}
     with patch("os.kill") as mock_kill, patch("time.sleep"):
