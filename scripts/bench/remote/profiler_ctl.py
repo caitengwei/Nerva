@@ -169,6 +169,7 @@ def _cli(argv: list[str] | None = None) -> argparse.Namespace:
 
     stop_p = sub.add_parser("stop")
     stop_p.add_argument("--all", action="store_true")
+    stop_p.add_argument("--key", default=None, help="stop a single profiler by key (e.g. py-spy-1234)")
 
     sub.add_parser("list")
 
@@ -199,8 +200,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.command == "stop":
+        if not args.all and not args.key:
+            emit_json({"error": "stop requires --all or --key <key>", "step": "stop"})
+            return 1
         state = load_state(PROFILER_STATE_FILE)
-        stopped = stop_profilers(state, all_=args.all)
+        stopped = stop_profilers(state, all_=args.all, key=args.key)
         for k in stopped:
             state.pop(k, None)
         save_state(PROFILER_STATE_FILE, state)

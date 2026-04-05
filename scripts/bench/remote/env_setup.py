@@ -12,14 +12,15 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import structlog
+from scripts.bench.infra.perf_compare_scenario import DEFAULT_TRITON_IMAGE, DEFAULT_VLLM_IMAGE
 from scripts.bench.remote._common import (
     emit_json,
     gpu_info,
     init_logging,
 )
 
-VLLM_IMAGE = "vllm/vllm-openai:latest"
-TRITON_IMAGE = "nvcr.io/nvidia/tritonserver:24.05-py3"
+VLLM_IMAGE = DEFAULT_VLLM_IMAGE
+TRITON_IMAGE = DEFAULT_TRITON_IMAGE
 TIMING_DIR = Path("/tmp/nerva_timing")
 PROFILE_DIR = Path("/tmp/profile")
 
@@ -103,12 +104,16 @@ def main(argv: list[str] | None = None) -> int:
             emit_json({"error": str(e), "step": "git_pull"})
             return 1
     else:
-        commit = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True
-        ).strip()
-        branch = subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True
-        ).strip()
+        try:
+            commit = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"], text=True
+            ).strip()
+            branch = subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True
+            ).strip()
+        except (subprocess.CalledProcessError, OSError) as e:
+            emit_json({"error": str(e), "step": "git_rev_parse"})
+            return 1
         result["git_commit"] = commit
         result["git_branch"] = branch
 

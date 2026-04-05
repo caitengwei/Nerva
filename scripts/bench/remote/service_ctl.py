@@ -72,18 +72,37 @@ def start_nerva(scenario_cmd: list[str], *, log_path: Path = NERVA_LOG) -> dict[
         )
     endpoint = f"http://127.0.0.1:{NERVA_PORT}"
     if not _wait_http_ok(f"{endpoint}/v1/health"):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         raise RuntimeError(
-            f"Nerva health check timed out after {HEALTH_TIMEOUT}s. Log: {log_path}"
+            f"Nerva health check timed out after {HEALTH_TIMEOUT}s. "
+            f"pid={proc.pid} Log: {log_path}"
         )
     return {"pid": proc.pid, "endpoint": endpoint, "log": str(log_path)}
 
 
+def _inject_detach(cmd: list[str]) -> list[str]:
+    """Ensure 'docker run' is detached (-d) so it returns immediately with the container ID."""
+    if (
+        len(cmd) >= 2
+        and cmd[0] in ("docker", "podman")
+        and cmd[1] == "run"
+        and "-d" not in cmd
+        and "--detach" not in cmd
+    ):
+        return [cmd[0], cmd[1], "-d", *cmd[2:]]
+    return cmd
+
+
 def start_vllm(container_cmd: list[str]) -> dict[str, Any]:
-    """Start vLLM docker container, wait for health check."""
-    result = subprocess.run(container_cmd, capture_output=True, text=True)
+    """Start vLLM docker container in detached mode, wait for health check."""
+    cmd = _inject_detach(container_cmd)
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"vLLM container start failed:\n{result.stderr}")
     container_id = result.stdout.strip()
+    if not container_id:
+        raise RuntimeError("vLLM docker run returned no container ID — was it run without -d?")
     endpoint = f"http://127.0.0.1:{VLLM_PORT}"
     ready = subprocess.run(
         [
@@ -130,20 +149,25 @@ def start_triton(
                 start_new_session=True,
             )
         if not _wait_http_ok(f"{endpoint}/v2/health/ready"):
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             raise RuntimeError(
                 f"Triton mock health check timed out after {HEALTH_TIMEOUT}s. "
-                f"Log: {log_path}"
+                f"pid={proc.pid} Log: {log_path}"
             )
         return {"pid": proc.pid, "endpoint": endpoint, "log": str(log_path)}
 
-    # Real mode — prepare repo (blocking), then launch container.
+    # Real mode — prepare repo (blocking), then launch container in detached mode.
     prep = subprocess.run(prepare_cmd, capture_output=True, text=True)
     if prep.returncode != 0:
         raise RuntimeError(f"Triton prepare failed:\n{prep.stderr}")
-    result = subprocess.run(container_cmd, capture_output=True, text=True)
+    cmd = _inject_detach(container_cmd)
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"Triton container start failed:\n{result.stderr}")
     container_id = result.stdout.strip()
+    if not container_id:
+        raise RuntimeError("Triton docker run returned no container ID — was it run without -d?")
     ready = subprocess.run(
         [
             sys.executable,
@@ -287,12 +311,13 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     continue
                 state[target] = info
+                save_state(STATE_FILE, state)  # persist after each start so partial state survives failure
                 out[target] = {**info, "status": "running", "health": "ok"}
             except RuntimeError as e:
                 emit_json({"error": str(e), "step": f"start_{target}"})
                 return 1
 
-        save_state(STATE_FILE, state)
+
         emit_json(out)
         return 0
 
