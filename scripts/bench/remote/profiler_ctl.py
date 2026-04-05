@@ -6,9 +6,13 @@ import contextlib
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from scripts.bench.remote._common import (
     PROFILER_STATE_FILE,

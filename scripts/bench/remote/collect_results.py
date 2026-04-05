@@ -4,9 +4,13 @@ from __future__ import annotations
 import argparse
 import datetime
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from scripts.bench.remote._common import emit_json, init_logging
 
