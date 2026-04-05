@@ -33,12 +33,15 @@ def git_pull() -> dict[str, str]:
     )
     if result.returncode != 0:
         raise RuntimeError(f"git pull failed:\n{result.stderr}")
-    commit = subprocess.check_output(
-        ["git", "rev-parse", "--short", "HEAD"], text=True
-    ).strip()
-    branch = subprocess.check_output(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True
-    ).strip()
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], text=True
+        ).strip()
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True
+        ).strip()
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"git rev-parse failed:\n{exc.output or str(exc)}") from exc
     return {"git_commit": commit, "git_branch": branch}
 
 

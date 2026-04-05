@@ -194,9 +194,13 @@ def main(argv: list[str] | None = None) -> int:
             emit_json({"error": str(e), "step": "start_profiler"})
             return 1
         key = _make_key(args.type, args.pid)
+        if key in state:
+            # Stop any existing profiler under this key before replacing to avoid orphans.
+            stop_profilers(state, key=key)
+            state.pop(key, None)
         state[key] = info
         save_state(PROFILER_STATE_FILE, state)
-        emit_json({"profilers": [info]})
+        emit_json({"profilers": [{"key": key, **info}]})
         return 0
 
     elif args.command == "stop":
@@ -213,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
 
     elif args.command == "list":
         state = load_state(PROFILER_STATE_FILE)
-        emit_json({"profilers": list(state.values())})
+        emit_json({"profilers": [{"key": k, **info} for k, info in state.items()]})
         return 0
 
     return 0

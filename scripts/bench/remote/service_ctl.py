@@ -286,7 +286,11 @@ def main(argv: list[str] | None = None) -> int:
     log = structlog.get_logger()
 
     if args.command == "start":
-        targets = _parse_targets(args.targets)
+        try:
+            targets = _parse_targets(args.targets)
+        except ValueError as e:
+            emit_json({"error": str(e), "step": "parse_targets"})
+            return 1
         state = load_state(STATE_FILE)
 
         if args.mode == "mock":
@@ -311,7 +315,9 @@ def main(argv: list[str] | None = None) -> int:
                     info = start_nerva(scenario.nerva_server_cmd)
                 elif target == "vllm":
                     if args.mode == "mock":
-                        log.info("skipping vllm in mock mode")
+                        log.info("skipping vllm in mock mode; clearing any stale state")
+                        if state.pop("vllm", None) is not None:
+                            save_state(STATE_FILE, state)
                         continue
                     info = start_vllm(scenario.vllm_container_cmd)
                 elif target == "triton":
@@ -330,7 +336,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.command == "stop":
-        targets = _parse_targets(args.targets)
+        try:
+            targets = _parse_targets(args.targets)
+        except ValueError as e:
+            emit_json({"error": str(e), "step": "parse_targets"})
+            return 1
         state = load_state(STATE_FILE)
         stop_services(targets, state)
         for t in targets:

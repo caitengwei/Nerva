@@ -64,7 +64,8 @@ def test_stop_services_docker_stops_container():
 def test_service_status_returns_unreachable_for_dead_service():
     from urllib.error import URLError
     state = {"nerva": {"pid": 9999, "endpoint": "http://127.0.0.1:8080"}}
-    with patch("urllib.request.urlopen", side_effect=URLError("refused")):
+    with patch("scripts.bench.remote.service_ctl._NO_PROXY_OPENER") as mock_opener:
+        mock_opener.open.side_effect = URLError("refused")
         result = service_status(state)
     assert result["nerva"]["health"] == "unreachable"
     assert result["nerva"]["status"] == "unhealthy"
