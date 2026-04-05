@@ -110,9 +110,10 @@ def start_profiler(
         if target_pid is None:
             raise ValueError("--pid required for perf-stat")
         output = output_dir / f"perf_stat-{target_pid}.txt"
-        with open(output, "w") as fh:
-            cmd = ["perf", "stat", "-p", str(target_pid), "sleep", str(duration)]
-            proc = subprocess.Popen(cmd, stdout=fh, stderr=fh)
+        out_fh = open(output, "w")  # noqa: SIM115 — fd intentionally left open for subprocess
+        cmd = ["perf", "stat", "-p", str(target_pid), "sleep", str(duration)]
+        proc = subprocess.Popen(cmd, stdout=out_fh, stderr=out_fh)
+        out_fh.close()  # parent closes its copy; child inherits fd and keeps it open
         return {
             "type": "perf-stat",
             "pid": proc.pid,

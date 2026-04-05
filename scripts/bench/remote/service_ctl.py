@@ -100,8 +100,43 @@ def start_vllm(container_cmd: list[str]) -> dict[str, Any]:
     return {"container_id": container_id, "endpoint": endpoint}
 
 
-def start_triton(prepare_cmd: list[str], container_cmd: list[str]) -> dict[str, Any]:
-    """Prepare Triton model repo and start container, wait for health check."""
+TRITON_LOG = Path("/tmp/bench-triton-mock.log")
+
+
+def start_triton(
+    prepare_cmd: list[str],
+    container_cmd: list[str],
+    *,
+    log_path: Path = TRITON_LOG,
+) -> dict[str, Any]:
+    """Prepare Triton model repo and start container (or mock server), wait for health check.
+
+    Mock mode: container_cmd is empty; prepare_cmd is a Python process that serves Triton
+    directly and must be started in the background via Popen.
+
+    Real mode: prepare_cmd is a blocking repo-prep script; container_cmd launches a container.
+    """
+    endpoint = f"http://127.0.0.1:{TRITON_HTTP_PORT}"
+
+    if not container_cmd:
+        # Mock mode — prepare_cmd IS the server process; run it in the background.
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "w") as log_fh:
+            proc = subprocess.Popen(
+                prepare_cmd,
+                stdout=log_fh,
+                stderr=log_fh,
+                env=_env_no_proxy(),
+                start_new_session=True,
+            )
+        if not _wait_http_ok(f"{endpoint}/v2/health/ready"):
+            raise RuntimeError(
+                f"Triton mock health check timed out after {HEALTH_TIMEOUT}s. "
+                f"Log: {log_path}"
+            )
+        return {"pid": proc.pid, "endpoint": endpoint, "log": str(log_path)}
+
+    # Real mode — prepare repo (blocking), then launch container.
     prep = subprocess.run(prepare_cmd, capture_output=True, text=True)
     if prep.returncode != 0:
         raise RuntimeError(f"Triton prepare failed:\n{prep.stderr}")
@@ -109,7 +144,6 @@ def start_triton(prepare_cmd: list[str], container_cmd: list[str]) -> dict[str, 
     if result.returncode != 0:
         raise RuntimeError(f"Triton container start failed:\n{result.stderr}")
     container_id = result.stdout.strip()
-    endpoint = f"http://127.0.0.1:{TRITON_HTTP_PORT}"
     ready = subprocess.run(
         [
             sys.executable,
@@ -146,6 +180,18 @@ def stop_services(targets: list[str], state: dict[str, Any]) -> None:
             cid = info.get("container_id")
             if cid:
                 subprocess.run(["docker", "stop", cid], capture_output=True)
+            else:
+                # Mock mode: service was started as a background process (pid-based).
+                pid = info.get("pid")
+                if pid:
+                    try:
+                        pgid = os.getpgid(pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                        time.sleep(2)
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(pgid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
 
 def service_status(state: dict[str, Any]) -> dict[str, Any]:
