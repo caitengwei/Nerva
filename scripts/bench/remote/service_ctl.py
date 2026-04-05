@@ -37,12 +37,16 @@ TRITON_HTTP_PORT = 8002
 HEALTH_TIMEOUT = 180  # seconds
 
 
+_NO_PROXY_OPENER = request.build_opener(request.ProxyHandler({}))
+
+
 def _wait_http_ok(url: str, timeout_s: float = HEALTH_TIMEOUT) -> bool:
-    """Poll URL until HTTP 200 or timeout. Returns True if ok."""
+    """Poll URL until HTTP 200 or timeout. Uses a proxy-disabled opener to avoid
+    all_proxy/http_proxy interfering with 127.0.0.1 health checks."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         try:
-            with request.urlopen(url, timeout=3) as r:
+            with _NO_PROXY_OPENER.open(url, timeout=3) as r:
                 if r.status == 200:
                     return True
         except (URLError, OSError):
@@ -113,8 +117,10 @@ def start_vllm(container_cmd: list[str]) -> dict[str, Any]:
             "--timeout-seconds", str(HEALTH_TIMEOUT),
         ],
         capture_output=True, text=True,
+        env=_env_no_proxy(),
     )
     if ready.returncode != 0:
+        subprocess.run(["docker", "stop", container_id], capture_output=True)
         raise RuntimeError(f"vLLM health check timed out. Container: {container_id}")
     return {"container_id": container_id, "endpoint": endpoint}
 
@@ -177,8 +183,10 @@ def start_triton(
             "--timeout-seconds", str(HEALTH_TIMEOUT),
         ],
         capture_output=True, text=True,
+        env=_env_no_proxy(),
     )
     if ready.returncode != 0:
+        subprocess.run(["docker", "stop", container_id], capture_output=True)
         raise RuntimeError(f"Triton health check timed out. Container: {container_id}")
     return {"container_id": container_id, "endpoint": endpoint}
 
@@ -233,7 +241,7 @@ def service_status(state: dict[str, Any]) -> dict[str, Any]:
         endpoint = info.get("endpoint", "")
         url = endpoint + health_paths.get(target, "/health")
         try:
-            with request.urlopen(url, timeout=3) as r:
+            with _NO_PROXY_OPENER.open(url, timeout=3) as r:
                 health = "ok" if r.status == 200 else f"http_{r.status}"
         except (URLError, OSError):
             health = "unreachable"

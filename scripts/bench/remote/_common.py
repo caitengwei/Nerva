@@ -49,10 +49,13 @@ def load_state(path: Path) -> dict[str, Any]:
     if path.exists():
         try:
             return json.loads(path.read_text())
-        except json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             return {}
     return {}
 
 
 def save_state(path: Path, data: dict[str, Any]) -> None:
-    path.write_text(json.dumps(data, indent=2))
+    try:
+        path.write_text(json.dumps(data, indent=2))
+    except OSError:
+        return

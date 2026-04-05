@@ -137,7 +137,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.clean_timing:
         log.info("clean timing + profile dirs")
-        clean_dirs()
+        try:
+            clean_dirs()
+        except OSError as e:
+            emit_json({"error": str(e), "step": "clean_dirs"})
+            return 1
         result["clean_timing"] = "ok"
 
     result["gpus"] = gpu_info()

@@ -30,15 +30,17 @@ def test_wait_http_ok_returns_true_on_200():
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = MagicMock(return_value=False)
     mock_resp.status = 200
-    with patch("urllib.request.urlopen", return_value=mock_resp):
+    with patch("scripts.bench.remote.service_ctl._NO_PROXY_OPENER") as mock_opener:
+        mock_opener.open.return_value = mock_resp
         assert _wait_http_ok("http://127.0.0.1:8080/health", timeout_s=5)
 
 
 def test_wait_http_ok_returns_false_on_timeout():
     from urllib.error import URLError
-    with patch("urllib.request.urlopen", side_effect=URLError("refused")), \
+    with patch("scripts.bench.remote.service_ctl._NO_PROXY_OPENER") as mock_opener, \
          patch("time.sleep"), \
          patch("time.monotonic", side_effect=[0, 0.5, 1.0, 6.0]):
+        mock_opener.open.side_effect = URLError("refused")
         assert not _wait_http_ok("http://127.0.0.1:8080/health", timeout_s=5)
 
 

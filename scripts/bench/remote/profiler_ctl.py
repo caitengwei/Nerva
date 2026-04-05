@@ -200,8 +200,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.command == "stop":
-        if not args.all and not args.key:
-            emit_json({"error": "stop requires --all or --key <key>", "step": "stop"})
+        if args.all == bool(args.key):
+            emit_json({"error": "stop requires exactly one of --all or --key <key>", "step": "stop"})
             return 1
         state = load_state(PROFILER_STATE_FILE)
         stopped = stop_profilers(state, all_=args.all, key=args.key)
