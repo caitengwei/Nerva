@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         log.info("git pull")
         try:
             result.update(git_pull())
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
             emit_json({"error": str(e), "step": "git_pull"})
             return 1
     else:
@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         log.info("uv sync")
         try:
             result["uv_sync"] = uv_sync()
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
             emit_json({"error": str(e), "step": "uv_sync"})
             return 1
 
@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
             result["docker_images"] = docker_pull_images(
                 [VLLM_IMAGE, TRITON_IMAGE]
             )
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
             emit_json({"error": str(e), "step": "docker_pull"})
             return 1
 

@@ -255,10 +255,18 @@ def service_status(state: dict[str, Any]) -> dict[str, Any]:
 
 def _parse_targets(targets_str: str) -> list[str]:
     valid = {"nerva", "vllm", "triton"}
-    targets = [t.strip() for t in targets_str.split(",")]
-    invalid = set(targets) - valid
+    seen: set[str] = set()
+    targets = []
+    for t in targets_str.split(","):
+        t = t.strip()
+        if t and t not in seen:
+            targets.append(t)
+            seen.add(t)
+    invalid = seen - valid
     if invalid:
         raise ValueError(f"Unknown targets: {invalid}. Valid: {valid}")
+    if not targets:
+        raise ValueError("targets must not be empty")
     return targets
 
 
@@ -293,19 +301,23 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         state = load_state(STATE_FILE)
 
-        if args.mode == "mock":
-            scenario = build_cpu_mock_perf_compare_scenario(
-                triton_model_repo=args.triton_repo,
-            )
-        else:
-            if not args.model_path:
-                emit_json({"error": "--model-path required for real mode", "step": "start"})
-                return 1
-            scenario = build_linux_gpu_perf_compare_scenario(
-                model_path=args.model_path,
-                triton_repo=args.triton_repo,
-                container_cli="docker",
-            )
+        try:
+            if args.mode == "mock":
+                scenario = build_cpu_mock_perf_compare_scenario(
+                    triton_model_repo=args.triton_repo,
+                )
+            else:
+                if not args.model_path:
+                    emit_json({"error": "--model-path required for real mode", "step": "start"})
+                    return 1
+                scenario = build_linux_gpu_perf_compare_scenario(
+                    model_path=args.model_path,
+                    triton_repo=args.triton_repo,
+                    container_cli="docker",
+                )
+        except ValueError as e:
+            emit_json({"error": str(e), "step": "build_scenario"})
+            return 1
 
         out: dict[str, Any] = {}
         for target in targets:

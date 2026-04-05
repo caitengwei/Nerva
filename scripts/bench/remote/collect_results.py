@@ -30,6 +30,13 @@ def collect_archive(
     archive_path: Path,
 ) -> dict[str, Any]:
     archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_abs = archive_path.resolve()
+    for src in (output_root, timing_dir, profile_dir):
+        if src.exists() and archive_abs.is_relative_to(src.resolve()):
+            raise ValueError(
+                f"archive_path {archive_path} is inside source dir {src}; "
+                "this would corrupt the archive (file included while being written)"
+            )
     manifest: dict[str, int] = {}
 
     with tarfile.open(archive_path, "w:gz") as tar:
