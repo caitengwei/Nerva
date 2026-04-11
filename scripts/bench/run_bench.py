@@ -22,6 +22,7 @@ if __package__ in {None, ""}:
 from scripts.bench.config import BenchConfig, load_bench_config
 from scripts.bench.loadgen import LoadgenResult, run_closed_loop
 from scripts.bench.targets.nerva_binary_rpc import NervaBinaryRPCTarget
+from scripts.bench.targets.triton_grpc_stream import TritonGrpcStreamingTarget
 from scripts.bench.targets.triton_infer import TritonInferTarget
 from scripts.bench.targets.vllm_openai_api import VLLMOpenAIAPITarget
 
@@ -275,6 +276,12 @@ def _build_target_from_args(args: argparse.Namespace, target_name: str) -> Bench
     if target_name == "vllm":
         return VLLMOpenAIAPITarget(base_url=args.vllm_url, model_name=args.vllm_model)
     if target_name == "triton":
+        if getattr(args, "triton_transport", "http") == "grpc-streaming":
+            return TritonGrpcStreamingTarget(
+                base_url=getattr(args, "triton_grpc_url", "127.0.0.1:8003"),
+                model_name=args.triton_model,
+                stream=getattr(args, "triton_stream", True),
+            )
         return TritonInferTarget(base_url=args.triton_url, model_name=args.triton_model)
     raise ValueError(f"unknown target: {target_name}")
 
@@ -285,8 +292,21 @@ def _target_endpoint(args: argparse.Namespace, target_name: str) -> str:
     if target_name == "vllm":
         return f"{args.vllm_url.rstrip('/')}/v1/completions"
     if target_name == "triton":
+        if getattr(args, "triton_transport", "http") == "grpc-streaming":
+            stream_flag = getattr(args, "triton_stream", True)
+            suffix = "stream" if stream_flag else "stream=false"
+            return f"grpc://{args.triton_grpc_url}/models/{args.triton_model}#{suffix}"
         return f"{args.triton_url.rstrip('/')}/v2/models/{args.triton_model}/infer"
     raise ValueError(f"unknown target: {target_name}")
+
+
+def _parse_bool_arg(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes"}:
+        return True
+    if normalized in {"false", "0", "no"}:
+        return False
+    raise argparse.ArgumentTypeError("expected boolean (true/false)")
 
 
 def _summary_from_result(run: BenchmarkRun, result: LoadgenResult) -> dict[str, Any]:
@@ -393,6 +413,18 @@ def _cli(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--vllm-url", default="http://127.0.0.1:8001")
     parser.add_argument("--vllm-model", default="mm_vllm")
     parser.add_argument("--triton-url", default="http://127.0.0.1:8002")
+    parser.add_argument("--triton-grpc-url", default="127.0.0.1:8003")
+    parser.add_argument(
+        "--triton-transport",
+        choices=["http", "grpc-streaming"],
+        default="http",
+    )
+    parser.add_argument(
+        "--triton-stream",
+        type=_parse_bool_arg,
+        default=True,
+        help="for grpc-streaming: set STREAM input (true/false, default: true)",
+    )
     parser.add_argument("--triton-model", default="mm_vllm")
 
     parser.add_argument("--output-root", default="bench-results")

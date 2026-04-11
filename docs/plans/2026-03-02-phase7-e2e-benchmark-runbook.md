@@ -67,7 +67,7 @@ uv run python scripts/bench/infra/prepare_triton_repo.py \
 
 nerdctl run --rm --gpus all --network host --ipc host \
   -v /tmp/phase7-triton-repo:/models \
-  nvcr.io/nvidia/tritonserver:24.08-py3 \
+  nvcr.io/nvidia/tritonserver:26.03-py3 \
   tritonserver \
   --model-repository=/models \
   --http-port=8002 \

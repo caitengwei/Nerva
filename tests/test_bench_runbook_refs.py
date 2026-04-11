@@ -36,7 +36,7 @@ def test_runbook_mentions_nerdctl_gpu_commands() -> None:
     assert text.count("nerdctl run --rm --gpus all") >= 2
     assert "--network host --ipc host" in text
     assert "vllm/vllm-openai:v0.6.0" in text
-    assert "nvcr.io/nvidia/tritonserver:24.08-py3" in text
+    assert "nvcr.io/nvidia/tritonserver:26.03-py3" in text
     assert "--vllm-model /models" in text
     assert "--require-real-backend" in text
 

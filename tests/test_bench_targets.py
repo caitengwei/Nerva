@@ -4,10 +4,12 @@ from typing import Any
 
 import msgpack
 import scripts.bench.targets.nerva_binary_rpc as nerva_binary_rpc
+import scripts.bench.targets.triton_grpc_stream as triton_grpc_stream
 import scripts.bench.targets.triton_infer as triton_infer
 import scripts.bench.targets.vllm_openai_api as vllm_openai_api
 from scripts.bench.targets.base import TargetResponse
 from scripts.bench.targets.nerva_binary_rpc import NervaBinaryRPCTarget
+from scripts.bench.targets.triton_grpc_stream import StreamingChunk, TritonGrpcStreamingTarget
 from scripts.bench.targets.triton_infer import TritonInferTarget
 from scripts.bench.targets.vllm_openai_api import VLLMOpenAIAPITarget
 
@@ -462,3 +464,78 @@ def test_triton_infer_sends_stream_false_tensor() -> None:
     # data[0] must be a valid base64 string decoding to the original bytes
     decoded = base64.b64decode(image_input["data"][0])
     assert decoded == image_bytes
+
+
+def test_triton_grpc_stream_builds_raw_bytes_inputs() -> None:
+    image_bytes = b"\xde\xad\xbe\xef" * 4
+    payload = {
+        "text": "hello",
+        "image_bytes": image_bytes,
+        "max_tokens": 256,
+        "temperature": 1.0,
+        "top_p": 1.0,
+    }
+
+    tensors = triton_grpc_stream._build_triton_grpc_tensors(payload, deadline_ms=5000)
+    by_name = {tensor.name: tensor for tensor in tensors}
+
+    assert by_name["TEXT"].value == "hello"
+    assert by_name["IMAGE_BYTES"].value == image_bytes
+    assert by_name["STREAM"].value is True
+    assert by_name["DEADLINE_MS"].value == 5000
+
+
+def test_triton_grpc_stream_respects_stream_flag() -> None:
+    payload = {
+        "text": "hello",
+        "image_bytes": b"1234",
+        "max_tokens": 16,
+        "temperature": 1.0,
+        "top_p": 1.0,
+    }
+
+    tensors = triton_grpc_stream._build_triton_grpc_tensors(
+        payload,
+        deadline_ms=5000,
+        stream=False,
+    )
+    by_name = {tensor.name: tensor for tensor in tensors}
+
+    assert by_name["STREAM"].value is False
+
+
+async def test_triton_grpc_streaming_aggregates_chunks_and_records_ttft(
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def sender(
+        base_url: str,
+        model_name: str,
+        tensors: list[triton_grpc_stream.GrpcTensor],
+        timeout_ms: int,
+    ) -> Any:
+        captured["base_url"] = base_url
+        captured["model_name"] = model_name
+        captured["timeout_ms"] = timeout_ms
+        captured["tensors"] = tensors
+        yield StreamingChunk(text="hel")
+        yield StreamingChunk(text="hello")
+
+    ticks = iter([1_000_000_000, 1_015_000_000, 1_040_000_000])
+    monkeypatch.setattr(triton_grpc_stream.time, "perf_counter_ns", lambda: next(ticks))
+
+    target = TritonGrpcStreamingTarget(
+        base_url="127.0.0.1:8003",
+        model_name="mm_vllm",
+        sender=sender,
+    )
+    resp = await target.infer({"text": "hi", "image_bytes": b"\x00" * 16}, deadline_ms=1000)
+
+    assert resp.ok is True
+    assert resp.output_text == "hello"
+    assert resp.ttft_ms == 15.0
+    assert resp.latency_ms == 40.0
+    assert captured["base_url"] == "127.0.0.1:8003"
+    assert captured["model_name"] == "mm_vllm"
+    assert captured["timeout_ms"] == 1000

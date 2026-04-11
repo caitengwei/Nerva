@@ -9,8 +9,11 @@ import scripts.bench.run_bench as run_bench_module
 from scripts.bench.run_bench import (
     DEFAULT_IMAGE_SIZE_BYTES,
     BenchmarkRun,
+    _build_target_from_args,
+    _cli,
     _detect_backend_mode,
     _payload_for_target,
+    _target_endpoint,
     build_artifact_dir,
     build_matrix,
     execute_benchmark_run,
@@ -192,6 +195,43 @@ async def test_detect_backend_mode_marks_nerva_unknown_when_health_not_ready() -
         return 503, {"status": "starting"}
 
     assert await _detect_backend_mode(_Args(), "nerva", health_getter=getter) == "unknown"
+
+
+def test_build_target_from_args_uses_triton_grpc_streaming_when_selected() -> None:
+    class _Args:
+        nerva_url = "http://127.0.0.1:8080"
+        nerva_pipeline = "mm_vllm"
+        vllm_url = "http://127.0.0.1:8001"
+        vllm_model = "mm_vllm"
+        triton_url = "http://127.0.0.1:8002"
+        triton_grpc_url = "127.0.0.1:8003"
+        triton_model = "mm_vllm"
+        triton_transport = "grpc-streaming"
+        triton_stream = False
+
+    target = _build_target_from_args(_Args(), "triton")
+    assert type(target).__name__ == "TritonGrpcStreamingTarget"
+    assert getattr(target, "_stream") is False
+
+
+def test_cli_parses_triton_grpc_streaming_flags_and_endpoint() -> None:
+    args = _cli(
+        [
+            "--target",
+            "triton",
+            "--triton-transport",
+            "grpc-streaming",
+            "--triton-grpc-url",
+            "127.0.0.1:9003",
+            "--triton-stream",
+            "false",
+        ]
+    )
+
+    assert args.triton_transport == "grpc-streaming"
+    assert args.triton_grpc_url == "127.0.0.1:9003"
+    assert args.triton_stream is False
+    assert _target_endpoint(args, "triton") == "grpc://127.0.0.1:9003/models/mm_vllm#stream=false"
 
 
 async def test_default_health_getter_reuses_and_closes_module_client(monkeypatch: pytest.MonkeyPatch) -> None:

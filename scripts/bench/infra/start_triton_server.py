@@ -10,6 +10,7 @@ import subprocess
 from typing import TYPE_CHECKING, Any, cast
 
 import uvicorn
+from scripts.bench.infra.perf_compare_scenario import DEFAULT_TRITON_IMAGE
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -97,8 +98,8 @@ def _cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--triton-image",
-        default="nvcr.io/nvidia/tritonserver:24.08-py3",
-        help="Triton container image (default: nvcr.io/nvidia/tritonserver:24.08-py3)",
+        default=DEFAULT_TRITON_IMAGE,
+        help=f"Triton container image (default: {DEFAULT_TRITON_IMAGE})",
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)

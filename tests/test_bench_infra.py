@@ -4,6 +4,7 @@ import argparse
 from typing import TYPE_CHECKING
 
 import pytest
+from scripts.bench.infra.perf_compare_scenario import DEFAULT_TRITON_IMAGE
 from scripts.bench.infra.prepare_triton_repo import prepare_triton_repo
 from scripts.bench.infra.start_triton_server import _resolve_model_name, build_triton_command
 from scripts.bench.infra.start_triton_server import main as triton_main
@@ -112,11 +113,12 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
     assert "deadline_ms" in infer_py
     assert "DEADLINE_EXCEEDED" in infer_py
     assert "TRITONSERVER_RESPONSE_COMPLETE_FINAL" in infer_py
+    assert "async def execute(self, requests)" in infer_py
+    assert "asyncio.gather" in infer_py
     assert "asyncio.timeout" in infer_py
-    assert "run_coroutine_threadsafe" in infer_py
     assert "get_response_sender" in infer_py
     assert "TritonError" in infer_py
-    assert "def finalize(self)" in infer_py
+    assert "run_coroutine_threadsafe" not in infer_py
 
     ensemble_cfg = (repo / "mm_vllm" / "config.pbtxt").read_text()
     assert "}\n  {" not in ensemble_cfg
@@ -140,6 +142,30 @@ def test_prepare_triton_repo_builds_ensemble_pipeline(tmp_path: Path) -> None:
 
     postprocess_py = (repo / "mm_postprocess" / "1" / "model.py").read_text()
     assert "raw_text = _to_str(text_raw)" in postprocess_py
+
+
+def test_prepare_triton_repo_cpu_mock_uses_async_decoupled_infer(tmp_path: Path) -> None:
+    repo = prepare_triton_repo(
+        tmp_path / "repo-cpu-mock",
+        model_name="mm_vllm",
+        cpu_mock=True,
+        mock_token_latency_ms=0.5,
+    )
+
+    infer_cfg = (repo / "mm_infer" / "config.pbtxt").read_text()
+    assert "max_batch_size: 0" in infer_cfg
+    assert "decoupled: true" in infer_cfg
+
+    infer_py = (repo / "mm_infer" / "1" / "model.py").read_text()
+    assert "async def execute(self, requests)" in infer_py
+    assert "await asyncio.sleep" in infer_py
+    assert "time.sleep" not in infer_py
+    assert "get_response_sender" in infer_py
+    assert "TRITONSERVER_RESPONSE_COMPLETE_FINAL" in infer_py
+    assert "asyncio.gather" in infer_py
+    assert "stream_t = pb_utils.get_input_tensor_by_name" in infer_py
+    assert "if stream:" in infer_py
+    assert "for token_idx in range(max_tokens):" in infer_py
 
 
 def test_prepare_triton_repo_escapes_vllm_model_name_with_repr(tmp_path: Path) -> None:
@@ -172,6 +198,10 @@ def test_triton_launch_mode_requires_explicit_mock_opt_in() -> None:
     assert resolve_triton_mode(binary_exists=False, allow_mock=True) == "mock"
     with pytest.raises(RuntimeError, match="tritonserver executable not found"):
         resolve_triton_mode(binary_exists=False, allow_mock=False)
+
+
+def test_default_triton_image_tracks_26_03_release() -> None:
+    assert DEFAULT_TRITON_IMAGE == "nvcr.io/nvidia/tritonserver:26.03-py3"
 
 
 async def test_wait_service_ready_retries_for_vllm() -> None:

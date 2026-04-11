@@ -94,6 +94,19 @@ def test_linux_gpu_perf_compare_scenario_uses_nerdctl() -> None:
     assert "vllm/vllm-openai:v0.6.0" in " ".join(scenario.vllm_container_cmd)
 
 
+def test_linux_gpu_perf_compare_scenario_supports_triton_grpc_streaming() -> None:
+    scenario = build_linux_gpu_perf_compare_scenario(
+        model_path="/models/Qwen/Qwen2.5-7B-Instruct",
+        triton_repo="/tmp/mm_vllm-triton-repo",
+        triton_transport="grpc-streaming",
+        triton_grpc_url="127.0.0.1:9003",
+    )
+
+    triton_bench_cmd = " ".join(scenario.benchmark_cmd_by_target["triton"])
+    assert "--triton-transport grpc-streaming" in triton_bench_cmd
+    assert "--triton-grpc-url 127.0.0.1:9003" in triton_bench_cmd
+
+
 def test_linux_gpu_perf_compare_scenario_rejects_empty_concurrency_levels() -> None:
     with pytest.raises(ValueError, match="must not be empty"):
         build_linux_gpu_perf_compare_scenario(

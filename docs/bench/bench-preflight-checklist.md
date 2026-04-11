@@ -65,7 +65,7 @@ uv run python scripts/bench/infra/prepare_triton_repo.py \
 podman run --rm \
     -p 8002:8002 -p 8003:8003 -p 8004:8004 \
     -v /tmp/triton_cpu_full_mock:/models \
-    nvcr.io/nvidia/tritonserver:24.08-py3 \
+    nvcr.io/nvidia/tritonserver:26.03-py3 \
     tritonserver --model-repository=/models \
       --http-port=8002 --grpc-port=8003 --metrics-port=8004
 ```
@@ -145,7 +145,7 @@ podman run --rm -d --name triton \
     -p 8002:8001 \   # gRPC
     -p 8003:8002 \   # Metrics
     -v /private/tmp/triton_repo:/models:ro \
-    nvcr.io/nvidia/tritonserver:24.08-py3 \
+    nvcr.io/nvidia/tritonserver:26.03-py3 \
     tritonserver --model-repository=/models --http-thread-count=16
 ```
 
@@ -195,7 +195,7 @@ MOCK_TOKEN_LATENCY_MS=0.5 uv run uvicorn \
 podman run --rm \
     -p 8002:8002 -p 8003:8003 -p 8004:8004 \
     -v /private/tmp/triton_cpu_mock:/models \
-    nvcr.io/nvidia/tritonserver:24.08-py3 \
+    nvcr.io/nvidia/tritonserver:26.03-py3 \
     tritonserver --model-repository=/models \
       --http-port=8002 --grpc-port=8003 --metrics-port=8004 \
       --http-thread-count=20 \

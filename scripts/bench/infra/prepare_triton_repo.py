@@ -244,7 +244,6 @@ def _infer_model_py(*, vllm_model_name: str) -> str:
         "from __future__ import annotations\n"
         "\n"
         "import asyncio\n"
-        "import threading\n"
         "import uuid\n"
         "\n"
         "import numpy as np\n"
@@ -263,36 +262,14 @@ def _infer_model_py(*, vllm_model_name: str) -> str:
         "        import vllm\n"
         f"        engine_args = vllm.AsyncEngineArgs(model={vllm_model_literal})\n"
         "        self._engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)\n"
-        "        self._loop = asyncio.new_event_loop()\n"
-        "        self._thread = threading.Thread(\n"
-        "            target=self._loop.run_forever, daemon=True\n"
-        "        )\n"
-        "        self._thread.start()\n"
         "\n"
-        "    def finalize(self):\n"
-        "        loop = getattr(self, '_loop', None)\n"
-        "        thread = getattr(self, '_thread', None)\n"
-        "        self._engine = None\n"
-        "        self._loop = None\n"
-        "        self._thread = None\n"
-        "        if loop is not None:\n"
-        "            try:\n"
-        "                loop.call_soon_threadsafe(loop.stop)\n"
-        "            except Exception:\n"
-        "                pass\n"
-        "        if (\n"
-        "            thread is not None\n"
-        "            and thread.is_alive()\n"
-        "            and thread is not threading.current_thread()\n"
-        "        ):\n"
-        "            thread.join(timeout=5.0)\n"
-        "\n"
-        "    def execute(self, requests):\n"
+        "    async def execute(self, requests):\n"
+        "        tasks = []\n"
         "        for request in requests:\n"
-            "            sender = request.get_response_sender()\n"
-        "            asyncio.run_coroutine_threadsafe(\n"
-        "                self._handle(request, sender), self._loop\n"
-        "            )\n"
+        "            sender = request.get_response_sender()\n"
+        "            tasks.append(self._handle(request, sender))\n"
+        "        if tasks:\n"
+        "            await asyncio.gather(*tasks)\n"
         "        return None\n"
         "\n"
         "    async def _handle(self, request, sender):\n"
@@ -390,17 +367,15 @@ def _infer_model_py(*, vllm_model_name: str) -> str:
 def _infer_model_py_cpu_mock(*, token_latency_ms: float = 0.5) -> str:
     """Generate mm_infer model.py that simulates LLM latency without vLLM/GPU.
 
-    Non-decoupled (returns response list) so the Triton HTTP /v2/.../infer endpoint
-    works — decoupled models are gRPC-only in Triton.
-    Each Triton instance blocks for the simulated duration; set instance_count
-    to match target concurrency.
+    Uses Triton async/decoupled execution so the mock matches the non-blocking
+    scheduling model of the real vLLM-backed mm_infer.
     Delay = max_tokens * token_latency_ms milliseconds.
     """
     latency_literal = repr(float(token_latency_ms))
     return (
         "from __future__ import annotations\n"
         "\n"
-        "import time\n"
+        "import asyncio\n"
         "\n"
         "import numpy as np\n"
         "import triton_python_backend_utils as pb_utils\n"
@@ -412,16 +387,56 @@ def _infer_model_py_cpu_mock(*, token_latency_ms: float = 0.5) -> str:
         "    def initialize(self, args):\n"
         "        del args\n"
         "\n"
-        "    def execute(self, requests):\n"
-        "        responses = []\n"
+        "    async def execute(self, requests):\n"
+        "        tasks = []\n"
         "        for request in requests:\n"
+        "            sender = request.get_response_sender()\n"
+        "            tasks.append(self._handle(request, sender))\n"
+        "        if tasks:\n"
+        "            await asyncio.gather(*tasks)\n"
+        "        return None\n"
+        "\n"
+        "    async def _handle(self, request, sender):\n"
+        "        try:\n"
         "            max_tokens_t = pb_utils.get_input_tensor_by_name(request, 'MAX_TOKENS')\n"
         "            max_tokens = max(int(max_tokens_t.as_numpy().reshape(-1)[0]), 1)\n"
-        "            time.sleep(max_tokens * _TOKEN_LATENCY_MS / 1000.0)\n"
+        "            stream_t = pb_utils.get_input_tensor_by_name(request, 'STREAM')\n"
+        "            stream = (\n"
+        "                bool(stream_t.as_numpy().reshape(-1)[0])\n"
+        "                if stream_t is not None\n"
+        "                else False\n"
+        "            )\n"
+        "            if stream:\n"
+        "                tokens = []\n"
+        "                for token_idx in range(max_tokens):\n"
+        "                    await asyncio.sleep(_TOKEN_LATENCY_MS / 1000.0)\n"
+        "                    tokens.append('tok')\n"
+        "                    text = ' '.join(tokens)\n"
+        "                    out = pb_utils.Tensor('TEXT', np.array([text], dtype=object))\n"
+        "                    flags = (\n"
+        "                        pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL\n"
+        "                        if token_idx == max_tokens - 1\n"
+        "                        else 0\n"
+        "                    )\n"
+        "                    sender.send(\n"
+        "                        pb_utils.InferenceResponse(output_tensors=[out]),\n"
+        "                        flags=flags,\n"
+        "                    )\n"
+        "                return\n"
+        "            await asyncio.sleep(max_tokens * _TOKEN_LATENCY_MS / 1000.0)\n"
         "            text = ' '.join(['tok'] * max_tokens)\n"
         "            out = pb_utils.Tensor('TEXT', np.array([text], dtype=object))\n"
-        "            responses.append(pb_utils.InferenceResponse(output_tensors=[out]))\n"
-        "        return responses\n"
+        "            sender.send(\n"
+        "                pb_utils.InferenceResponse(output_tensors=[out]),\n"
+        "                flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
+        "            )\n"
+        "        except Exception as exc:\n"
+        "            sender.send(\n"
+        "                pb_utils.InferenceResponse(\n"
+        "                    error=pb_utils.TritonError(str(exc))\n"
+        "                ),\n"
+        "                flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,\n"
+        "            )\n"
     )
 
 
@@ -432,11 +447,7 @@ _CPU_MOCK_INSTANCE_COUNT = 20
 
 
 def _infer_model_config_cpu_mock(model_name: str) -> str:
-    """Config for the non-decoupled CPU mock mm_infer.
-
-    Omits model_transaction_policy so the Triton HTTP endpoint accepts the model.
-    Sets instance_group to _CPU_MOCK_INSTANCE_COUNT for concurrent request handling.
-    """
+    """Config for the async/decoupled CPU mock mm_infer."""
     instance_group = (
         "instance_group [\n"
         f"  {{ kind: KIND_CPU count: {_CPU_MOCK_INSTANCE_COUNT} }}\n"
@@ -447,6 +458,9 @@ def _infer_model_config_cpu_mock(model_name: str) -> str:
         'backend: "python"\n'
         'max_batch_size: 0\n'
         f"{instance_group}"
+        "model_transaction_policy {\n"
+        "  decoupled: true\n"
+        "}\n"
         'input [\n'
         '  { name: "PROMPT" data_type: TYPE_STRING dims: [ 1 ] },\n'
         '  { name: "MAX_TOKENS" data_type: TYPE_INT32 dims: [ 1 ] },\n'

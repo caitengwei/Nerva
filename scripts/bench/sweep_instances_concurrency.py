@@ -29,6 +29,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from scripts.bench.infra.perf_compare_scenario import DEFAULT_TRITON_IMAGE
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_INSTANCES = list(range(1, 11))
@@ -162,7 +164,7 @@ class TritonServer:
                 "-p", f"{self.http_port + 1}:8001",
                 "-p", f"{self.http_port + 2}:8002",
                 "-v", f"{self._repo}:/models:ro",
-                "nvcr.io/nvidia/tritonserver:24.08-py3",
+                DEFAULT_TRITON_IMAGE,
                 "tritonserver",
                 "--model-repository=/models",
                 "--http-thread-count=16",

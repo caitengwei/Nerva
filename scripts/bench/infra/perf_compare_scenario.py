@@ -7,7 +7,7 @@ DEFAULT_CONCURRENCY_LEVELS = [1, 32, 128, 512, 1000]
 DEFAULT_CPU_MOCK_CONCURRENCY_LEVELS = [1, 2, 4, 8, 16, 32]
 DEFAULT_CPU_MOCK_TOKEN_LATENCY_MS = 0.5
 DEFAULT_VLLM_IMAGE = "vllm/vllm-openai:v0.6.0"
-DEFAULT_TRITON_IMAGE = "nvcr.io/nvidia/tritonserver:24.08-py3"
+DEFAULT_TRITON_IMAGE = "nvcr.io/nvidia/tritonserver:26.03-py3"
 DEFAULT_VLLM_URL = "http://127.0.0.1:8001"
 DEFAULT_VLLM_MODEL_NAME = "/models"
 DEFAULT_MAX_TOKENS = 256
@@ -44,6 +44,8 @@ def _build_benchmark_cmd(
     warmup_seconds: int,
     sample_seconds: int,
     require_real_backend: bool,
+    triton_transport: str = "http",
+    triton_grpc_url: str = "127.0.0.1:8003",
 ) -> list[str]:
     cmd: list[str] = [
         "uv",
@@ -75,6 +77,10 @@ def _build_benchmark_cmd(
             str(sample_seconds),
         ]
     )
+    if "triton" in targets:
+        cmd.extend(["--triton-transport", triton_transport])
+        if triton_transport == "grpc-streaming":
+            cmd.extend(["--triton-grpc-url", triton_grpc_url])
     if require_real_backend:
         cmd.append("--require-real-backend")
     return cmd
@@ -97,6 +103,8 @@ def build_linux_gpu_perf_compare_scenario(
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
     require_real_backend: bool = True,
+    triton_transport: str = "http",
+    triton_grpc_url: str = "127.0.0.1:8003",
 ) -> PerfCompareScenario:
     if not model_path:
         raise ValueError("model_path must not be empty")
@@ -118,6 +126,10 @@ def build_linux_gpu_perf_compare_scenario(
         raise ValueError("temperature must be finite and >= 0")
     if not math.isfinite(top_p) or top_p <= 0 or top_p > 1:
         raise ValueError("top_p must be finite and in (0, 1]")
+    if triton_transport not in {"http", "grpc-streaming"}:
+        raise ValueError("triton_transport must be 'http' or 'grpc-streaming'")
+    if not triton_grpc_url:
+        raise ValueError("triton_grpc_url must not be empty")
 
     if concurrency_levels is None:
         levels = list(DEFAULT_CONCURRENCY_LEVELS)
@@ -203,6 +215,8 @@ def build_linux_gpu_perf_compare_scenario(
             warmup_seconds=warmup_seconds,
             sample_seconds=sample_seconds,
             require_real_backend=require_real_backend,
+            triton_transport=triton_transport,
+            triton_grpc_url=triton_grpc_url,
         ),
         "vllm": _build_benchmark_cmd(
             targets=["vllm"],
@@ -216,6 +230,8 @@ def build_linux_gpu_perf_compare_scenario(
             warmup_seconds=warmup_seconds,
             sample_seconds=sample_seconds,
             require_real_backend=require_real_backend,
+            triton_transport=triton_transport,
+            triton_grpc_url=triton_grpc_url,
         ),
         "triton": _build_benchmark_cmd(
             targets=["triton"],
@@ -229,6 +245,8 @@ def build_linux_gpu_perf_compare_scenario(
             warmup_seconds=warmup_seconds,
             sample_seconds=sample_seconds,
             require_real_backend=require_real_backend,
+            triton_transport=triton_transport,
+            triton_grpc_url=triton_grpc_url,
         ),
     }
     return PerfCompareScenario(
@@ -251,6 +269,8 @@ def build_cpu_mock_perf_compare_scenario(
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
     token_latency_ms: float = DEFAULT_CPU_MOCK_TOKEN_LATENCY_MS,
+    triton_transport: str = "http",
+    triton_grpc_url: str = "127.0.0.1:8003",
 ) -> PerfCompareScenario:
     """Build a CPU-only mock scenario for Nerva vs Triton e2e comparison.
 
@@ -285,6 +305,10 @@ def build_cpu_mock_perf_compare_scenario(
         raise ValueError("top_p must be finite and in (0, 1]")
     if not math.isfinite(token_latency_ms) or token_latency_ms < 0:
         raise ValueError("token_latency_ms must be finite and >= 0")
+    if triton_transport not in {"http", "grpc-streaming"}:
+        raise ValueError("triton_transport must be 'http' or 'grpc-streaming'")
+    if not triton_grpc_url:
+        raise ValueError("triton_grpc_url must not be empty")
 
     if concurrency_levels is None:
         levels = list(DEFAULT_CPU_MOCK_CONCURRENCY_LEVELS)
@@ -330,6 +354,8 @@ def build_cpu_mock_perf_compare_scenario(
             warmup_seconds=warmup_seconds,
             sample_seconds=sample_seconds,
             require_real_backend=False,
+            triton_transport=triton_transport,
+            triton_grpc_url=triton_grpc_url,
         ),
         "triton": _build_benchmark_cmd(
             targets=["triton"],
@@ -343,6 +369,8 @@ def build_cpu_mock_perf_compare_scenario(
             warmup_seconds=warmup_seconds,
             sample_seconds=sample_seconds,
             require_real_backend=False,
+            triton_transport=triton_transport,
+            triton_grpc_url=triton_grpc_url,
         ),
     }
     # vllm_container_cmd / triton_container_cmd not needed for CPU mock;
