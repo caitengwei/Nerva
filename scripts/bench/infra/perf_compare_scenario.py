@@ -105,6 +105,7 @@ def build_linux_gpu_perf_compare_scenario(
     require_real_backend: bool = True,
     triton_transport: str = "http",
     triton_grpc_url: str = "127.0.0.1:8003",
+    pre_post_instance_count: int = 20,
 ) -> PerfCompareScenario:
     if not model_path:
         raise ValueError("model_path must not be empty")
@@ -182,6 +183,8 @@ def build_linux_gpu_perf_compare_scenario(
         workload,
         "--vllm-model",
         vllm_model_name,
+        "--pre-post-instance-count",
+        str(pre_post_instance_count),
     ]
     triton_container_cmd = [
         container_cli,
@@ -271,6 +274,7 @@ def build_cpu_mock_perf_compare_scenario(
     token_latency_ms: float = DEFAULT_CPU_MOCK_TOKEN_LATENCY_MS,
     triton_transport: str = "http",
     triton_grpc_url: str = "127.0.0.1:8003",
+    pre_post_instance_count: int = 20,
 ) -> PerfCompareScenario:
     """Build a CPU-only mock scenario for Nerva vs Triton e2e comparison.
 
